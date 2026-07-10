@@ -1,0 +1,55 @@
+# Local stack: API + worker against local Supabase Postgres/Storage.
+#
+# Prerequisites:
+#   1. `supabase start` in this repo (Postgres on 54322, Storage S3 endpoint from `supabase status`)
+#   2. Copy `.env.example` → `.env` and fill DATABASE_URL, S3, Turnstile (or BOTCHECK_DISABLED=true for API), pepper
+#   3. `docker compose --env-file .env up --build`
+#
+# Supabase itself is NOT started by Compose — use the Supabase CLI for local DB/Storage/Auth.
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      HTTP_ADDR: ":8080"
+      # Host gateway so containers reach supabase on the host machine.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@host.docker.internal:54322/postgres}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      target: worker
+    ports:
+      - "8081:8081"
+    env_file:
+      - .env
+    environment:
+      WORKER_HEALTH_ADDR: ":8081"
+      WORKER_CLEANUP_INTERVAL_SECONDS: ${WORKER_CLEANUP_INTERVAL_SECONDS:-60}
+      WORKER_SCAN_INTERVAL_SECONDS: ${WORKER_SCAN_INTERVAL_SECONDS:-15}
+      WORKER_NOTIFY_INTERVAL_SECONDS: ${WORKER_NOTIFY_INTERVAL_SECONDS:-10}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:postgres@host.docker.internal:54322/postgres}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      - api

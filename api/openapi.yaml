@@ -1,0 +1,318 @@
+openapi: 3.1.0
+info:
+  title: KOLSS Platform Public API
+  version: 0.2.0
+  description: >
+    Public contact-form API for PL/UA sites. Create returns a draft submission and
+    optional signed upload URLs. Lead + attachments are created only on successful complete
+    (or immediately when create has no files).
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Health
+  - name: PublicLeads
+paths:
+  /health/live:
+    get:
+      tags: [Health]
+      operationId: healthLive
+      summary: Liveness probe
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /health/ready:
+    get:
+      tags: [Health]
+      operationId: healthReady
+      summary: Readiness probe (database connectivity)
+      responses:
+        '200':
+          description: Dependencies are ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Dependencies unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/public/sites/{siteCode}/lead-submissions:
+    post:
+      tags: [PublicLeads]
+      operationId: createLeadSubmission
+      summary: Create a draft lead submission (and signed uploads)
+      description: >
+        Validates contact fields, consent, honeypot, files allowlist, and Turnstile.
+        Does not create a CRM lead unless files is empty (auto-complete).
+      parameters:
+        - $ref: '#/components/parameters/SiteCode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadSubmissionRequest'
+      responses:
+        '201':
+          description: Submission created
+          headers:
+            X-Request-Id:
+              schema: { type: string, format: uuid }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadSubmissionCreateResponse'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadSubmissionCreateResponse'
+        '400':
+          description: Validation or consent error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Bot check failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Unknown or inactive site
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Bot provider unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /v1/public/sites/{siteCode}/lead-submissions/{submissionId}/complete:
+    post:
+      tags: [PublicLeads]
+      operationId: completeLeadSubmission
+      summary: Complete submission after uploads
+      parameters:
+        - $ref: '#/components/parameters/SiteCode'
+        - name: submissionId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: X-Submission-Token
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LeadSubmissionCompleteRequest'
+      responses:
+        '201':
+          description: Lead created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadSubmissionCompleteResponse'
+        '200':
+          description: Idempotent replay
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LeadSubmissionCompleteResponse'
+        '401':
+          description: Invalid submission token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Submission not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Expired or conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Upload incomplete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  parameters:
+    SiteCode:
+      name: siteCode
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SiteCode'
+  schemas:
+    SiteCode:
+      type: string
+      enum: [kolss-pl, kolss-ua]
+    FileMeta:
+      type: object
+      additionalProperties: false
+      required: [client_file_id, filename, content_type, size_bytes]
+      properties:
+        client_file_id: { type: string, format: uuid }
+        filename: { type: string, maxLength: 255 }
+        content_type:
+          type: string
+          enum: [application/pdf, text/plain, text/csv, image/jpeg, image/png, image/webp]
+        size_bytes: { type: integer, minimum: 1, maximum: 5242880 }
+    LeadSubmissionRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - idempotency_key
+        - name
+        - phone
+        - privacy_accepted
+        - privacy_policy_version
+        - bot_token
+      properties:
+        idempotency_key: { type: string, format: uuid }
+        name: { type: string, minLength: 2, maxLength: 200 }
+        phone: { type: string, minLength: 7, maxLength: 50 }
+        email: { type: [string, 'null'], format: email, maxLength: 254 }
+        city: { type: [string, 'null'], maxLength: 200 }
+        project_description: { type: [string, 'null'], maxLength: 5000 }
+        privacy_accepted: { type: boolean }
+        privacy_policy_version: { type: string, minLength: 1, maxLength: 32 }
+        page_url: { type: [string, 'null'], format: uri, maxLength: 2048 }
+        bot_token: { type: string, maxLength: 2048 }
+        website: { type: [string, 'null'], maxLength: 200, description: Honeypot }
+        files:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/FileMeta' }
+    UploadSession:
+      type: object
+      additionalProperties: false
+      required: [file_id, client_file_id, method, upload_url, headers, expires_at]
+      properties:
+        file_id: { type: string, format: uuid }
+        client_file_id: { type: string, format: uuid }
+        method: { type: string, enum: [PUT] }
+        upload_url: { type: string, format: uri }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        expires_at: { type: string, format: date-time }
+    LeadSubmissionCreateResponse:
+      type: object
+      additionalProperties: false
+      required: [submission_id, status, duplicate, uploads, request_id]
+      properties:
+        submission_id: { type: string, format: uuid }
+        status: { type: string, enum: [awaiting_upload, accepted] }
+        duplicate: { type: boolean }
+        submission_token: { type: string }
+        uploads:
+          type: array
+          items: { $ref: '#/components/schemas/UploadSession' }
+        lead_id: { type: [string, 'null'], format: uuid }
+        request_id: { type: string, format: uuid }
+    LeadSubmissionCompleteRequest:
+      type: object
+      additionalProperties: false
+      required: [files]
+      properties:
+        files:
+          type: array
+          maxItems: 5
+          items:
+            type: object
+            additionalProperties: false
+            required: [file_id]
+            properties:
+              file_id: { type: string, format: uuid }
+              etag: { type: [string, 'null'] }
+    LeadSubmissionCompleteResponse:
+      type: object
+      additionalProperties: false
+      required: [id, submission_id, status, duplicate, file_count, request_id]
+      properties:
+        id: { type: string, format: uuid }
+        submission_id: { type: string, format: uuid }
+        status: { type: string, enum: [accepted] }
+        duplicate: { type: boolean }
+        file_count: { type: integer, minimum: 0 }
+        request_id: { type: string, format: uuid }
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error, request_id]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - validation_error
+                - consent_required
+                - privacy_version_mismatch
+                - site_not_found
+                - submission_not_found
+                - rate_limited
+                - payload_too_large
+                - bot_check_failed
+                - bot_provider_unavailable
+                - invalid_submission_token
+                - upload_incomplete
+                - submission_expired
+                - submission_conflict
+                - internal_error
+                - not_ready
+            message: { type: string }
+            details:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [field, message]
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+        request_id: { type: string, format: uuid }
