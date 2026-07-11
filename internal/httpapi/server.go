@@ -32,9 +32,11 @@ type Server struct {
 	bodyLimit      int64
 	completeLimit  int64
 	rateLimiter    *rateLimiter
+	enabled        bool
 }
 
 type Options struct {
+	Enabled            bool
 	AllowedOrigins     []string
 	BodyLimitBytes     int64
 	CompleteLimitBytes int64
@@ -70,6 +72,7 @@ func NewServer(svc LeadService, opts Options) *Server {
 		bodyLimit:      opts.BodyLimitBytes,
 		completeLimit:  completeLimit,
 		rateLimiter:    newRateLimiter(opts.RateLimitPerMinute),
+		enabled:        opts.Enabled,
 	}
 }
 
@@ -138,17 +141,17 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 }
 
 type createRequest struct {
-	IdempotencyKey       string           `json:"idempotency_key"`
-	Name                 string           `json:"name"`
-	Phone                string           `json:"phone"`
-	Email                *string          `json:"email"`
-	City                 *string          `json:"city"`
-	ProjectDescription   *string          `json:"project_description"`
-	PrivacyAccepted      bool             `json:"privacy_accepted"`
-	PrivacyPolicyVersion string           `json:"privacy_policy_version"`
-	PageURL              *string          `json:"page_url"`
-	BotToken             string           `json:"bot_token"`
-	Website              *string          `json:"website"`
+	IdempotencyKey       string            `json:"idempotency_key"`
+	Name                 string            `json:"name"`
+	Phone                string            `json:"phone"`
+	Email                *string           `json:"email"`
+	City                 *string           `json:"city"`
+	ProjectDescription   *string           `json:"project_description"`
+	PrivacyAccepted      bool              `json:"privacy_accepted"`
+	PrivacyPolicyVersion string            `json:"privacy_policy_version"`
+	PageURL              *string           `json:"page_url"`
+	BotToken             string            `json:"bot_token"`
+	Website              *string           `json:"website"`
 	Files                []fileMetaRequest `json:"files"`
 }
 
@@ -161,6 +164,10 @@ type fileMetaRequest struct {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	requestID := requestIDFrom(r.Context())
+	if !s.enabled {
+		writeError(w, http.StatusServiceUnavailable, "feature_disabled", "public site forms are disabled", requestID, nil)
+		return
+	}
 	siteCode := r.PathValue("siteCode")
 
 	if !validation.IsAllowedSiteCode(siteCode) {
@@ -226,13 +233,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	if validated.HoneypotTriggered {
 		writeJSON(w, http.StatusCreated, map[string]any{
-			"submission_id":     uuid.Nil.String(),
-			"status":            "accepted",
-			"duplicate":         false,
-			"submission_token":  "",
-			"uploads":           []any{},
-			"lead_id":           uuid.Nil.String(),
-			"request_id":        requestID,
+			"submission_id":    uuid.Nil.String(),
+			"status":           "accepted",
+			"duplicate":        false,
+			"submission_token": "",
+			"uploads":          []any{},
+			"lead_id":          uuid.Nil.String(),
+			"request_id":       requestID,
 		})
 		return
 	}
@@ -296,6 +303,10 @@ type completeFileRequest struct {
 
 func (s *Server) handleComplete(w http.ResponseWriter, r *http.Request) {
 	requestID := requestIDFrom(r.Context())
+	if !s.enabled {
+		writeError(w, http.StatusServiceUnavailable, "feature_disabled", "public site forms are disabled", requestID, nil)
+		return
+	}
 	siteCode := r.PathValue("siteCode")
 	submissionID, err := uuid.Parse(r.PathValue("submissionId"))
 	if err != nil || !validation.IsAllowedSiteCode(siteCode) {

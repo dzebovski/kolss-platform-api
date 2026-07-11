@@ -63,12 +63,9 @@ func (e Enqueuer) telegramChatID(officeCode string) string {
 	case "kyiv":
 		return e.TelegramChatIDKyiv
 	case "warsaw":
-		if e.TelegramChatIDWarsaw != "" {
-			return e.TelegramChatIDWarsaw
-		}
-		return e.TelegramChatIDKyiv
+		return e.TelegramChatIDWarsaw
 	default:
-		return e.TelegramChatIDKyiv
+		return ""
 	}
 }
 

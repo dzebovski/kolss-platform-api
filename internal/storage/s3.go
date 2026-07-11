@@ -65,6 +65,25 @@ func (s *S3) PresignPut(ctx context.Context, in PresignPutInput) (PresignPutResu
 	}, nil
 }
 
+func (s *S3) PresignGet(ctx context.Context, in PresignGetInput) (PresignGetResult, error) {
+	expires := in.Expires
+	if expires <= 0 {
+		expires = 10 * time.Minute
+	}
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(in.Bucket),
+		Key:    aws.String(in.Key),
+	}
+	if in.Filename != "" {
+		input.ResponseContentDisposition = aws.String(fmt.Sprintf("attachment; filename=%q", in.Filename))
+	}
+	out, err := s.presigner.PresignGetObject(ctx, input, s3.WithPresignExpires(expires))
+	if err != nil {
+		return PresignGetResult{}, err
+	}
+	return PresignGetResult{URL: out.URL, ExpiresAt: time.Now().UTC().Add(expires)}, nil
+}
+
 func (s *S3) Head(ctx context.Context, bucket, key string) (ObjectInfo, error) {
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),

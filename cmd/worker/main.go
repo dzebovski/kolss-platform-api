@@ -33,33 +33,10 @@ func main() {
 	}
 	defer pool.Close()
 
-	s3, err := storage.NewS3(storage.S3Config{
-		Endpoint:        cfg.S3Endpoint,
-		Region:          cfg.S3Region,
-		AccessKeyID:     cfg.S3AccessKeyID,
-		SecretAccessKey: cfg.S3SecretAccessKey,
-	})
-	if err != nil {
-		logger.Error("storage client failed", "error", err)
-		os.Exit(1)
-	}
-	store := worker.StorageAdapter{Inner: s3}
-
 	runCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	runner := &worker.Runner{
-		Cleanup: &worker.Cleanup{
-			Pool:   pool,
-			Store:  store,
-			Logger: logger,
-		},
-		Scanner: &worker.Scanner{
-			Pool:    pool,
-			Store:   store,
-			Malware: worker.NoopMalwareScanner{},
-			Logger:  logger,
-		},
 		Notify: &worker.Notifier{
 			Pool:   pool,
 			Creds:  cfg,
@@ -70,6 +47,23 @@ func main() {
 		CleanupInterval: cfg.CleanupInterval,
 		ScanInterval:    cfg.ScanInterval,
 		NotifyInterval:  cfg.NotifyInterval,
+	}
+	if cfg.SiteJobsEnabled {
+		s3, err := storage.NewS3(storage.S3Config{
+			Endpoint:        cfg.S3Endpoint,
+			Region:          cfg.S3Region,
+			AccessKeyID:     cfg.S3AccessKeyID,
+			SecretAccessKey: cfg.S3SecretAccessKey,
+		})
+		if err != nil {
+			logger.Error("storage client failed", "error", err)
+			os.Exit(1)
+		}
+		store := worker.StorageAdapter{Inner: s3}
+		runner.Cleanup = &worker.Cleanup{Pool: pool, Store: store, Logger: logger}
+		runner.Scanner = &worker.Scanner{Pool: pool, Store: store, Malware: worker.NoopMalwareScanner{}, Logger: logger}
+	} else {
+		logger.Info("worker running in notification-only mode")
 	}
 	runner.Start(runCtx)
 

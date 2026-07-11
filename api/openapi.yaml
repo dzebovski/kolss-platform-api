@@ -1,16 +1,24 @@
 openapi: 3.1.0
 info:
-  title: KOLSS Platform Public API
-  version: 0.2.0
+  title: KOLSS Platform API
+  version: 1.0.0
   description: >
     Public contact-form API for PL/UA sites. Create returns a draft submission and
     optional signed upload URLs. Lead + attachments are created only on successful complete
     (or immediately when create has no files).
 servers:
+  - url: https://api.kolss.eu
+    description: Production
   - url: http://localhost:8080
     description: Local development
 tags:
   - name: Health
+  - name: Context
+  - name: Leads
+  - name: Workflow
+  - name: Users
+  - name: Reports
+  - name: Integrations
   - name: PublicLeads
 paths:
   /health/live:
@@ -43,6 +51,254 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /v1/me:
+    get:
+      tags: [Context]
+      operationId: getMe
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Authenticated CRM context
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResponse' }
+        '401': { $ref: '#/components/responses/CRMError' }
+  /v1/offices:
+    get:
+      tags: [Context]
+      operationId: listOffices
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Offices available to the actor
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/Office' } }
+  /v1/loss-reasons:
+    get:
+      tags: [Context]
+      operationId: listLossReasons
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: CRM loss reasons
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/LossReason' } }
+  /v1/leads:
+    get:
+      tags: [Leads]
+      operationId: listLeads
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: cursor, in: query, schema: { type: string } }
+        - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 100 } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: source, in: query, schema: { type: string } }
+        - { name: workflow, in: query, schema: { type: string } }
+        - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
+        - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
+      responses:
+        '200':
+          description: Cursor-paginated leads
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadListResponse' }
+        '403': { $ref: '#/components/responses/CRMError' }
+    post:
+      tags: [Leads]
+      operationId: createLead
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLeadRequest' }
+      responses:
+        '201':
+          description: Lead created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+        '400': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}:
+    parameters: [{ $ref: '#/components/parameters/LeadId' }]
+    get:
+      tags: [Leads]
+      operationId: getLead
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Lead and workflow relations
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadDetailResponse' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [Leads]
+      operationId: updateLead
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200':
+          description: Updated version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                properties: { version: { type: integer } }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/events/{eventId}:
+    patch:
+      tags: [Leads]
+      operationId: updateLeadEvent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [eventType, comment]
+              properties: { eventType: { type: string }, comment: { type: string } }
+      responses:
+        '200': { description: Event updated }
+  /v1/leads/{leadId}/actions/{action}:
+    post:
+      tags: [Workflow]
+      operationId: performLeadAction
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - name: action
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [take, first-call, schedule-visit, reschedule-visit, complete-visit, comment, close, mark-successful]
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, additionalProperties: true }
+      responses:
+        '200': { description: Workflow action committed transactionally }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/archive:
+    post:
+      tags: [Leads]
+      operationId: archiveLead
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { '200': { description: Lead archived }, '403': { $ref: '#/components/responses/CRMError' } }
+  /v1/leads/{leadId}/restore:
+    post:
+      tags: [Leads]
+      operationId: restoreLead
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { '200': { description: Lead restored }, '403': { $ref: '#/components/responses/CRMError' } }
+  /v1/users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Super-admin user list }, '403': { $ref: '#/components/responses/CRMError' } }
+    post:
+      tags: [Users]
+      operationId: createUser
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '201': { description: User created }, '403': { $ref: '#/components/responses/CRMError' } }
+  /v1/managers:
+    get:
+      tags: [Context]
+      operationId: listManagers
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: Active managers in the actor's accessible offices }
+  /v1/users/{userId}:
+    parameters: [{ name: userId, in: path, required: true, schema: { type: string, format: uuid } }]
+    get:
+      tags: [Users]
+      operationId: getUser
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: User }, '404': { $ref: '#/components/responses/CRMError' } }
+    patch:
+      tags: [Users]
+      operationId: updateUser
+      security: [{ bearerAuth: [] }]
+      requestBody: { required: true, content: { application/json: { schema: { type: object, additionalProperties: true } } } }
+      responses: { '200': { description: User updated } }
+  /v1/users/{userId}/{action}:
+    post:
+      tags: [Users]
+      operationId: changeUserStatus
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: action, in: path, required: true, schema: { type: string, enum: [deactivate, reactivate, delete] } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses: { '200': { description: User action completed } }
+  /v1/dashboard/overview:
+    get:
+      tags: [Reports]
+      operationId: getDashboardOverview
+      security: [{ bearerAuth: [] }]
+      responses: { '200': { description: Dashboard aggregates } }
+  /v1/reports/leads:
+    get:
+      tags: [Reports]
+      operationId: getLeadReport
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 40 } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+      responses: { '200': { description: Funnel and manager aggregates } }
+  /v1/files/{fileId}/download-url:
+    get:
+      tags: [Leads]
+      operationId: createFileDownloadURL
+      security: [{ bearerAuth: [] }]
+      parameters: [{ name: fileId, in: path, required: true, schema: { type: string, format: uuid } }]
+      responses: { '200': { description: Short-lived private download URL } }
+  /v1/integrations/google-sheets/lead-imports:
+    post:
+      tags: [Integrations]
+      operationId: importGoogleSheetLeads
+      security: [{ sheetSecret: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SheetImportRequest' }
+      responses:
+        '200': { description: Incremental or reconcile batch result }
+        '401': { $ref: '#/components/responses/CRMError' }
   /v1/public/sites/{siteCode}/lead-submissions:
     post:
       tags: [PublicLeads]
@@ -170,7 +426,36 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Supabase ES256 JWT
+    sheetSecret:
+      type: http
+      scheme: bearer
+  responses:
+    CRMError:
+      description: CRM API error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/CRMErrorResponse' }
   parameters:
+    LeadId:
+      name: leadId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 200 }
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema: { type: integer, minimum: 1 }
     SiteCode:
       name: siteCode
       in: path
@@ -178,6 +463,122 @@ components:
       schema:
         $ref: '#/components/schemas/SiteCode'
   schemas:
+    CRMErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [code, message, requestId]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        fieldErrors:
+          type: object
+          additionalProperties: { type: string }
+        requestId: { type: string, format: uuid }
+    Office:
+      type: object
+      additionalProperties: false
+      required: [id, code, name_uk, name_pl, is_active]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, enum: [kyiv, warsaw] }
+        name_uk: { type: string }
+        name_pl: { type: string }
+        is_active: { type: boolean }
+    Profile:
+      type: object
+      additionalProperties: true
+      required: [id, role, is_active]
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [office_member, office_admin, curator, super_admin] }
+        display_name: { type: [string, 'null'] }
+        is_active: { type: boolean }
+    MeResponse:
+      type: object
+      additionalProperties: false
+      required: [user, profile, offices, userOffices, permissions]
+      properties:
+        user:
+          type: object
+          required: [id]
+          properties:
+            id: { type: string, format: uuid }
+            email: { type: string, format: email }
+        profile: { $ref: '#/components/schemas/Profile' }
+        offices: { type: array, items: { $ref: '#/components/schemas/Office' } }
+        userOffices: { type: array, items: { $ref: '#/components/schemas/Office' } }
+        permissions:
+          type: object
+          additionalProperties: { type: boolean }
+    LossReason:
+      type: object
+      required: [code, label_uk, label_pl]
+      properties:
+        code: { type: string }
+        label_uk: { type: string }
+        label_pl: { type: string }
+    Lead:
+      type: object
+      additionalProperties: true
+      required: [id, office_id, source_system, external_lead_id, lead_status, workflow_status, version, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        office_id: { type: string, format: uuid }
+        source_system: { type: string }
+        source_channel: { type: [string, 'null'] }
+        external_lead_id: { type: string }
+        lead_status: { type: string }
+        workflow_status: { type: string }
+        version: { type: integer, minimum: 1 }
+        archived_at: { type: [string, 'null'], format: date-time }
+        archived_by: { type: [string, 'null'], format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    LeadListResponse:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/Lead' } }
+        nextCursor: { type: string }
+    LeadDetailResponse:
+      type: object
+      required: [lead, relations]
+      properties:
+        lead: { $ref: '#/components/schemas/Lead' }
+        relations:
+          type: object
+          additionalProperties: false
+          required: [contactAttempts, showroomVisits, contracts, events]
+          properties:
+            contactAttempts: { type: array, items: { type: object, additionalProperties: true } }
+            showroomVisits: { type: array, items: { type: object, additionalProperties: true } }
+            contracts: { type: array, items: { type: object, additionalProperties: true } }
+            events: { type: array, items: { type: object, additionalProperties: true } }
+    CreateLeadRequest:
+      type: object
+      additionalProperties: false
+      required: [officeId, source, name, phone, cityRegion, productInterest, initialMessage]
+      properties:
+        officeId: { type: string, format: uuid }
+        source: { type: string, enum: [website, facebook, office, other] }
+        name: { type: string }
+        phone: { type: string }
+        email: { type: [string, 'null'], format: email }
+        cityRegion: { type: string }
+        productInterest: { type: string }
+        estimatedBudget: { type: [number, 'null'] }
+        initialMessage: { type: string }
+    SheetImportRequest:
+      type: object
+      additionalProperties: false
+      required: [source_id, mode, rows]
+      properties:
+        source_id: { type: string, format: uuid }
+        mode: { type: string, enum: [incremental, reconcile] }
+        rows:
+          type: array
+          maxItems: 100
+          items: { type: object, additionalProperties: true }
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]

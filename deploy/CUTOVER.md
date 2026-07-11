@@ -1,92 +1,61 @@
-# Cutover checklist — kolss-platform (API + worker)
+# CRM production cutover checklist
 
-Manual steps to move public site lead submissions from Supabase Edge to DigitalOcean App Platform + Vercel Angular sites.
+## Database
 
-## 1. DigitalOcean App Platform
+- [x] Production custom backup and schema dump created before migrations.
+- [x] July migrations applied through `20260710180000`.
+- [x] Kyiv and Warsaw import sources point to separate confirmed spreadsheets.
+- [x] Last 20 rows reconciled without notifications; Warsaw gap of 19 leads imported.
+- [x] Pending/failed outbox count is zero after reconcile.
+- [ ] Keep `post-cutover-revoke-browser-data.sql` unapplied until 24 stable hours.
 
-1. Create app from [`digitalocean-app.yaml`](./digitalocean-app.yaml) (region `fra` or `ams`).
-2. Connect the `kolss-platform-api` GitHub repo; confirm Dockerfile builds stage `both`.
-3. Set **secret** values in the DO UI (names only in the YAML):
-   - `DATABASE_URL` — Supabase pooler or direct Postgres URL (prefer transaction pooler for API; session/direct for worker if using `LISTEN` later; both work with pgx pool for this MVP)
-   - `TURNSTILE_SECRET_KEY`
-   - `SUBMISSION_TOKEN_PEPPER` — long random string; must stay stable across deploys
-   - `SUPABASE_S3_ACCESS_KEY_ID` / `SUPABASE_S3_SECRET_ACCESS_KEY`
-   - `TELEGRAM_BOT_TOKEN` (optional fallback), `TELEGRAM_BOT_TOKEN_KYIV`, `TELEGRAM_BOT_TOKEN_WARSAW`
-   - `TELEGRAM_CHAT_ID_KYIV`, `TELEGRAM_CHAT_ID_WARSAW`
-   - `SLACK_WEBHOOK_URL_KYIV`, `SLACK_WEBHOOK_URL_WARSAW` (optional)
-4. Set **non-secret** values:
-   - `CORS_ALLOWED_ORIGINS` — comma-separated production + Vercel origins for PL/UA
-   - `TURNSTILE_ALLOWED_HOSTNAMES` — hostnames allowed by Turnstile (no scheme), e.g. `kolss.pl,www.kolss.pl,kolss.com.ua,www.kolss.com.ua,kolss-web-pl.vercel.app,kolss-web-ua.vercel.app`
-   - `SUPABASE_S3_ENDPOINT` — from Supabase Dashboard → Storage → S3 connection
-   - `SUPABASE_S3_REGION` — often `eu-central-1` or `auto`
-   - `CRM_SITE_URL_PUBLIC` — public CRM origin used in notification links (`…/crm/leads/{id}`)
-5. Confirm `BOTCHECK_DISABLED=false` in production.
-6. Deploy; verify:
-   - API `GET /health/live` and `GET /health/ready`
-   - Worker process running (`run_command: worker`)
+## DigitalOcean App Platform
 
-## 2. Vercel — Angular sites
+Deploy [`digitalocean-app.yaml`](./digitalocean-app.yaml) to the existing application.
 
-Projects:
+API requirements:
 
-| Project | Repo | Notes |
-|---------|------|--------|
-| `kolss-web-pl` | `kolss-web-pl-angular` | PL site |
-| `kolss-web-ua` | `kolss-web-ua-angular` | UA site |
+- `DATABASE_URL` for `kolss_api` (or the current production DB user during transition);
+- `SUPABASE_URL`, JWKS URL, JWT issuer, and API-only `SUPABASE_SECRET_KEY`;
+- separate Kyiv/Warsaw Google Sheets import secrets;
+- `CORS_ALLOWED_ORIGINS=https://crm.kolss.eu`;
+- `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu`;
+- `PUBLIC_SITE_FORMS_ENABLED=false`.
 
-For each project:
+Worker requirements:
 
-1. Framework: Angular / Node **24** (`NODE_VERSION=24` in project env or `vercel.json` build env).
-2. Build command: `npm run build`
-3. Output: `dist/<project>/browser` (SSR server under `dist/<project>/server` — confirm Vercel Angular SSR preset or custom server entry).
-4. Set env pointing public forms at the DO API base URL (e.g. `API_BASE_URL` / `PUBLIC_API_URL` — match whatever the Angular apps expect).
-5. Attach production domains (`kolss.pl`, `kolss.com.ua`) and keep `*.vercel.app` previews if used in CORS/Turnstile.
+- `DATABASE_URL` for `kolss_worker`;
+- `WORKER_SITE_JOBS_ENABLED=false`;
+- separate Kyiv/Warsaw bot tokens/chat IDs;
+- no Supabase Auth secret and no mandatory S3 credentials.
 
-## 3. Cloudflare Turnstile
+Verify the starter `*.ondigitalocean.app` ingress first, then add `api.kolss.eu` and create the DigitalOcean-provided CNAME in GoDaddy.
 
-1. Create widgets for PL and UA production hostnames (and Vercel preview hosts if needed).
-2. Put **site keys** in the Angular apps; put the **secret key** in DO as `TURNSTILE_SECRET_KEY`.
-3. Align `TURNSTILE_ALLOWED_HOSTNAMES` with widget hostnames.
-4. Expected action: `lead_submission` (must match client widget / API config).
+## CRM / Vercel
 
-## 4. Supabase Storage
+- Set `API_BASE_URL=https://api.kolss.eu`, Supabase Auth URL/anon key, and `SITE_URL_PUBLIC=https://crm.kolss.eu`.
+- Deploy preview and test all four roles.
+- Confirm browser network traffic has no Supabase Data API, Functions, RPC, or Storage business calls.
+- Promote the verified deployment; do not dual-write.
 
-1. Follow [`STORAGE_CORS.md`](./STORAGE_CORS.md) — allow `PUT`/`HEAD` from PL/UA origins.
-2. Enable **S3 access keys** in Dashboard → Storage → S3.
-3. Confirm private bucket `lead-uploads-quarantine` exists (migration `20260710140000_lead_submissions_quarantine.sql`).
-4. Paste endpoint + keys into DO env (`SUPABASE_S3_*`).
+## Google Apps Script
 
-## 5. Database
+Source IDs:
 
-1. Apply platform migrations to the target Supabase project (including quarantine / submission tables). Do **not** use local `supabase db push` casually against prod — use a controlled migration path.
-2. Confirm `sites` rows `kolss-pl` / `kolss-ua` and `allowed_origins`.
+- Kyiv: `f21b5c38-ed09-4cf1-ab23-7e6e854f3f4d`
+- Warsaw: `31b5aa24-7b79-48a3-b3fe-178cf2aea0b2`
 
-## 6. Smoke checklist
+In both spreadsheets paste the canonical script, preserve the existing `LAST_ROW`, set the office-specific secret, change the URL to `https://api.kolss.eu/v1/integrations/google-sheets/lead-imports`, and verify one five-minute trigger.
 
-- [ ] `POST /v1/public/sites/kolss-pl/lead-submissions` creates submission (Turnstile OK)
-- [ ] Presigned upload PUT to quarantine succeeds from browser origin
-- [ ] Complete endpoint accepts token and moves submission forward
-- [ ] Worker marks upload `pending_scan` → `ready` (or `blocked` for bad magic bytes)
-- [ ] Expired `awaiting_upload` → `expired`; quarantine objects deleted; uploads `deleted`
-- [ ] Telegram (and Slack if configured) receives:
+Current Sheet last rows at reconciliation time:
 
-```text
-🔔 Нова заявка!
-👤 Ім'я: ...
-📞 Тел: ...
-🌐 Джерело: Site Form
-🔗 Посилання на CRM: ...
-```
+- Kyiv: 81
+- Warsaw: 24
 
-- [ ] CORS rejects unknown origins
-- [ ] `BOTCHECK_DISABLED` is **false** in prod
-- [ ] Old Edge `site-lead` path disabled or traffic cut over
+## Final 24-hour lock-down
 
-## Worker env reference
+After 24 stable hours:
 
-| Variable | Default |
-|----------|---------|
-| `WORKER_HEALTH_ADDR` | `:8081` |
-| `WORKER_CLEANUP_INTERVAL_SECONDS` | `60` |
-| `WORKER_SCAN_INTERVAL_SECONDS` | `15` |
-| `WORKER_NOTIFY_INTERVAL_SECONDS` | `10` |
+1. Apply the reviewed browser Data API grant revocation.
+2. Confirm CRM still operates entirely through Go.
+3. Undeploy `import-lead`, `site-lead`, `process-notifications`, and `admin-users` Edge Functions.

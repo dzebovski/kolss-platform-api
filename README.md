@@ -1,49 +1,50 @@
 # KOLSS Platform API
 
-Go API + worker for public PL/UA contact-form lead submissions against CRM Supabase.
+Go API and worker for the KOLSS CRM, Google Sheets imports, and notification outbox.
+
+## Current phase
+
+- CRM uses Supabase directly only for Auth/session.
+- All CRM data, workflow, reports, user admin, archive, and file URL operations go through this API.
+- Kyiv and Warsaw Google Sheets use the office-secret import endpoint.
+- Worker runs notification-only by default and sends Telegram per office.
+- Public UA/PL site forms are feature-disabled (`PUBLIC_SITE_FORMS_ENABLED=false`).
 
 ## Local run
 
 ```bash
 cp .env.example .env
-# BOTCHECK_DISABLED=true and empty S3 is OK for contact-only local tests
 set -a && source .env && set +a
 go run ./cmd/api
-# optional worker (requires S3 credentials):
 go run ./cmd/worker
 ```
 
-Health:
+Notification-only worker does not require S3 credentials. Health endpoints:
 
-- API `GET /health/live`, `GET /health/ready`
-- Worker `GET /health/live` on `WORKER_HEALTH_ADDR` (default `:8081`)
+- API: `GET /health/live`, `GET /health/ready`
+- Worker: `GET /health/live` on `WORKER_HEALTH_ADDR` (default `:8081`)
 
-## Contract
+## Contract and migrations
 
-OpenAPI: [`api/openapi.yaml`](./api/openapi.yaml)
+- OpenAPI 1.0: [`api/openapi.yaml`](./api/openapi.yaml)
+- Canonical Supabase migrations: [`supabase/migrations`](./supabase/migrations)
+- Manual post-stability grant revocation: [`deploy/post-cutover-revoke-browser-data.sql`](./deploy/post-cutover-revoke-browser-data.sql)
+- Google Apps Script: [`integrations/google-apps-script/meta-leads-import.gs`](./integrations/google-apps-script/meta-leads-import.gs)
 
-1. `POST /v1/public/sites/{siteCode}/lead-submissions` — draft + signed uploads (or auto-complete when `files: []`)
-2. Browser `PUT` to quarantine Storage
-3. `POST .../complete` + `X-Submission-Token` — create lead, attachments `pending_scan`, enqueue notifications
-
-## Schema
-
-Remote ownership: `/Users/dzebski/Documents/kolss/kolss-crm/supabase/migrations`  
-Local mirror: `supabase/migrations/` (do **not** `db push` baseline from this repo to remote).
+Do not run the browser grant revocation until the Go-backed CRM has been stable in production for 24 hours.
 
 ## Deploy
 
-- [`Dockerfile`](./Dockerfile) — targets `api`, `worker`, `both`
-- [`compose.yaml`](./compose.yaml)
+- [`Dockerfile`](./Dockerfile) — `api`, `worker`, and `both` targets
 - [`deploy/digitalocean-app.yaml`](./deploy/digitalocean-app.yaml)
 - [`deploy/CUTOVER.md`](./deploy/CUTOVER.md)
-- [`deploy/STORAGE_CORS.md`](./deploy/STORAGE_CORS.md)
 
-## Tests
+Production backend domain: `https://api.kolss.eu`.
+
+## Verification
 
 ```bash
 go test ./...
 go vet ./...
-go build -o bin/api ./cmd/api
-go build -o bin/worker ./cmd/worker
+go build ./cmd/api ./cmd/worker
 ```

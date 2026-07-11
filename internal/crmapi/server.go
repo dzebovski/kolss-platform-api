@@ -1,0 +1,268 @@
+package crmapi
+
+import (
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	platformauth "github.com/dzebovski/kolss-platform-api/internal/auth"
+	"github.com/dzebovski/kolss-platform-api/internal/notifications"
+	"github.com/dzebovski/kolss-platform-api/internal/storage"
+)
+
+type Options struct {
+	Pool               *pgxpool.Pool
+	Verifier           *platformauth.Verifier
+	AllowedOrigins     []string
+	ImportSecretKyiv   string
+	ImportSecretWarsaw string
+	ImportBodyLimit    int64
+	SupabaseURL        string
+	SupabaseSecretKey  string
+	CRMSiteURLPublic   string
+	Notifier           notifications.Enqueuer
+	Storage            storage.ObjectStorage
+	Logger             *slog.Logger
+}
+
+type Server struct {
+	pool               *pgxpool.Pool
+	verifier           *platformauth.Verifier
+	allowedOrigins     map[string]struct{}
+	importSecretKyiv   string
+	importSecretWarsaw string
+	importBodyLimit    int64
+	supabaseURL        string
+	supabaseSecretKey  string
+	crmSiteURLPublic   string
+	notifier           notifications.Enqueuer
+	storage            storage.ObjectStorage
+	logger             *slog.Logger
+}
+
+func New(opts Options) *Server {
+	origins := make(map[string]struct{}, len(opts.AllowedOrigins))
+	for _, origin := range opts.AllowedOrigins {
+		origins[strings.TrimSpace(origin)] = struct{}{}
+	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	limit := opts.ImportBodyLimit
+	if limit <= 0 {
+		limit = 512 * 1024
+	}
+	return &Server{
+		pool:               opts.Pool,
+		verifier:           opts.Verifier,
+		allowedOrigins:     origins,
+		importSecretKyiv:   opts.ImportSecretKyiv,
+		importSecretWarsaw: opts.ImportSecretWarsaw,
+		importBodyLimit:    limit,
+		supabaseURL:        strings.TrimRight(opts.SupabaseURL, "/"),
+		supabaseSecretKey:  opts.SupabaseSecretKey,
+		crmSiteURLPublic:   strings.TrimRight(opts.CRMSiteURLPublic, "/"),
+		notifier:           opts.Notifier,
+		storage:            opts.Storage,
+		logger:             logger,
+	}
+}
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/me", s.handleMe)
+	mux.HandleFunc("GET /v1/offices", s.handleOffices)
+	mux.HandleFunc("GET /v1/loss-reasons", s.handleLossReasons)
+	mux.HandleFunc("GET /v1/leads", s.handleListLeads)
+	mux.HandleFunc("POST /v1/leads", s.handleCreateLead)
+	mux.HandleFunc("GET /v1/leads/{leadId}", s.handleGetLead)
+	mux.HandleFunc("PATCH /v1/leads/{leadId}", s.handleUpdateLead)
+	mux.HandleFunc("PATCH /v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
+	mux.HandleFunc("POST /v1/leads/{leadId}/archive", s.handleArchiveLead)
+	mux.HandleFunc("POST /v1/leads/{leadId}/restore", s.handleRestoreLead)
+	mux.HandleFunc("POST /v1/leads/{leadId}/actions/{action}", s.handleLeadAction)
+	mux.HandleFunc("GET /v1/users", s.handleListUsers)
+	mux.HandleFunc("GET /v1/managers", s.handleListManagers)
+	mux.HandleFunc("POST /v1/users", s.handleCreateUser)
+	mux.HandleFunc("GET /v1/users/{userId}", s.handleGetUser)
+	mux.HandleFunc("PATCH /v1/users/{userId}", s.handleUpdateUser)
+	mux.HandleFunc("POST /v1/users/{userId}/deactivate", s.handleDeactivateUser)
+	mux.HandleFunc("POST /v1/users/{userId}/reactivate", s.handleReactivateUser)
+	mux.HandleFunc("POST /v1/users/{userId}/delete", s.handleDeleteUser)
+	mux.HandleFunc("GET /v1/dashboard/overview", s.handleDashboardOverview)
+	mux.HandleFunc("GET /v1/reports/leads", s.handleLeadReport)
+	mux.HandleFunc("GET /v1/files/{fileId}/download-url", s.handleFileDownloadURL)
+	mux.HandleFunc("POST /v1/integrations/google-sheets/lead-imports", s.handleSheetImport)
+	mux.HandleFunc("OPTIONS /", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	return s.middleware(mux)
+}
+
+func (s *Server) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if requestID == "" {
+			requestID = uuid.NewString()
+		}
+		w.Header().Set("X-Request-Id", requestID)
+		w.Header().Set("Content-Type", "application/json")
+		s.applyCORS(w, r)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		r = r.WithContext(ctx)
+
+		if r.URL.Path == "/v1/integrations/google-sheets/lead-imports" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		actor, err := s.authenticate(r)
+		if err != nil {
+			s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Unauthorized", nil)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, actor)))
+	})
+}
+
+type requestIDContextKey struct{}
+
+func requestID(ctx context.Context) string {
+	value, _ := ctx.Value(requestIDContextKey{}).(string)
+	return value
+}
+
+func (s *Server) authenticate(r *http.Request) (Actor, error) {
+	authHeader := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authHeader, "Bearer ") || s.verifier == nil {
+		return Actor{}, errors.New("missing bearer")
+	}
+	claims, err := s.verifier.Verify(r.Context(), strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer ")))
+	if err != nil {
+		return Actor{}, err
+	}
+	userID, err := uuid.Parse(claims.Subject)
+	if err != nil {
+		return Actor{}, err
+	}
+	actor, err := s.loadActor(r.Context(), userID)
+	actor.Email = claims.Email
+	return actor, err
+}
+
+func (s *Server) loadActor(ctx context.Context, userID uuid.UUID) (Actor, error) {
+	var actor Actor
+	actor.ID = userID
+	actor.OfficeIDs = make(map[uuid.UUID]struct{})
+	if err := s.pool.QueryRow(ctx, `
+		select role::text, display_name, is_active
+		from public.profiles where id = $1
+	`, userID).Scan(&actor.Role, &actor.DisplayName, &actor.IsActive); err != nil || !actor.IsActive {
+		return Actor{}, errors.New("inactive or missing profile")
+	}
+	rows, err := s.pool.Query(ctx, `select office_id from public.user_office_memberships where user_id = $1`, userID)
+	if err != nil {
+		return Actor{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var officeID uuid.UUID
+		if err := rows.Scan(&officeID); err != nil {
+			return Actor{}, err
+		}
+		actor.OfficeIDs[officeID] = struct{}{}
+	}
+	return actor, rows.Err()
+}
+
+func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if _, ok := s.allowedOrigins[origin]; origin != "" && ok {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-Id")
+		w.Header().Set("Access-Control-Max-Age", "600")
+	}
+}
+
+func (s *Server) importOffice(secret string) string {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return ""
+	}
+	if secureEqual(secret, s.importSecretKyiv) {
+		return "kyiv"
+	}
+	if secureEqual(secret, s.importSecretWarsaw) {
+		return "warsaw"
+	}
+	return ""
+}
+
+func secureEqual(a, b string) bool {
+	if a == "" || b == "" || len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) error {
+	if limit <= 0 {
+		limit = 64 * 1024
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	defer r.Body.Close()
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	return decoder.Decode(dst)
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, fields map[string]string) {
+	if status >= http.StatusInternalServerError {
+		s.logger.Error("crm api request failed", "status", status, "code", code, "request_id", requestID(r.Context()), "path", r.URL.Path)
+	}
+	writeJSON(w, status, errorResponse{Code: code, Message: message, FieldErrors: fields, RequestID: requestID(r.Context())})
+}
+
+func parseIfMatch(r *http.Request) (int64, bool) {
+	raw := strings.Trim(strings.TrimSpace(r.Header.Get("If-Match")), `"`)
+	if raw == "" {
+		return 0, false
+	}
+	var value int64
+	_, err := fmt.Sscan(raw, &value)
+	return value, err == nil && value > 0
+}
+
+func retryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 0:
+		return 30 * time.Second
+	case 1:
+		return 2 * time.Minute
+	case 2:
+		return 10 * time.Minute
+	case 3:
+		return 30 * time.Minute
+	default:
+		return 2 * time.Hour
+	}
+}

@@ -35,9 +35,22 @@ type PresignPutResult struct {
 	ExpiresAt time.Time
 }
 
+type PresignGetInput struct {
+	Bucket   string
+	Key      string
+	Filename string
+	Expires  time.Duration
+}
+
+type PresignGetResult struct {
+	URL       string
+	ExpiresAt time.Time
+}
+
 // ObjectStorage is the quarantine object store used by API/worker.
 type ObjectStorage interface {
 	PresignPut(ctx context.Context, in PresignPutInput) (PresignPutResult, error)
+	PresignGet(ctx context.Context, in PresignGetInput) (PresignGetResult, error)
 	Head(ctx context.Context, bucket, key string) (ObjectInfo, error)
 	GetStream(ctx context.Context, bucket, key string) (io.ReadCloser, ObjectInfo, error)
 	Delete(ctx context.Context, bucket, key string) error
@@ -91,6 +104,18 @@ func (m *Memory) PresignPut(_ context.Context, in PresignPutInput) (PresignPutRe
 		Headers: map[string]string{
 			"content-type": in.ContentType,
 		},
+		ExpiresAt: expiresAt,
+	}, nil
+}
+
+func (m *Memory) PresignGet(_ context.Context, in PresignGetInput) (PresignGetResult, error) {
+	expires := in.Expires
+	if expires <= 0 {
+		expires = 10 * time.Minute
+	}
+	expiresAt := time.Now().UTC().Add(expires)
+	return PresignGetResult{
+		URL:       fmt.Sprintf("%s/%s/%s?download=1&expires=%d", m.baseURL, in.Bucket, in.Key, expiresAt.Unix()),
 		ExpiresAt: expiresAt,
 	}, nil
 }
@@ -157,6 +182,9 @@ type NilStorage struct{}
 
 func (NilStorage) PresignPut(context.Context, PresignPutInput) (PresignPutResult, error) {
 	return PresignPutResult{}, ErrNotConfigured
+}
+func (NilStorage) PresignGet(context.Context, PresignGetInput) (PresignGetResult, error) {
+	return PresignGetResult{}, ErrNotConfigured
 }
 func (NilStorage) Head(context.Context, string, string) (ObjectInfo, error) {
 	return ObjectInfo{}, ErrNotConfigured

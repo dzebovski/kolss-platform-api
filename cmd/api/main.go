@@ -10,8 +10,10 @@ import (
 	"syscall"
 	"time"
 
+	platformauth "github.com/dzebovski/kolss-platform-api/internal/auth"
 	"github.com/dzebovski/kolss-platform-api/internal/botcheck"
 	"github.com/dzebovski/kolss-platform-api/internal/config"
+	"github.com/dzebovski/kolss-platform-api/internal/crmapi"
 	"github.com/dzebovski/kolss-platform-api/internal/httpapi"
 	"github.com/dzebovski/kolss-platform-api/internal/leads"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
@@ -51,8 +53,8 @@ func main() {
 		}
 		objects = s3
 	} else {
-		objects = storage.NewMemory("https://storage.local/presign")
-		logger.Warn("using in-memory object storage; file uploads will not persist")
+		objects = storage.NilStorage{}
+		logger.Warn("object storage disabled")
 	}
 
 	var bots botcheck.BotVerifier
@@ -85,6 +87,7 @@ func main() {
 	)
 
 	server := httpapi.NewServer(svc, httpapi.Options{
+		Enabled:            cfg.PublicSiteFormsEnabled,
 		AllowedOrigins:     cfg.CORSAllowedOrigins,
 		BodyLimitBytes:     cfg.BodyLimitBytes,
 		CompleteLimitBytes: cfg.CompleteBodyLimit,
@@ -93,10 +96,33 @@ func main() {
 		BotVerifier:        bots,
 		Logger:             logger,
 	})
+	verifier := &platformauth.Verifier{
+		JWKSURL:  cfg.SupabaseJWKSURL,
+		Issuer:   cfg.SupabaseJWTIssuer,
+		Audience: "authenticated",
+	}
+	crm := crmapi.New(crmapi.Options{
+		Pool:               pool,
+		Verifier:           verifier,
+		AllowedOrigins:     cfg.CORSAllowedOrigins,
+		ImportSecretKyiv:   cfg.ImportSecretKyiv,
+		ImportSecretWarsaw: cfg.ImportSecretWarsaw,
+		ImportBodyLimit:    cfg.ImportBodyLimit,
+		SupabaseURL:        cfg.SupabaseURL,
+		SupabaseSecretKey:  cfg.SupabaseSecretKey,
+		CRMSiteURLPublic:   cfg.CRMSiteURLPublic,
+		Notifier:           notify,
+		Storage:            objects,
+		Logger:             logger,
+	})
+	root := http.NewServeMux()
+	root.Handle("/health/", server.Handler())
+	root.Handle("/v1/public/", server.Handler())
+	root.Handle("/v1/", crm.Handler())
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           server.Handler(),
+		Handler:           root,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

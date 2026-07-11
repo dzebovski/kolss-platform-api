@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -89,11 +90,14 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 
 	var row notificationRow
 	var payload []byte
+	claimToken := uuid.NewString()
 	err = tx.QueryRow(ctx, `
 		select id, lead_id, channel::text, payload, attempts
 		from public.lead_notifications
 		where status in ('pending', 'failed')
 		  and attempts < 10
+		  and next_attempt_at <= now()
+		  and (claimed_at is null or claimed_at < now() - interval '5 minutes')
 		order by created_at asc
 		limit 1
 		for update skip locked
@@ -104,13 +108,20 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 		}
 		return notifyIdle, err
 	}
+	if _, err := tx.Exec(ctx, `
+		update public.lead_notifications
+		set claimed_at=now(), claim_token=$2::uuid
+		where id=$1::uuid
+	`, row.ID, claimToken); err != nil {
+		return notifyIdle, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return notifyIdle, err
+	}
 	row.Payload = map[string]any{}
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &row.Payload); err != nil {
-			_ = n.markFailedTx(ctx, tx, row.ID, row.Attempts+1, "decode payload: "+err.Error())
-			if commitErr := tx.Commit(ctx); commitErr != nil {
-				return notifyFailed, commitErr
-			}
+			_ = n.markFailed(ctx, row.ID, claimToken, row.Attempts+1, "decode payload: "+err.Error())
 			return notifyFailed, nil
 		}
 	}
@@ -120,7 +131,7 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 	var sendErr error
 	switch row.Channel {
 	case "telegram":
-		sendErr = n.sendTelegram(ctx, client, officeCode, text)
+		sendErr = n.sendTelegram(ctx, client, officeCode, text, stringify(row.Payload["crm_url"]))
 	case "slack":
 		sendErr = n.sendSlack(ctx, client, officeCode, text)
 	default:
@@ -129,57 +140,66 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 
 	if sendErr != nil {
 		n.log().Warn("notification send failed", "id", row.ID, "channel", row.Channel, "error", sendErr)
-		if err := n.markFailedTx(ctx, tx, row.ID, row.Attempts+1, sendErr.Error()); err != nil {
-			return notifyFailed, err
-		}
-		if err := tx.Commit(ctx); err != nil {
+		if err := n.markFailed(ctx, row.ID, claimToken, row.Attempts+1, sendErr.Error()); err != nil {
 			return notifyFailed, err
 		}
 		return notifyFailed, nil
 	}
 
-	if err := n.markSentTx(ctx, tx, row.ID, row.Attempts+1); err != nil {
-		return notifyFailed, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := n.markSent(ctx, row.ID, claimToken, row.Attempts+1); err != nil {
 		return notifyFailed, err
 	}
 	return notifySent, nil
 }
 
-func (n *Notifier) markSentTx(ctx context.Context, tx pgx.Tx, id string, attempts int) error {
-	_, err := tx.Exec(ctx, `
+func (n *Notifier) markSent(ctx context.Context, id, claimToken string, attempts int) error {
+	_, err := n.Pool.Exec(ctx, `
 		update public.lead_notifications
 		set status = 'sent',
 		    sent_at = now(),
 		    attempts = $2,
-		    last_error = null
-		where id = $1::uuid
-	`, id, attempts)
+		    last_error = null,
+		    claimed_at = null,
+		    claim_token = null
+		where id = $1::uuid and claim_token=$3::uuid
+	`, id, attempts, claimToken)
 	return err
 }
 
-func (n *Notifier) markFailedTx(ctx context.Context, tx pgx.Tx, id string, attempts int, lastError string) error {
-	_, err := tx.Exec(ctx, `
+func (n *Notifier) markFailed(ctx context.Context, id, claimToken string, attempts int, lastError string) error {
+	_, err := n.Pool.Exec(ctx, `
 		update public.lead_notifications
 		set status = 'failed',
 		    attempts = $2,
-		    last_error = $3
-		where id = $1::uuid
-	`, id, attempts, truncateErr(lastError, 2000))
+		    last_error = $3,
+		    next_attempt_at = now() + $4::interval,
+		    claimed_at = null,
+		    claim_token = null
+		where id = $1::uuid and claim_token=$5::uuid
+	`, id, attempts, truncateErr(lastError, 2000), workerRetryDelay(attempts), claimToken)
 	return err
 }
 
-func (n *Notifier) sendTelegram(ctx context.Context, client *http.Client, officeCode, text string) error {
+func (n *Notifier) sendTelegram(ctx context.Context, client *http.Client, officeCode, text, crmURL string) error {
 	token := n.Creds.TelegramBotTokenFor(officeCode)
 	chatID := n.Creds.TelegramChatIDFor(officeCode)
 	if token == "" || chatID == "" {
 		return fmt.Errorf("missing Telegram config for office: %s", emptyOffice(officeCode))
 	}
-	body, _ := json.Marshal(map[string]any{
-		"chat_id": chatID,
-		"text":    text,
-	})
+	payload := map[string]any{
+		"chat_id":                  chatID,
+		"text":                     text,
+		"disable_web_page_preview": true,
+	}
+	if crmURL != "" {
+		payload["reply_markup"] = map[string]any{
+			"inline_keyboard": [][]map[string]string{{{
+				"text": "Відкрити заявку в CRM",
+				"url":  crmURL,
+			}}},
+		}
+	}
+	body, _ := json.Marshal(payload)
 	url := "https://api.telegram.org/bot" + token + "/sendMessage"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -191,9 +211,9 @@ func (n *Notifier) sendTelegram(ctx context.Context, client *http.Client, office
 		return err
 	}
 	defer res.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	_, _ = io.Copy(io.Discard, io.LimitReader(res.Body, 4096))
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("Telegram error: %d %s", res.StatusCode, strings.TrimSpace(string(respBody)))
+		return fmt.Errorf("Telegram error: status %d", res.StatusCode)
 	}
 	return nil
 }
@@ -256,14 +276,38 @@ func BuildNotificationMessage(payload map[string]any) string {
 	}
 	lines := []string{
 		"🔔 Нова заявка!",
+		"🏢 Офіс: " + officeLabel(stringify(payload["office_code"])),
 		"👤 Ім'я: " + name,
 		"📞 Тел: " + phone,
 		"🌐 Джерело: " + sourceLabel,
 	}
-	if crmURL := stringify(payload["crm_url"]); crmURL != "" {
-		lines = append(lines, "🔗 Посилання на CRM: "+crmURL)
-	}
 	return strings.Join(lines, "\n")
+}
+
+func officeLabel(code string) string {
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "kyiv":
+		return "Kyiv"
+	case "warsaw":
+		return "Warsaw"
+	default:
+		return "—"
+	}
+}
+
+func workerRetryDelay(attempt int) string {
+	switch attempt {
+	case 1:
+		return "30 seconds"
+	case 2:
+		return "2 minutes"
+	case 3:
+		return "10 minutes"
+	case 4:
+		return "30 minutes"
+	default:
+		return "2 hours"
+	}
 }
 
 func stringify(v any) string {

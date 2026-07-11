@@ -18,6 +18,7 @@ type WorkerConfig struct {
 	ScanInterval    time.Duration
 	NotifyInterval  time.Duration
 	NotifyBatchSize int
+	SiteJobsEnabled bool
 
 	QuarantineBucket string
 
@@ -47,6 +48,7 @@ func LoadWorker() (WorkerConfig, error) {
 		ScanInterval:    time.Duration(getenvInt("WORKER_SCAN_INTERVAL_SECONDS", 15)) * time.Second,
 		NotifyInterval:  time.Duration(getenvInt("WORKER_NOTIFY_INTERVAL_SECONDS", 10)) * time.Second,
 		NotifyBatchSize: getenvInt("WORKER_NOTIFY_BATCH_SIZE", 20),
+		SiteJobsEnabled: getenvBool("WORKER_SITE_JOBS_ENABLED", false),
 
 		QuarantineBucket: getenv("STORAGE_QUARANTINE_BUCKET", "lead-uploads-quarantine"),
 
@@ -71,7 +73,7 @@ func LoadWorker() (WorkerConfig, error) {
 	if cfg.DatabaseURL == "" {
 		return WorkerConfig{}, fmt.Errorf("DATABASE_URL is required")
 	}
-	if cfg.S3Endpoint == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretAccessKey == "" {
+	if cfg.SiteJobsEnabled && (cfg.S3Endpoint == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretAccessKey == "") {
 		return WorkerConfig{}, fmt.Errorf("SUPABASE_S3_ENDPOINT, SUPABASE_S3_ACCESS_KEY_ID, and SUPABASE_S3_SECRET_ACCESS_KEY are required for the worker")
 	}
 	if cfg.CleanupInterval <= 0 || cfg.ScanInterval <= 0 || cfg.NotifyInterval <= 0 {
@@ -101,15 +103,11 @@ func (c WorkerConfig) TelegramBotTokenFor(officeCode string) string {
 func (c WorkerConfig) TelegramChatIDFor(officeCode string) string {
 	switch strings.ToLower(strings.TrimSpace(officeCode)) {
 	case "kyiv":
-		if c.TelegramChatIDKyiv != "" {
-			return c.TelegramChatIDKyiv
-		}
+		return c.TelegramChatIDKyiv
 	case "warsaw":
-		if c.TelegramChatIDWarsaw != "" {
-			return c.TelegramChatIDWarsaw
-		}
+		return c.TelegramChatIDWarsaw
 	}
-	return c.TelegramChatIDKyiv
+	return ""
 }
 
 func (c WorkerConfig) SlackWebhookFor(officeCode string) string {

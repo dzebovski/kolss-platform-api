@@ -9,23 +9,32 @@ import (
 )
 
 type Config struct {
-	HTTPAddr           string
-	DatabaseURL        string
-	CORSAllowedOrigins []string
-	BodyLimitBytes     int64
-	CompleteBodyLimit  int64
-	RateLimitPerMinute int
-	ShutdownTimeout    time.Duration
+	HTTPAddr               string
+	DatabaseURL            string
+	CORSAllowedOrigins     []string
+	BodyLimitBytes         int64
+	CompleteBodyLimit      int64
+	RateLimitPerMinute     int
+	ShutdownTimeout        time.Duration
+	PublicSiteFormsEnabled bool
+
+	SupabaseURL        string
+	SupabaseJWKSURL    string
+	SupabaseJWTIssuer  string
+	SupabaseSecretKey  string
+	ImportSecretKyiv   string
+	ImportSecretWarsaw string
+	ImportBodyLimit    int64
 
 	SubmissionTokenPepper string
 	SubmissionTTL         time.Duration
 	PresignTTL            time.Duration
 	QuarantineBucket      string
 
-	BotcheckDisabled         bool
-	TurnstileSecretKey       string
+	BotcheckDisabled          bool
+	TurnstileSecretKey        string
 	TurnstileAllowedHostnames []string
-	TurnstileExpectedAction  string
+	TurnstileExpectedAction   string
 
 	S3Endpoint        string
 	S3Region          string
@@ -45,16 +54,25 @@ type Config struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr: getenv("HTTP_ADDR", ":8080"),
+		HTTPAddr:    getenv("HTTP_ADDR", ":8080"),
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		CORSAllowedOrigins: splitCSV(getenv(
 			"CORS_ALLOWED_ORIGINS",
 			"http://localhost:4200,http://localhost:4201,http://127.0.0.1:4200,http://127.0.0.1:4201",
 		)),
-		BodyLimitBytes:     int64(getenvInt("BODY_LIMIT_BYTES", 64*1024)),
-		CompleteBodyLimit:  int64(getenvInt("COMPLETE_BODY_LIMIT_BYTES", 16*1024)),
-		RateLimitPerMinute: getenvInt("RATE_LIMIT_PER_MINUTE", 30),
-		ShutdownTimeout:    time.Duration(getenvInt("SHUTDOWN_TIMEOUT_SECONDS", 10)) * time.Second,
+		BodyLimitBytes:         int64(getenvInt("BODY_LIMIT_BYTES", 64*1024)),
+		CompleteBodyLimit:      int64(getenvInt("COMPLETE_BODY_LIMIT_BYTES", 16*1024)),
+		RateLimitPerMinute:     getenvInt("RATE_LIMIT_PER_MINUTE", 30),
+		ShutdownTimeout:        time.Duration(getenvInt("SHUTDOWN_TIMEOUT_SECONDS", 10)) * time.Second,
+		PublicSiteFormsEnabled: getenvBool("PUBLIC_SITE_FORMS_ENABLED", false),
+
+		SupabaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
+		SupabaseJWKSURL:    strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),
+		SupabaseJWTIssuer:  strings.TrimSpace(os.Getenv("SUPABASE_JWT_ISSUER")),
+		SupabaseSecretKey:  strings.TrimSpace(os.Getenv("SUPABASE_SECRET_KEY")),
+		ImportSecretKyiv:   strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_KYIV")),
+		ImportSecretWarsaw: strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_WARSAW")),
+		ImportBodyLimit:    int64(getenvInt("IMPORT_BODY_LIMIT_BYTES", 512*1024)),
 
 		SubmissionTokenPepper: strings.TrimSpace(os.Getenv("SUBMISSION_TOKEN_PEPPER")),
 		SubmissionTTL:         time.Duration(getenvInt("SUBMISSION_TTL_MINUTES", 60)) * time.Minute,
@@ -87,21 +105,30 @@ func Load() (Config, error) {
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
-	if cfg.SubmissionTokenPepper == "" {
+	if cfg.PublicSiteFormsEnabled && cfg.SubmissionTokenPepper == "" {
 		return Config{}, fmt.Errorf("SUBMISSION_TOKEN_PEPPER is required")
 	}
-	if !cfg.BotcheckDisabled && cfg.TurnstileSecretKey == "" {
+	if cfg.PublicSiteFormsEnabled && !cfg.BotcheckDisabled && cfg.TurnstileSecretKey == "" {
 		return Config{}, fmt.Errorf("TURNSTILE_SECRET_KEY is required unless BOTCHECK_DISABLED=true")
 	}
-	if !cfg.BotcheckDisabled && len(cfg.TurnstileAllowedHostnames) == 0 {
+	if cfg.PublicSiteFormsEnabled && !cfg.BotcheckDisabled && len(cfg.TurnstileAllowedHostnames) == 0 {
 		return Config{}, fmt.Errorf("TURNSTILE_ALLOWED_HOSTNAMES is required unless BOTCHECK_DISABLED=true")
 	}
 	if cfg.HasS3() {
 		if cfg.S3Endpoint == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretAccessKey == "" {
 			return Config{}, fmt.Errorf("SUPABASE_S3_ENDPOINT, SUPABASE_S3_ACCESS_KEY_ID, and SUPABASE_S3_SECRET_ACCESS_KEY are required together")
 		}
-	} else if !cfg.BotcheckDisabled {
+	} else if cfg.PublicSiteFormsEnabled && !cfg.BotcheckDisabled {
 		return Config{}, fmt.Errorf("S3 storage credentials are required unless BOTCHECK_DISABLED=true")
+	}
+	if cfg.SupabaseURL == "" {
+		return Config{}, fmt.Errorf("SUPABASE_URL is required")
+	}
+	if cfg.SupabaseJWKSURL == "" {
+		cfg.SupabaseJWKSURL = cfg.SupabaseURL + "/auth/v1/.well-known/jwks.json"
+	}
+	if cfg.SupabaseJWTIssuer == "" {
+		cfg.SupabaseJWTIssuer = cfg.SupabaseURL + "/auth/v1"
 	}
 	return cfg, nil
 }

@@ -17,10 +17,10 @@ import (
 )
 
 type fakeService struct {
-	pingErr error
-	create  func(ctx context.Context, siteCode string, data validation.ValidatedLeadSubmission) (submissions.CreateResult, error)
+	pingErr  error
+	create   func(ctx context.Context, siteCode string, data validation.ValidatedLeadSubmission) (submissions.CreateResult, error)
 	complete func(ctx context.Context, siteCode string, submissionID uuid.UUID, token string, files []validation.ValidatedCompleteFile) (submissions.CompleteResult, error)
-	calls   int
+	calls    int
 }
 
 func (f *fakeService) Ping(ctx context.Context) error { return f.pingErr }
@@ -52,6 +52,7 @@ func (f *fakeService) Complete(ctx context.Context, siteCode string, submissionI
 
 func newTestServer(svc *fakeService) http.Handler {
 	return httpapi.NewServer(svc, httpapi.Options{
+		Enabled:            true,
 		AllowedOrigins:     []string{"http://localhost:4200", "http://localhost:4201"},
 		BodyLimitBytes:     64 * 1024,
 		CompleteLimitBytes: 16 * 1024,

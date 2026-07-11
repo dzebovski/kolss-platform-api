@@ -1,0 +1,446 @@
+package crmapi
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+)
+
+type userMutationRequest struct {
+	Email           string      `json:"email"`
+	DisplayName     string      `json:"displayName"`
+	Password        string      `json:"password"`
+	PasswordConfirm string      `json:"passwordConfirm"`
+	Role            string      `json:"role"`
+	OfficeIDs       []uuid.UUID `json:"officeIds"`
+	ConfirmEmail    string      `json:"confirmEmail"`
+}
+
+func (s *Server) handleListManagers(w http.ResponseWriter, r *http.Request) {
+	actor, _ := actorFromContext(r.Context())
+	var officeIDs any
+	if !actor.IsSuperAdmin() {
+		ids := make([]uuid.UUID, 0, len(actor.OfficeIDs))
+		for id := range actor.OfficeIDs {
+			ids = append(ids, id)
+		}
+		officeIDs = ids
+	}
+	rows, err := s.pool.Query(r.Context(), `
+		select p.id,coalesce(p.display_name,''),p.role::text,p.created_at,p.updated_at,
+			array_agg(o.code order by o.code),array_agg(o.id order by o.code)
+		from public.profiles p
+		join public.user_office_memberships m on m.user_id=p.id
+		join public.offices o on o.id=m.office_id
+		where p.is_active=true and p.role<>'super_admin'
+		  and ($1::uuid[] is null or m.office_id=any($1))
+		group by p.id,p.display_name,p.role,p.created_at,p.updated_at
+		order by p.display_name nulls last
+	`, officeIDs)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "managers_load_failed", "Could not load managers", nil)
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id uuid.UUID
+		var displayName, role string
+		var createdAt, updatedAt time.Time
+		var officeCodes []string
+		var officeUUIDs []uuid.UUID
+		if err := rows.Scan(&id, &displayName, &role, &createdAt, &updatedAt, &officeCodes, &officeUUIDs); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "managers_load_failed", "Could not load managers", nil)
+			return
+		}
+		items = append(items, map[string]any{
+			"id": id, "email": nil, "displayName": displayName, "role": role,
+			"officeIds": officeCodes, "officeUuids": officeUUIDs, "status": "active",
+			"createdAt": createdAt, "lastActiveAt": updatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) requireSuperAdmin(w http.ResponseWriter, r *http.Request) bool {
+	actor, ok := actorFromContext(r.Context())
+	if !ok || !actor.IsSuperAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "super_admin_required", "Only super admin can manage users", nil)
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) {
+		return
+	}
+	active := strings.TrimSpace(r.URL.Query().Get("active"))
+	where := "true"
+	if active == "true" {
+		where = "p.is_active=true"
+	} else if active == "false" {
+		where = "p.is_active=false"
+	}
+	authUsers, err := s.listAuthUsers(r)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadGateway, "auth_users_load_failed", "Could not load auth users", nil)
+		return
+	}
+	rows, err := s.pool.Query(r.Context(), `
+		select p.id,to_jsonb(p),
+			coalesce((select jsonb_agg(to_jsonb(o) order by o.code)
+				from public.user_office_memberships m join public.offices o on o.id=m.office_id
+				where m.user_id=p.id),'[]'::jsonb)
+		from public.profiles p
+		where `+where+` order by p.display_name nulls last,p.created_at
+	`)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "users_load_failed", "Could not load users", nil)
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id uuid.UUID
+		var profile, offices []byte
+		if err := rows.Scan(&id, &profile, &offices); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "users_load_failed", "Could not load users", nil)
+			return
+		}
+		items = append(items, map[string]any{"id": id, "email": authUsers[id], "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) {
+		return
+	}
+	userID, err := uuid.Parse(r.PathValue("userId"))
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user id", nil)
+		return
+	}
+	authUser, authErr := s.getAuthUser(r, userID)
+	if authErr != nil {
+		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	var profile, offices []byte
+	err = s.pool.QueryRow(r.Context(), `
+		select to_jsonb(p),
+			coalesce((select jsonb_agg(to_jsonb(o) order by o.code)
+				from public.user_office_memberships m join public.offices o on o.id=m.office_id
+				where m.user_id=p.id),'[]'::jsonb)
+		from public.profiles p where p.id=$1
+	`, userID).Scan(&profile, &offices)
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_load_failed", "Could not load user", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": userID, "email": authUser.Email, "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) || !requireIdempotencyKey(s, w, r) {
+		return
+	}
+	var req userMutationRequest
+	if err := decodeJSON(w, r, 64*1024, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", nil)
+		return
+	}
+	if fields := validateUserMutation(req, true); len(fields) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", fields)
+		return
+	}
+	authPayload := map[string]any{
+		"email":         strings.ToLower(strings.TrimSpace(req.Email)),
+		"password":      req.Password,
+		"email_confirm": true,
+		"user_metadata": map[string]string{"display_name": strings.TrimSpace(req.DisplayName)},
+	}
+	var created struct {
+		ID uuid.UUID `json:"id"`
+	}
+	if err := s.authAdmin(r, http.MethodPost, "/auth/v1/admin/users", authPayload, &created); err != nil || created.ID == uuid.Nil {
+		s.writeError(w, r, http.StatusBadGateway, "auth_user_create_failed", "Could not create auth user", nil)
+		return
+	}
+	tx, err := s.pool.Begin(r.Context())
+	if err == nil {
+		defer tx.Rollback(r.Context())
+	}
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `insert into public.profiles (id,role,display_name,is_active,deactivated_at) values ($1,$2,$3,true,null) on conflict (id) do update set role=excluded.role,display_name=excluded.display_name,is_active=true,deactivated_at=null`, created.ID, req.Role, strings.TrimSpace(req.DisplayName))
+	}
+	if err == nil {
+		err = replaceMemberships(r, tx, created.ID, req.OfficeIDs)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	} else if tx != nil {
+		_ = tx.Rollback(r.Context())
+	}
+	if err != nil {
+		_ = s.authAdmin(r, http.MethodDelete, "/auth/v1/admin/users/"+created.ID.String(), nil, nil)
+		s.writeError(w, r, http.StatusInternalServerError, "user_create_failed", "Could not create user profile", nil)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"userId": created.ID})
+}
+
+func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) {
+		return
+	}
+	userID, err := uuid.Parse(r.PathValue("userId"))
+	var req userMutationRequest
+	if err != nil || decodeJSON(w, r, 64*1024, &req) != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", nil)
+		return
+	}
+	if fields := validateUserMutation(req, false); len(fields) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", fields)
+		return
+	}
+	var existingRole string
+	if err := s.pool.QueryRow(r.Context(), `select role::text from public.profiles where id=$1`, userID).Scan(&existingRole); err != nil {
+		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	if existingRole == "super_admin" {
+		s.writeError(w, r, http.StatusBadRequest, "super_admin_immutable", "Super admin cannot be edited here", nil)
+		return
+	}
+	authPayload := map[string]any{"email": strings.ToLower(strings.TrimSpace(req.Email)), "user_metadata": map[string]string{"display_name": strings.TrimSpace(req.DisplayName)}}
+	if req.Password != "" {
+		authPayload["password"] = req.Password
+	}
+	if err := s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), authPayload, nil); err != nil {
+		s.writeError(w, r, http.StatusBadGateway, "auth_user_update_failed", "Could not update auth user", nil)
+		return
+	}
+	tx, err := s.pool.Begin(r.Context())
+	if err == nil {
+		defer tx.Rollback(r.Context())
+	}
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, strings.TrimSpace(req.DisplayName))
+	}
+	if err == nil {
+		err = replaceMemberships(r, tx, userID, req.OfficeIDs)
+	}
+	if err == nil {
+		err = tx.Commit(r.Context())
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDeactivateUser(w http.ResponseWriter, r *http.Request) {
+	s.handleSetUserActive(w, r, false)
+}
+
+func (s *Server) handleReactivateUser(w http.ResponseWriter, r *http.Request) {
+	s.handleSetUserActive(w, r, true)
+}
+
+func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, active bool) {
+	if !s.requireSuperAdmin(w, r) || !requireIdempotencyKey(s, w, r) {
+		return
+	}
+	userID, err := uuid.Parse(r.PathValue("userId"))
+	var req userMutationRequest
+	if err != nil || decodeJSON(w, r, 16*1024, &req) != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user request", nil)
+		return
+	}
+	authUser, authErr := s.getAuthUser(r, userID)
+	var role string
+	if authErr != nil || s.pool.QueryRow(r.Context(), `select role::text from public.profiles where id=$1`, userID).Scan(&role) != nil {
+		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	if role == "super_admin" && !active {
+		s.writeError(w, r, http.StatusBadRequest, "super_admin_immutable", "Super admin cannot be deactivated", nil)
+		return
+	}
+	if !active && !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), authUser.Email) {
+		s.writeError(w, r, http.StatusBadRequest, "confirmation_mismatch", "Confirmation email does not match", map[string]string{"confirmEmail": "Email does not match"})
+		return
+	}
+	if _, err := s.pool.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, active); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
+		return
+	}
+	ban := "876000h"
+	if active {
+		ban = "none"
+	}
+	if err := s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), map[string]string{"ban_duration": ban}, nil); err != nil {
+		_, _ = s.pool.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, !active)
+		s.writeError(w, r, http.StatusBadGateway, "auth_user_status_failed", "Could not update auth user status", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) || !requireIdempotencyKey(s, w, r) {
+		return
+	}
+	userID, err := uuid.Parse(r.PathValue("userId"))
+	var req userMutationRequest
+	if err != nil || decodeJSON(w, r, 16*1024, &req) != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user request", nil)
+		return
+	}
+	authUser, authErr := s.getAuthUser(r, userID)
+	var role string
+	var active bool
+	if authErr != nil || s.pool.QueryRow(r.Context(), `select role::text,is_active from public.profiles where id=$1`, userID).Scan(&role, &active) != nil {
+		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	if active || role == "super_admin" || !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), authUser.Email) {
+		s.writeError(w, r, http.StatusBadRequest, "delete_not_allowed", "Deactivate the user and confirm the exact email first", nil)
+		return
+	}
+	if err := s.authAdmin(r, http.MethodDelete, "/auth/v1/admin/users/"+userID.String(), nil, nil); err != nil {
+		s.writeError(w, r, http.StatusBadGateway, "auth_user_delete_failed", "Could not delete auth user", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func validateUserMutation(req userMutationRequest, requirePassword bool) map[string]string {
+	fields := map[string]string{}
+	if !strings.Contains(req.Email, "@") {
+		fields["email"] = "Valid email required"
+	}
+	if strings.TrimSpace(req.DisplayName) == "" {
+		fields["displayName"] = "Required"
+	}
+	validRole := req.Role == "super_admin" || req.Role == "curator" || req.Role == "office_admin" || req.Role == "office_member"
+	if !validRole {
+		fields["role"] = "Invalid role"
+	}
+	if req.Role != "super_admin" && len(req.OfficeIDs) == 0 {
+		fields["officeIds"] = "At least one office is required"
+	}
+	if requirePassword && len(req.Password) < 8 {
+		fields["password"] = "At least 8 characters required"
+	}
+	if req.Password != req.PasswordConfirm {
+		fields["passwordConfirm"] = "Passwords do not match"
+	}
+	return fields
+}
+
+func replaceMemberships(r *http.Request, tx pgx.Tx, userID uuid.UUID, officeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(r.Context(), `delete from public.user_office_memberships where user_id=$1`, userID); err != nil {
+		return err
+	}
+	for _, officeID := range officeIDs {
+		if _, err := tx.Exec(r.Context(), `insert into public.user_office_memberships (user_id,office_id) values ($1,$2)`, userID, officeID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type authAdminUser struct {
+	ID    uuid.UUID `json:"id"`
+	Email string    `json:"email"`
+}
+
+func (s *Server) listAuthUsers(r *http.Request) (map[uuid.UUID]string, error) {
+	result := map[uuid.UUID]string{}
+	for page := 1; ; page++ {
+		var response struct {
+			Users []authAdminUser `json:"users"`
+		}
+		path := fmt.Sprintf("/auth/v1/admin/users?page=%d&per_page=200", page)
+		if err := s.authAdmin(r, http.MethodGet, path, nil, &response); err != nil {
+			return nil, err
+		}
+		for _, user := range response.Users {
+			result[user.ID] = user.Email
+		}
+		if len(response.Users) < 200 {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (s *Server) getAuthUser(r *http.Request, userID uuid.UUID) (authAdminUser, error) {
+	var raw json.RawMessage
+	if err := s.authAdmin(r, http.MethodGet, "/auth/v1/admin/users/"+userID.String(), nil, &raw); err != nil {
+		return authAdminUser{}, err
+	}
+	var wrapped struct {
+		User authAdminUser `json:"user"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.User.ID != uuid.Nil {
+		return wrapped.User, nil
+	}
+	var user authAdminUser
+	if err := json.Unmarshal(raw, &user); err != nil || user.ID == uuid.Nil {
+		return authAdminUser{}, errors.New("invalid auth user response")
+	}
+	return user, nil
+}
+
+func (s *Server) authAdmin(r *http.Request, method, path string, payload any, out any) error {
+	if s.supabaseURL == "" || s.supabaseSecretKey == "" {
+		return errors.New("supabase auth admin is not configured")
+	}
+	var body io.Reader
+	if payload != nil {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), method, s.supabaseURL+path, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+s.supabaseSecretKey)
+	req.Header.Set("apikey", s.supabaseSecretKey)
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	res, err := (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		raw, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+		return fmt.Errorf("supabase auth admin status %d: %s", res.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	if out != nil {
+		return json.NewDecoder(res.Body).Decode(out)
+	}
+	return nil
+}

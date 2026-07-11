@@ -33,9 +33,10 @@ func TestBuildNotificationMessage(t *testing.T) {
 		"name":          "Іван",
 		"phone":         "+380501112233",
 		"source_system": "site_form",
+		"office_code":   "kyiv",
 		"crm_url":       "https://crm.example/crm/leads/1",
 	})
-	want := "🔔 Нова заявка!\n👤 Ім'я: Іван\n📞 Тел: +380501112233\n🌐 Джерело: Site Form\n🔗 Посилання на CRM: https://crm.example/crm/leads/1"
+	want := "🔔 Нова заявка!\n🏢 Офіс: Kyiv\n👤 Ім'я: Іван\n📞 Тел: +380501112233\n🌐 Джерело: Site Form"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}
