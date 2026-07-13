@@ -484,6 +484,7 @@ where id = $1
 		Name:         &name,
 		Phone:        &phone,
 		Email:        row.Email,
+		ClientInfo:   row.ProjectDescription,
 		OfficeCode:   site.OfficeCode,
 		SourceSystem: "site_form",
 	}); err != nil {

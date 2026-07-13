@@ -133,7 +133,7 @@ func (s *Server) handleSheetImport(w http.ResponseWriter, r *http.Request) {
 		if inserted {
 			created++
 			if req.Mode == "incremental" {
-				if err := s.notifier.Enqueue(r.Context(), tx, notifications.LeadInfo{ID: leadID, Name: lead.Name, Phone: lead.Phone, Email: lead.Email, OfficeCode: source.OfficeCode, SourceSystem: "meta_lead_ads"}); err != nil {
+				if err := s.notifier.Enqueue(r.Context(), tx, notifications.LeadInfo{ID: leadID, Name: lead.Name, Phone: lead.Phone, Email: lead.Email, ClientInfo: lead.SourceNote, OfficeCode: source.OfficeCode, SourceSystem: "meta_lead_ads"}); err != nil {
 					s.writeError(w, r, http.StatusInternalServerError, "notification_enqueue_failed", "Could not enqueue lead notification", nil)
 					return
 				}
@@ -180,7 +180,7 @@ func mapSheetRow(source importSource, raw map[string]any) (mappedSheetLead, erro
 	lead := mappedSheetLead{
 		ExternalID:      externalID,
 		Name:            clean(stringValue(raw["full_name"])),
-		Phone:           clean(normalizePhone(stringValue(raw["phone_number"]))),
+		Phone:           clean(normalizePhone(firstNonEmptyString(raw, "phone", "phone_number"))),
 		Email:           clean(strings.ToLower(stringValue(raw["email"]))),
 		SourceCreatedAt: createdAt,
 		AdID:            clean(stringValue(raw["ad_id"])),
@@ -199,10 +199,51 @@ func mapSheetRow(source importSource, raw map[string]any) (mappedSheetLead, erro
 		lead.CityRegion = clean(stringValue(raw["city"]))
 		lead.SourceNote = clean(stringValue(raw["kiedy_planujesz_realizację?"]))
 	} else {
-		lead.ProductInterest = clean(stringValue(raw["що_ви_хочете_замовити?"]))
-		lead.ProjectStage = clean(stringValue(raw["на_якому_етапі_ваш_проєкт?"]))
+		productInterest := firstNonEmptyString(raw,
+			"які_меблі_вам_потрібно_виготовити?",
+			"що_ви_хочете_замовити?",
+		)
+		projectStage := firstNonEmptyString(raw,
+			"на_якому_етапі_перебуває_ваш_проєкт?",
+			"на_якому_етапі_ваш_проєкт?",
+		)
+		communicationPreference := firstNonEmptyString(raw, "як_вам_зручно_спілкуватися?")
+		lead.ProductInterest = clean(productInterest)
+		lead.ProjectStage = clean(projectStage)
+		lead.SourceNote = sourceNoteFromAnswers(productInterest, projectStage, communicationPreference)
 	}
 	return lead, nil
+}
+
+func firstNonEmptyString(raw map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := stringValue(raw[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func sourceNoteFromAnswers(productInterest, projectStage, communicationPreference string) *string {
+	entries := []struct {
+		label string
+		value string
+	}{
+		{"Які меблі вам потрібно виготовити?", productInterest},
+		{"На якому етапі перебуває ваш проєкт?", projectStage},
+		{"Як вам зручно спілкуватися?", communicationPreference},
+	}
+	lines := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if value := strings.TrimSpace(entry.value); value != "" {
+			lines = append(lines, entry.label+": "+value)
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	value := strings.Join(lines, "\n")
+	return &value
 }
 
 func stringValue(value any) string {

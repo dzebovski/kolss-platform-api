@@ -33,6 +33,30 @@ Notification-only worker does not require S3 credentials. Health endpoints:
 
 Do not run the browser grant revocation until the Go-backed CRM has been stable in production for 24 hours.
 
+### Kyiv Meta Leads: Sheet2
+
+The Kyiv import source is configured by migration
+[`20260713100000_switch_kyiv_meta_leads_to_sheet2.sql`](./supabase/migrations/20260713100000_switch_kyiv_meta_leads_to_sheet2.sql).
+After the API and migration are deployed, update the bound Google Apps Script properties:
+
+- `SHEET_NAME=Sheet2`
+- `HEADER_ROW=1`
+
+Run `syncFromHeader` once to import any rows already present in the new tab, then
+confirm the execution log has no errors. The regular five-minute trigger continues
+to run `syncNewLeads`. `syncFromHeader` resets the checkpoint for `Sheet2`; later
+tab changes also reset it, so a row checkpoint from the previous tab is never reused.
+
+### Kyiv Telegram delivery
+
+`TELEGRAM_CHAT_ID_KYIV` remains the primary Kyiv chat. Set
+`TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV=-1002833157899` on the API component to also
+deliver each Kyiv lead to the **Kolss Kyiv** supergroup. The worker records a
+separate outbox destination and retry state for every Telegram chat.
+
+For CRM links, set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` exactly; do not add
+`/crm/leads/:id` to that value.
+
 ## Deploy
 
 - [`Dockerfile`](./Dockerfile) — `api`, `worker`, and `both` targets

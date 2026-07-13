@@ -28,15 +28,29 @@ func TestDetectContentType(t *testing.T) {
 	}
 }
 
-func TestBuildNotificationMessage(t *testing.T) {
-	msg := BuildNotificationMessage(map[string]any{
-		"name":          "Іван",
+func TestBuildTelegramNotificationMessage(t *testing.T) {
+	msg := BuildTelegramNotificationMessage(map[string]any{
+		"name":          "Іван <Менеджер>",
 		"phone":         "+380501112233",
 		"source_system": "site_form",
-		"office_code":   "kyiv",
+		"client_info":   "Які меблі вам потрібно виготовити?: Кухня & шафа\nЯк вам зручно спілкуватися?: Telegram",
+		"crm_url":       "https://crm.example/crm/leads/1?a=1&b=2",
+	})
+	want := "🔔 Нова заявка!\n👤 Ім'я: Іван &lt;Менеджер&gt;\n\nЯкі меблі вам потрібно виготовити?: Кухня &amp; шафа\nЯк вам зручно спілкуватися?: Telegram\n📞 Тел: +380501112233\n🌐 Джерело: Site Form\n🔗 Посилання на CRM: <a href=\"https://crm.example/crm/leads/1?a=1&amp;b=2\">Відкрити в CRM</a>"
+	if msg != want {
+		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
+	}
+}
+
+func TestBuildSlackNotificationMessageSkipsEmptyClientInfo(t *testing.T) {
+	msg := BuildSlackNotificationMessage(map[string]any{
+		"name":          "Іван",
+		"phone":         "+380501112233",
+		"source_system": "meta_lead_ads",
+		"client_info":   "   ",
 		"crm_url":       "https://crm.example/crm/leads/1",
 	})
-	want := "🔔 Нова заявка!\n🏢 Офіс: Kyiv\n👤 Ім'я: Іван\n📞 Тел: +380501112233\n🌐 Джерело: Site Form"
+	want := "🔔 Нова заявка!\n👤 Ім'я: Іван\n📞 Тел: +380501112233\n🌐 Джерело: Facebook Forms\n🔗 Посилання на CRM: https://crm.example/crm/leads/1"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}

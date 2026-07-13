@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,11 +36,12 @@ type Notifier struct {
 }
 
 type notificationRow struct {
-	ID       string
-	LeadID   string
-	Channel  string
-	Payload  map[string]any
-	Attempts int
+	ID          string
+	LeadID      string
+	Channel     string
+	Destination string
+	Payload     map[string]any
+	Attempts    int
 }
 
 func (n *Notifier) RunOnce(ctx context.Context) (sent int, failed int, err error) {
@@ -92,7 +94,7 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 	var payload []byte
 	claimToken := uuid.NewString()
 	err = tx.QueryRow(ctx, `
-		select id, lead_id, channel::text, payload, attempts
+		select id, lead_id, channel::text, destination, payload, attempts
 		from public.lead_notifications
 		where status in ('pending', 'failed')
 		  and attempts < 10
@@ -101,7 +103,7 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 		order by created_at asc
 		limit 1
 		for update skip locked
-	`).Scan(&row.ID, &row.LeadID, &row.Channel, &payload, &row.Attempts)
+	`).Scan(&row.ID, &row.LeadID, &row.Channel, &row.Destination, &payload, &row.Attempts)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return notifyIdle, nil
@@ -126,14 +128,13 @@ func (n *Notifier) claimAndSendOne(ctx context.Context, client *http.Client) (no
 		}
 	}
 
-	text := BuildNotificationMessage(row.Payload)
 	officeCode, _ := row.Payload["office_code"].(string)
 	var sendErr error
 	switch row.Channel {
 	case "telegram":
-		sendErr = n.sendTelegram(ctx, client, officeCode, text, stringify(row.Payload["crm_url"]))
+		sendErr = n.sendTelegram(ctx, client, officeCode, row.Destination, BuildTelegramNotificationMessage(row.Payload))
 	case "slack":
-		sendErr = n.sendSlack(ctx, client, officeCode, text)
+		sendErr = n.sendSlack(ctx, client, officeCode, BuildSlackNotificationMessage(row.Payload))
 	default:
 		sendErr = fmt.Errorf("unknown channel %q", row.Channel)
 	}
@@ -180,24 +181,20 @@ func (n *Notifier) markFailed(ctx context.Context, id, claimToken string, attemp
 	return err
 }
 
-func (n *Notifier) sendTelegram(ctx context.Context, client *http.Client, officeCode, text, crmURL string) error {
+func (n *Notifier) sendTelegram(ctx context.Context, client *http.Client, officeCode, destination, text string) error {
 	token := n.Creds.TelegramBotTokenFor(officeCode)
-	chatID := n.Creds.TelegramChatIDFor(officeCode)
+	chatID := strings.TrimSpace(destination)
+	if chatID == "" {
+		chatID = n.Creds.TelegramChatIDFor(officeCode)
+	}
 	if token == "" || chatID == "" {
 		return fmt.Errorf("missing Telegram config for office: %s", emptyOffice(officeCode))
 	}
 	payload := map[string]any{
 		"chat_id":                  chatID,
 		"text":                     text,
+		"parse_mode":               "HTML",
 		"disable_web_page_preview": true,
-	}
-	if crmURL != "" {
-		payload["reply_markup"] = map[string]any{
-			"inline_keyboard": [][]map[string]string{{{
-				"text": "Відкрити заявку в CRM",
-				"url":  crmURL,
-			}}},
-		}
 	}
 	body, _ := json.Marshal(payload)
 	url := "https://api.telegram.org/bot" + token + "/sendMessage"
@@ -255,8 +252,19 @@ var sourceLabels = map[string]string{
 	"manual":        "Вручну",
 }
 
-// BuildNotificationMessage matches Edge process.ts formatting.
-func BuildNotificationMessage(payload map[string]any) string {
+func BuildTelegramNotificationMessage(payload map[string]any) string {
+	return buildNotificationMessage(payload, html.EscapeString, func(crmURL string) string {
+		return "🔗 Посилання на CRM: <a href=\"" + html.EscapeString(crmURL) + "\">Відкрити в CRM</a>"
+	})
+}
+
+func BuildSlackNotificationMessage(payload map[string]any) string {
+	return buildNotificationMessage(payload, func(value string) string { return value }, func(crmURL string) string {
+		return "🔗 Посилання на CRM: " + crmURL
+	})
+}
+
+func buildNotificationMessage(payload map[string]any, escape func(string) string, crmLine func(string) string) string {
 	source := stringify(payload["source_system"])
 	sourceLabel := sourceLabels[source]
 	if sourceLabel == "" {
@@ -276,23 +284,24 @@ func BuildNotificationMessage(payload map[string]any) string {
 	}
 	lines := []string{
 		"🔔 Нова заявка!",
-		"🏢 Офіс: " + officeLabel(stringify(payload["office_code"])),
-		"👤 Ім'я: " + name,
-		"📞 Тел: " + phone,
-		"🌐 Джерело: " + sourceLabel,
+		"👤 Ім'я: " + escape(name),
+	}
+	if clientInfo := strings.TrimSpace(stringify(payload["client_info"])); clientInfo != "" {
+		lines = append(lines, "", escape(clientInfo))
+	}
+	lines = append(lines,
+		"📞 Тел: "+escape(phone),
+		"🌐 Джерело: "+escape(sourceLabel),
+	)
+	if crmURL := strings.TrimSpace(stringify(payload["crm_url"])); crmURL != "" {
+		lines = append(lines, crmLine(crmURL))
 	}
 	return strings.Join(lines, "\n")
 }
 
-func officeLabel(code string) string {
-	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "kyiv":
-		return "Kyiv"
-	case "warsaw":
-		return "Warsaw"
-	default:
-		return "—"
-	}
+// BuildNotificationMessage is retained for callers that need a plain-text message.
+func BuildNotificationMessage(payload map[string]any) string {
+	return BuildSlackNotificationMessage(payload)
 }
 
 func workerRetryDelay(attempt int) string {

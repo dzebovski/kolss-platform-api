@@ -8,10 +8,11 @@
  *   CRM_WEBHOOK_URL=https://api.kolss.eu/v1/integrations/google-sheets/lead-imports
  *   IMPORT_WEBHOOK_SECRET=<office-specific secret>
  *   SOURCE_ID=<lead_import_sources uuid>
- *   SHEET_NAME=<tab name>
+ *   SHEET_NAME=<exact tab name, for example Sheet2>
  *   HEADER_ROW=1
  *   BATCH_SIZE=20
- *   LAST_ROW=<keep the existing value during cutover>
+ *   LAST_ROW=<managed by the script; do not edit during normal operation>
+ *   LAST_SHEET_NAME=<managed by the script>
  */
 
 var PROP = {
@@ -21,6 +22,7 @@ var PROP = {
   SHEET_NAME: 'SHEET_NAME',
   HEADER_ROW: 'HEADER_ROW',
   LAST_ROW: 'LAST_ROW',
+  LAST_SHEET_NAME: 'LAST_SHEET_NAME',
   BATCH_SIZE: 'BATCH_SIZE',
 };
 
@@ -30,12 +32,12 @@ function getConfig_() {
     webhookUrl: props.getProperty(PROP.WEBHOOK_URL),
     secret: props.getProperty(PROP.SECRET),
     sourceId: props.getProperty(PROP.SOURCE_ID),
-    sheetName: props.getProperty(PROP.SHEET_NAME) || 'Sheet1',
+    sheetName: String(props.getProperty(PROP.SHEET_NAME) || '').trim(),
     headerRow: parseInt(props.getProperty(PROP.HEADER_ROW) || '1', 10),
     batchSize: Math.min(100, parseInt(props.getProperty(PROP.BATCH_SIZE) || '20', 10)),
   };
-  if (!config.webhookUrl || !config.secret || !config.sourceId) {
-    throw new Error('Missing CRM_WEBHOOK_URL, IMPORT_WEBHOOK_SECRET, or SOURCE_ID');
+  if (!config.webhookUrl || !config.secret || !config.sourceId || !config.sheetName) {
+    throw new Error('Missing CRM_WEBHOOK_URL, IMPORT_WEBHOOK_SECRET, SOURCE_ID, or SHEET_NAME');
   }
   return config;
 }
@@ -102,6 +104,16 @@ function syncNewLeads() {
   var props = PropertiesService.getScriptProperties();
   var sheet = getSheet_(config.sheetName);
   var sheetLastRow = sheet.getLastRow();
+  var lastSheetName = props.getProperty(PROP.LAST_SHEET_NAME);
+  if (!lastSheetName) {
+    // Preserve the checkpoint of scripts deployed before LAST_SHEET_NAME existed.
+    props.setProperty(PROP.LAST_SHEET_NAME, config.sheetName);
+  } else if (lastSheetName !== config.sheetName) {
+    // A tab switch must not reuse a row number from the previous tab.
+    props.setProperty(PROP.LAST_SHEET_NAME, config.sheetName);
+    props.setProperty(PROP.LAST_ROW, String(config.headerRow));
+    Logger.log('Tab changed to ' + config.sheetName + '; syncing from row ' + (config.headerRow + 1));
+  }
   var lastRowRaw = props.getProperty(PROP.LAST_ROW);
   if (lastRowRaw === null || lastRowRaw === '') {
     props.setProperty(PROP.LAST_ROW, String(sheetLastRow));
@@ -114,6 +126,15 @@ function syncNewLeads() {
   var summary = sendInBatches_(config, 'incremental', records);
   props.setProperty(PROP.LAST_ROW, String(sheetLastRow));
   Logger.log(JSON.stringify(summary));
+}
+
+/** Resend all data rows from the configured tab; useful for a deliberate backfill. */
+function syncFromHeader() {
+  var config = getConfig_();
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(PROP.LAST_SHEET_NAME, config.sheetName);
+  props.setProperty(PROP.LAST_ROW, String(config.headerRow));
+  syncNewLeads();
 }
 
 /** Pre-cutover check: last 20 rows, deduplicated, and never enqueues Telegram. */

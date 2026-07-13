@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -14,34 +16,25 @@ type LeadInfo struct {
 	Name         *string
 	Phone        *string
 	Email        *string
+	ClientInfo   *string
 	OfficeCode   string
 	SourceSystem string
 }
 
 type Enqueuer struct {
-	CRMSiteURLPublic       string
-	TelegramBotToken       string
-	TelegramBotTokenKyiv   string
-	TelegramBotTokenWarsaw string
-	TelegramChatIDKyiv     string
-	TelegramChatIDWarsaw   string
-	SlackWebhookURLKyiv    string
-	SlackWebhookURLWarsaw  string
-}
-
-func (e Enqueuer) channelsFor(officeCode string) []string {
-	var out []string
-	if e.telegramConfigured(officeCode) {
-		out = append(out, "telegram")
-	}
-	if e.slackWebhook(officeCode) != "" {
-		out = append(out, "slack")
-	}
-	return out
+	CRMSiteURLPublic              string
+	TelegramBotToken              string
+	TelegramBotTokenKyiv          string
+	TelegramBotTokenWarsaw        string
+	TelegramChatIDKyiv            string
+	TelegramChatIDWarsaw          string
+	TelegramAdditionalChatIDsKyiv string
+	SlackWebhookURLKyiv           string
+	SlackWebhookURLWarsaw         string
 }
 
 func (e Enqueuer) telegramConfigured(officeCode string) bool {
-	return e.telegramToken(officeCode) != "" && e.telegramChatID(officeCode) != ""
+	return e.telegramToken(officeCode) != "" && len(e.telegramChatIDs(officeCode)) > 0
 }
 
 func (e Enqueuer) telegramToken(officeCode string) string {
@@ -58,15 +51,16 @@ func (e Enqueuer) telegramToken(officeCode string) string {
 	return e.TelegramBotToken
 }
 
-func (e Enqueuer) telegramChatID(officeCode string) string {
+func (e Enqueuer) telegramChatIDs(officeCode string) []string {
+	var primary, additional string
 	switch officeCode {
 	case "kyiv":
-		return e.TelegramChatIDKyiv
+		primary = e.TelegramChatIDKyiv
+		additional = e.TelegramAdditionalChatIDsKyiv
 	case "warsaw":
-		return e.TelegramChatIDWarsaw
-	default:
-		return ""
+		primary = e.TelegramChatIDWarsaw
 	}
+	return uniqueChatIDs(primary, additional)
 }
 
 func (e Enqueuer) slackWebhook(officeCode string) string {
@@ -84,15 +78,8 @@ func (e Enqueuer) slackWebhook(officeCode string) string {
 }
 
 func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
-	channels := e.channelsFor(lead.OfficeCode)
-	if len(channels) == 0 {
+	if !e.telegramConfigured(lead.OfficeCode) && e.slackWebhook(lead.OfficeCode) == "" {
 		return nil
-	}
-
-	var crmURL *string
-	if e.CRMSiteURLPublic != "" {
-		u := fmt.Sprintf("%s/crm/leads/%s", trimSlash(e.CRMSiteURLPublic), lead.ID.String())
-		crmURL = &u
 	}
 
 	payload := map[string]any{
@@ -100,10 +87,11 @@ func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
 		"name":             lead.Name,
 		"phone":            lead.Phone,
 		"email":            lead.Email,
+		"client_info":      lead.ClientInfo,
 		"product_interest": nil,
 		"source_system":    lead.SourceSystem,
 		"office_code":      lead.OfficeCode,
-		"crm_url":          crmURL,
+		"crm_url":          crmLeadURL(e.CRMSiteURLPublic, lead.ID),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -111,21 +99,52 @@ func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
 	}
 
 	const q = `
-insert into public.lead_notifications (lead_id, channel, status, payload, attempts, last_error)
-values ($1, $2::public.notification_channel, 'pending', $3::jsonb, 0, null)
-on conflict (lead_id, channel) do nothing
+insert into public.lead_notifications (lead_id, channel, destination, status, payload, attempts, last_error)
+values ($1, $2::public.notification_channel, $3, 'pending', $4::jsonb, 0, null)
+on conflict (lead_id, channel, destination) do nothing
 `
-	for _, ch := range channels {
-		if _, err := tx.Exec(ctx, q, lead.ID, ch, raw); err != nil {
+	if e.telegramConfigured(lead.OfficeCode) {
+		for _, chatID := range e.telegramChatIDs(lead.OfficeCode) {
+			if _, err := tx.Exec(ctx, q, lead.ID, "telegram", chatID, raw); err != nil {
+				return err
+			}
+		}
+	}
+	if e.slackWebhook(lead.OfficeCode) != "" {
+		if _, err := tx.Exec(ctx, q, lead.ID, "slack", "", raw); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func trimSlash(s string) string {
-	for len(s) > 0 && s[len(s)-1] == '/' {
-		s = s[:len(s)-1]
+func uniqueChatIDs(primary, additional string) []string {
+	values := append([]string{primary}, strings.Split(additional, ",")...)
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
 	}
-	return s
+	return out
+}
+
+func crmLeadURL(base string, leadID uuid.UUID) *string {
+	parsed, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil
+	}
+	parsed.Path = fmt.Sprintf("/crm/leads/%s", leadID.String())
+	parsed.RawPath = ""
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	value := parsed.String()
+	return &value
 }

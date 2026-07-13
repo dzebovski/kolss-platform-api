@@ -43,13 +43,14 @@ type Config struct {
 
 	CRMSiteURLPublic string
 
-	TelegramBotToken       string
-	TelegramBotTokenKyiv   string
-	TelegramBotTokenWarsaw string
-	TelegramChatIDKyiv     string
-	TelegramChatIDWarsaw   string
-	SlackWebhookURLKyiv    string
-	SlackWebhookURLWarsaw  string
+	TelegramBotToken              string
+	TelegramBotTokenKyiv          string
+	TelegramBotTokenWarsaw        string
+	TelegramChatIDKyiv            string
+	TelegramChatIDWarsaw          string
+	TelegramAdditionalChatIDsKyiv string
+	SlackWebhookURLKyiv           string
+	SlackWebhookURLWarsaw         string
 }
 
 func Load() (Config, error) {
@@ -94,13 +95,14 @@ func Load() (Config, error) {
 			os.Getenv("SITE_URL_PUBLIC"),
 		)),
 
-		TelegramBotToken:       strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
-		TelegramBotTokenKyiv:   strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_KYIV")),
-		TelegramBotTokenWarsaw: strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_WARSAW")),
-		TelegramChatIDKyiv:     strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_KYIV")),
-		TelegramChatIDWarsaw:   strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_WARSAW")),
-		SlackWebhookURLKyiv:    strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_KYIV")),
-		SlackWebhookURLWarsaw:  strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_WARSAW")),
+		TelegramBotToken:              strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
+		TelegramBotTokenKyiv:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_KYIV")),
+		TelegramBotTokenWarsaw:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_WARSAW")),
+		TelegramChatIDKyiv:            strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_KYIV")),
+		TelegramChatIDWarsaw:          strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_WARSAW")),
+		TelegramAdditionalChatIDsKyiv: strings.TrimSpace(os.Getenv("TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV")),
+		SlackWebhookURLKyiv:           strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_KYIV")),
+		SlackWebhookURLWarsaw:         strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_WARSAW")),
 	}
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")

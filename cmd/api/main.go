@@ -71,14 +71,15 @@ func main() {
 
 	sites := leads.NewRepository(pool)
 	notify := notifications.Enqueuer{
-		CRMSiteURLPublic:       cfg.CRMSiteURLPublic,
-		TelegramBotToken:       cfg.TelegramBotToken,
-		TelegramBotTokenKyiv:   cfg.TelegramBotTokenKyiv,
-		TelegramBotTokenWarsaw: cfg.TelegramBotTokenWarsaw,
-		TelegramChatIDKyiv:     cfg.TelegramChatIDKyiv,
-		TelegramChatIDWarsaw:   cfg.TelegramChatIDWarsaw,
-		SlackWebhookURLKyiv:    cfg.SlackWebhookURLKyiv,
-		SlackWebhookURLWarsaw:  cfg.SlackWebhookURLWarsaw,
+		CRMSiteURLPublic:              cfg.CRMSiteURLPublic,
+		TelegramBotToken:              cfg.TelegramBotToken,
+		TelegramBotTokenKyiv:          cfg.TelegramBotTokenKyiv,
+		TelegramBotTokenWarsaw:        cfg.TelegramBotTokenWarsaw,
+		TelegramChatIDKyiv:            cfg.TelegramChatIDKyiv,
+		TelegramChatIDWarsaw:          cfg.TelegramChatIDWarsaw,
+		TelegramAdditionalChatIDsKyiv: cfg.TelegramAdditionalChatIDsKyiv,
+		SlackWebhookURLKyiv:           cfg.SlackWebhookURLKyiv,
+		SlackWebhookURLWarsaw:         cfg.SlackWebhookURLWarsaw,
 	}
 	svc := submissions.NewService(
 		pool, sites, objects, notify,

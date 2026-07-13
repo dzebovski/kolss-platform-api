@@ -38,6 +38,34 @@ func TestMapSheetRowFallbackIdentityAndKyivMapping(t *testing.T) {
 	}
 }
 
+func TestMapSheetRowKyivSheet2Headers(t *testing.T) {
+	lead, err := mapSheetRow(importSource{OfficeCode: "kyiv", SpreadsheetID: "sheet-id", SheetName: "Sheet2"}, map[string]any{
+		"id":    "new-campaign-lead",
+		"phone": "+380 67 222 33 44",
+		"які_меблі_вам_потрібно_виготовити?":   "Меблі у спальню",
+		"на_якому_етапі_перебуває_ваш_проєкт?": "Потрібен проєкт",
+		"як_вам_зручно_спілкуватися?":          "Telegram",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lead.ExternalID != "l:new-campaign-lead" || value(lead.Phone) != "+380672223344" {
+		t.Fatalf("unexpected identity/phone: %#v", lead)
+	}
+	if value(lead.ProductInterest) != "Меблі у спальню" || value(lead.ProjectStage) != "Потрібен проєкт" {
+		t.Fatalf("unexpected Sheet2 Kyiv mapping: %#v", lead)
+	}
+	if value(lead.SourceNote) != "Які меблі вам потрібно виготовити?: Меблі у спальню\nНа якому етапі перебуває ваш проєкт?: Потрібен проєкт\nЯк вам зручно спілкуватися?: Telegram" {
+		t.Fatalf("unexpected Sheet2 source note: %#v", lead.SourceNote)
+	}
+}
+
+func TestSourceNoteFromAnswersSkipsEmptyValues(t *testing.T) {
+	if got := value(sourceNoteFromAnswers("", "Готовий до замірів", "")); got != "На якому етапі перебуває ваш проєкт?: Готовий до замірів" {
+		t.Fatalf("sourceNoteFromAnswers() = %q", got)
+	}
+}
+
 func value(value *string) string {
 	if value == nil {
 		return ""
