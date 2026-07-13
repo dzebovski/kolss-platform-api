@@ -56,6 +56,7 @@ paths:
       tags: [Context]
       operationId: getMe
       security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ImpersonateUserId' }]
       responses:
         '200':
           description: Authenticated CRM context
@@ -63,6 +64,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/MeResponse' }
         '401': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/ImpersonationForbidden' }
   /v1/offices:
     get:
       tags: [Context]
@@ -431,6 +433,13 @@ components:
       type: http
       scheme: bearer
       bearerFormat: Supabase ES256 JWT
+      description: >
+        Supabase-issued ES256 JWT. An active super_admin may additionally send the
+        optional `X-Impersonate-User-Id` header to act as another (non super_admin)
+        manager for the duration of the request; all mutations are then attributed to
+        the impersonated manager. Any invalid impersonation attempt (non super_admin
+        caller, malformed UUID, missing/inactive target, or target is a super_admin)
+        is rejected with HTTP 403 and error code `invalid_impersonation`.
     sheetSecret:
       type: http
       scheme: bearer
@@ -440,7 +449,21 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/CRMErrorResponse' }
+    ImpersonationForbidden:
+      description: Impersonation not permitted (`invalid_impersonation`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/CRMErrorResponse' }
   parameters:
+    ImpersonateUserId:
+      name: X-Impersonate-User-Id
+      in: header
+      required: false
+      description: >
+        Optional. Set by an active super_admin to act as the given manager for this
+        request. Must be the UUID of an active, non super_admin profile. Invalid
+        values are rejected with HTTP 403 `invalid_impersonation`.
+      schema: { type: string, format: uuid }
     LeadId:
       name: leadId
       in: path

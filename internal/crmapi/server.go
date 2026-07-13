@@ -132,7 +132,11 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Unauthorized", nil)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, actor)))
+		effective, ok := s.applyImpersonation(w, r, actor)
+		if !ok {
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, effective)))
 	})
 }
 
@@ -193,7 +197,7 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-Id")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-Id, X-Impersonate-User-Id")
 		w.Header().Set("Access-Control-Max-Age", "600")
 	}
 }
