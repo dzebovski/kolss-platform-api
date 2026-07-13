@@ -253,50 +253,106 @@ var sourceLabels = map[string]string{
 }
 
 func BuildTelegramNotificationMessage(payload map[string]any) string {
-	return buildNotificationMessage(payload, html.EscapeString, func(crmURL string) string {
-		return "🔗 Посилання на CRM: <a href=\"" + html.EscapeString(crmURL) + "\">Відкрити в CRM</a>"
-	})
+	escape := html.EscapeString
+	lines := []string{
+		"🔔 Нова заявка! " + notificationDateTime(payload),
+		"👤 Ім'я: " + escape(notificationName(payload)),
+	}
+	structuredFields := []struct {
+		key   string
+		label string
+	}{
+		{"product_interest", "🏠 Що цікавить?: "},
+		{"project_stage", "🪜 Етап проекту?: "},
+		{"communication_preference", "💬 Як спілкуватися?: "},
+	}
+	hasStructuredInfo := false
+	for _, field := range structuredFields {
+		if value := strings.TrimSpace(stringify(payload[field.key])); value != "" {
+			lines = append(lines, field.label+escape(value))
+			hasStructuredInfo = true
+		}
+	}
+	if !hasStructuredInfo {
+		if clientInfo := strings.TrimSpace(stringify(payload["client_info"])); clientInfo != "" {
+			lines = append(lines, "ℹ️ Інформація: "+escape(clientInfo))
+		}
+	}
+	lines = append(lines,
+		"📞 Тел: "+escape(notificationPhone(payload)),
+		"🌐 Джерело: "+escape(notificationSourceLabel(payload)),
+	)
+	if crmURL := strings.TrimSpace(stringify(payload["crm_url"])); crmURL != "" {
+		lines = append(lines, "🔗 <a href=\""+escape(crmURL)+"\">Відкрити в CRM</a>")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func BuildSlackNotificationMessage(payload map[string]any) string {
-	return buildNotificationMessage(payload, func(value string) string { return value }, func(crmURL string) string {
+	return buildSlackNotificationMessage(payload, func(value string) string { return value }, func(crmURL string) string {
 		return "🔗 Посилання на CRM: " + crmURL
 	})
 }
 
-func buildNotificationMessage(payload map[string]any, escape func(string) string, crmLine func(string) string) string {
-	source := stringify(payload["source_system"])
-	sourceLabel := sourceLabels[source]
-	if sourceLabel == "" {
-		if source == "" {
-			sourceLabel = "—"
-		} else {
-			sourceLabel = source
-		}
-	}
-	name := stringify(payload["name"])
-	if name == "" {
-		name = "—"
-	}
-	phone := stringify(payload["phone"])
-	if phone == "" {
-		phone = "—"
-	}
+func buildSlackNotificationMessage(payload map[string]any, escape func(string) string, crmLine func(string) string) string {
 	lines := []string{
 		"🔔 Нова заявка!",
-		"👤 Ім'я: " + escape(name),
+		"👤 Ім'я: " + escape(notificationName(payload)),
 	}
 	if clientInfo := strings.TrimSpace(stringify(payload["client_info"])); clientInfo != "" {
 		lines = append(lines, "", escape(clientInfo))
 	}
 	lines = append(lines,
-		"📞 Тел: "+escape(phone),
-		"🌐 Джерело: "+escape(sourceLabel),
+		"📞 Тел: "+escape(notificationPhone(payload)),
+		"🌐 Джерело: "+escape(notificationSourceLabel(payload)),
 	)
 	if crmURL := strings.TrimSpace(stringify(payload["crm_url"])); crmURL != "" {
 		lines = append(lines, crmLine(crmURL))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func notificationDateTime(payload map[string]any) string {
+	createdAt := time.Now().UTC()
+	if raw := strings.TrimSpace(stringify(payload["created_at"])); raw != "" {
+		if parsed, err := time.Parse(time.RFC3339, raw); err == nil {
+			createdAt = parsed
+		}
+	}
+	locationName := "Europe/Kyiv"
+	if strings.EqualFold(strings.TrimSpace(stringify(payload["office_code"])), "warsaw") {
+		locationName = "Europe/Warsaw"
+	}
+	location, err := time.LoadLocation(locationName)
+	if err != nil {
+		return createdAt.Format("02.01.2006, 15:04")
+	}
+	return createdAt.In(location).Format("02.01.2006, 15:04")
+}
+
+func notificationName(payload map[string]any) string {
+	if name := strings.TrimSpace(stringify(payload["name"])); name != "" {
+		return name
+	}
+	return "—"
+}
+
+func notificationPhone(payload map[string]any) string {
+	if phone := strings.TrimSpace(stringify(payload["phone"])); phone != "" {
+		return phone
+	}
+	return "—"
+}
+
+func notificationSourceLabel(payload map[string]any) string {
+	source := stringify(payload["source_system"])
+	if sourceLabel := sourceLabels[source]; sourceLabel != "" {
+		return sourceLabel
+	}
+	if source == "" {
+		return "—"
+	}
+	return source
 }
 
 // BuildNotificationMessage is retained for callers that need a plain-text message.

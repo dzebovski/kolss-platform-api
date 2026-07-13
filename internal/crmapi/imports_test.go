@@ -52,7 +52,7 @@ func TestMapSheetRowKyivSheet2Headers(t *testing.T) {
 	if lead.ExternalID != "l:new-campaign-lead" || value(lead.Phone) != "+380672223344" {
 		t.Fatalf("unexpected identity/phone: %#v", lead)
 	}
-	if value(lead.ProductInterest) != "Меблі у спальню" || value(lead.ProjectStage) != "Потрібен проєкт" {
+	if value(lead.ProductInterest) != "Меблі у спальню" || value(lead.ProjectStage) != "Потрібен проєкт" || value(lead.CommunicationPreference) != "Telegram" {
 		t.Fatalf("unexpected Sheet2 Kyiv mapping: %#v", lead)
 	}
 	if value(lead.SourceNote) != "Які меблі вам потрібно виготовити?: Меблі у спальню\nНа якому етапі перебуває ваш проєкт?: Потрібен проєкт\nЯк вам зручно спілкуватися?: Telegram" {

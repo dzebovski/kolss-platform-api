@@ -6,19 +6,24 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
 type LeadInfo struct {
-	ID           uuid.UUID
-	Name         *string
-	Phone        *string
-	Email        *string
-	ClientInfo   *string
-	OfficeCode   string
-	SourceSystem string
+	ID                      uuid.UUID
+	Name                    *string
+	Phone                   *string
+	Email                   *string
+	ClientInfo              *string
+	ProductInterest         *string
+	ProjectStage            *string
+	CommunicationPreference *string
+	CreatedAt               *time.Time
+	OfficeCode              string
+	SourceSystem            string
 }
 
 type Enqueuer struct {
@@ -82,16 +87,23 @@ func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
 		return nil
 	}
 
+	createdAt := time.Now().UTC()
+	if lead.CreatedAt != nil && !lead.CreatedAt.IsZero() {
+		createdAt = lead.CreatedAt.UTC()
+	}
 	payload := map[string]any{
-		"lead_id":          lead.ID.String(),
-		"name":             lead.Name,
-		"phone":            lead.Phone,
-		"email":            lead.Email,
-		"client_info":      lead.ClientInfo,
-		"product_interest": nil,
-		"source_system":    lead.SourceSystem,
-		"office_code":      lead.OfficeCode,
-		"crm_url":          crmLeadURL(e.CRMSiteURLPublic, lead.ID),
+		"lead_id":                  lead.ID.String(),
+		"name":                     lead.Name,
+		"phone":                    lead.Phone,
+		"email":                    lead.Email,
+		"client_info":              lead.ClientInfo,
+		"product_interest":         lead.ProductInterest,
+		"project_stage":            lead.ProjectStage,
+		"communication_preference": lead.CommunicationPreference,
+		"created_at":               createdAt.Format(time.RFC3339),
+		"source_system":            lead.SourceSystem,
+		"office_code":              lead.OfficeCode,
+		"crm_url":                  crmLeadURL(e.CRMSiteURLPublic, lead.ID),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {

@@ -30,14 +30,32 @@ func TestDetectContentType(t *testing.T) {
 
 func TestBuildTelegramNotificationMessage(t *testing.T) {
 	msg := BuildTelegramNotificationMessage(map[string]any{
-		"name":          "Іван <Менеджер>",
+		"name":                     "Іван <Менеджер>",
+		"phone":                    "+380501112233",
+		"source_system":            "meta_lead_ads",
+		"office_code":              "kyiv",
+		"created_at":               "2026-07-13T12:15:00Z",
+		"product_interest":         "Кухня & шафа",
+		"project_stage":            "Потрібен <проєкт>",
+		"communication_preference": "Telegram",
+		"crm_url":                  "https://crm.example/crm/leads/1?a=1&b=2",
+	})
+	want := "🔔 Нова заявка! 13.07.2026, 15:15\n👤 Ім'я: Іван &lt;Менеджер&gt;\n🏠 Що цікавить?: Кухня &amp; шафа\n🪜 Етап проекту?: Потрібен &lt;проєкт&gt;\n💬 Як спілкуватися?: Telegram\n📞 Тел: +380501112233\n🌐 Джерело: Facebook Forms\n🔗 <a href=\"https://crm.example/crm/leads/1?a=1&amp;b=2\">Відкрити в CRM</a>"
+	if msg != want {
+		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
+	}
+}
+
+func TestBuildTelegramNotificationMessageSkipsEmptyStructuredFields(t *testing.T) {
+	msg := BuildTelegramNotificationMessage(map[string]any{
+		"name":          "Іван",
 		"phone":         "+380501112233",
 		"source_system": "site_form",
-		"client_info":   "Які меблі вам потрібно виготовити?: Кухня & шафа\nЯк вам зручно спілкуватися?: Telegram",
-		"crm_url":       "https://crm.example/crm/leads/1?a=1&b=2",
+		"office_code":   "kyiv",
+		"created_at":    "2026-01-01T10:00:00Z",
+		"client_info":   "Короткий опис",
 	})
-	want := "🔔 Нова заявка!\n👤 Ім'я: Іван &lt;Менеджер&gt;\n\nЯкі меблі вам потрібно виготовити?: Кухня &amp; шафа\nЯк вам зручно спілкуватися?: Telegram\n📞 Тел: +380501112233\n🌐 Джерело: Site Form\n🔗 Посилання на CRM: <a href=\"https://crm.example/crm/leads/1?a=1&amp;b=2\">Відкрити в CRM</a>"
-	if msg != want {
+	if want := "🔔 Нова заявка! 01.01.2026, 12:00\n👤 Ім'я: Іван\nℹ️ Інформація: Короткий опис\n📞 Тел: +380501112233\n🌐 Джерело: Site Form"; msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}
 }

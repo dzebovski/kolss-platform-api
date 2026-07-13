@@ -29,24 +29,25 @@ type importSource struct {
 }
 
 type mappedSheetLead struct {
-	ExternalID      string
-	Name            *string
-	Phone           *string
-	Email           *string
-	ProductInterest *string
-	ProjectStage    *string
-	CityRegion      *string
-	SourceNote      *string
-	SourceCreatedAt *time.Time
-	AdID            *string
-	AdName          *string
-	CampaignID      *string
-	CampaignName    *string
-	FormID          *string
-	FormName        *string
-	Platform        *string
-	IsOrganic       *string
-	Raw             map[string]any
+	ExternalID              string
+	Name                    *string
+	Phone                   *string
+	Email                   *string
+	ProductInterest         *string
+	ProjectStage            *string
+	CommunicationPreference *string
+	CityRegion              *string
+	SourceNote              *string
+	SourceCreatedAt         *time.Time
+	AdID                    *string
+	AdName                  *string
+	CampaignID              *string
+	CampaignName            *string
+	FormID                  *string
+	FormName                *string
+	Platform                *string
+	IsOrganic               *string
+	Raw                     map[string]any
 }
 
 func (s *Server) handleSheetImport(w http.ResponseWriter, r *http.Request) {
@@ -133,7 +134,19 @@ func (s *Server) handleSheetImport(w http.ResponseWriter, r *http.Request) {
 		if inserted {
 			created++
 			if req.Mode == "incremental" {
-				if err := s.notifier.Enqueue(r.Context(), tx, notifications.LeadInfo{ID: leadID, Name: lead.Name, Phone: lead.Phone, Email: lead.Email, ClientInfo: lead.SourceNote, OfficeCode: source.OfficeCode, SourceSystem: "meta_lead_ads"}); err != nil {
+				if err := s.notifier.Enqueue(r.Context(), tx, notifications.LeadInfo{
+					ID:                      leadID,
+					Name:                    lead.Name,
+					Phone:                   lead.Phone,
+					Email:                   lead.Email,
+					ClientInfo:              lead.SourceNote,
+					ProductInterest:         lead.ProductInterest,
+					ProjectStage:            lead.ProjectStage,
+					CommunicationPreference: lead.CommunicationPreference,
+					CreatedAt:               lead.SourceCreatedAt,
+					OfficeCode:              source.OfficeCode,
+					SourceSystem:            "meta_lead_ads",
+				}); err != nil {
 					s.writeError(w, r, http.StatusInternalServerError, "notification_enqueue_failed", "Could not enqueue lead notification", nil)
 					return
 				}
@@ -210,6 +223,7 @@ func mapSheetRow(source importSource, raw map[string]any) (mappedSheetLead, erro
 		communicationPreference := firstNonEmptyString(raw, "як_вам_зручно_спілкуватися?")
 		lead.ProductInterest = clean(productInterest)
 		lead.ProjectStage = clean(projectStage)
+		lead.CommunicationPreference = clean(communicationPreference)
 		lead.SourceNote = sourceNoteFromAnswers(productInterest, projectStage, communicationPreference)
 	}
 	return lead, nil
