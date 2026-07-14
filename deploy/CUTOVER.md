@@ -55,15 +55,16 @@ Current Sheet last rows at reconciliation time:
 
 ## Single-instance rollout
 
-1. Record counts for pending/failed notifications, unsent Slack rows, and
-   `awaiting_upload` submissions.
-2. Deploy both public frontends with the text-only contract.
-3. Apply migrations through `20260713190000_single_instance_notifications.sql`.
-4. Deploy the API image with the dispatcher enabled while the legacy worker is
-   still active. `FOR UPDATE SKIP LOCKED` and claim tokens prevent duplicate claims.
-5. Verify Kyiv, Warsaw, and all configured Kyiv Telegram destinations.
-6. Apply the App Platform spec without a `workers:` component.
-7. Monitor restarts, memory, notification failures, and pending rows for 24 hours.
+- [x] Record counts for pending/failed notifications, unsent Slack rows, and
+  `awaiting_upload` submissions.
+- [x] Deploy both public frontends with the text-only contract.
+- [x] Apply migrations through `20260713190000_single_instance_notifications.sql`.
+- [x] Deploy the API image with the in-process dispatcher enabled.
+- [x] Verify a Kyiv test lead through Google Sheets, CRM, and all configured
+  Kyiv Telegram destinations (`САШКО ТЕСТ 3`, 2026-07-14).
+- [ ] Verify a Warsaw test lead and its configured Telegram destination.
+- [x] Apply the App Platform spec without a `workers:` component.
+- [ ] Monitor restarts, memory, notification failures, and pending rows for 24 hours.
 
 Rollback: restore the previous worker image/component and set
 `NOTIFICATION_DISPATCHER_ENABLED=false`. Existing outbox rows remain durable.

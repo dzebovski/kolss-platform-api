@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -85,7 +85,6 @@ func New(opts Options) *Server {
 
 func (s *Server) Handler() http.Handler {
 	router := chi.NewRouter()
-	router.Use(chimiddleware.Recoverer)
 	s.RegisterRoutes(router)
 	return router
 }
@@ -93,8 +92,9 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) RegisterRoutes(router chi.Router) {
 	router.Group(func(r chi.Router) {
 		r.Use(s.BaseMiddleware)
+		r.Use(s.recoverPanic)
 		r.Post("/v1/integrations/google-sheets/lead-imports", s.handleSheetImport)
-		r.Options("/v1/*", s.handleOptions)
+		r.Options("/v1/integrations/google-sheets/lead-imports", s.handleOptions)
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.AuthMiddleware)
@@ -121,7 +121,59 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/reports/leads", s.handleLeadReport)
 			r.Get("/v1/files/{fileId}/download-url", s.handleFileDownloadURL)
 		})
+
+		for _, pattern := range crmCORSRoutePatterns {
+			r.Options(pattern, s.handleOptions)
+		}
 	})
+}
+
+func (s *Server) recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
+				s.logger.Error(
+					"crm api panic recovered",
+					"panic", recovered,
+					"request_id", requestID(r.Context()),
+					"path", r.URL.Path,
+					"stack", string(debug.Stack()),
+				)
+				if r.Header.Get("Connection") != "Upgrade" {
+					writeJSON(w, http.StatusInternalServerError, errorResponse{
+						Code:      "internal_error",
+						Message:   "Internal server error",
+						RequestID: requestID(r.Context()),
+					})
+				}
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+var crmCORSRoutePatterns = []string{
+	"/v1/me",
+	"/v1/offices",
+	"/v1/loss-reasons",
+	"/v1/leads",
+	"/v1/leads/{leadId}",
+	"/v1/leads/{leadId}/events/{eventId}",
+	"/v1/leads/{leadId}/archive",
+	"/v1/leads/{leadId}/restore",
+	"/v1/leads/{leadId}/actions/{action}",
+	"/v1/users",
+	"/v1/managers",
+	"/v1/users/{userId}",
+	"/v1/users/{userId}/deactivate",
+	"/v1/users/{userId}/reactivate",
+	"/v1/users/{userId}/delete",
+	"/v1/dashboard/overview",
+	"/v1/reports/leads",
+	"/v1/files/{fileId}/download-url",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {

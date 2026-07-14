@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	platformauth "github.com/dzebovski/kolss-platform-api/internal/auth"
 	"github.com/dzebovski/kolss-platform-api/internal/botcheck"
@@ -167,7 +166,6 @@ func main() {
 
 func buildRouter(public *httpapi.Server, crm *crmapi.Server) http.Handler {
 	router := chi.NewRouter()
-	router.Use(chimiddleware.Recoverer)
 	public.RegisterRoutes(router)
 	crm.RegisterRoutes(router)
 	return router

@@ -7,11 +7,11 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/dzebovski/kolss-platform-api/internal/botcheck"
@@ -72,7 +72,6 @@ func NewServer(svc LeadService, opts Options) *Server {
 
 func (s *Server) Handler() http.Handler {
 	router := chi.NewRouter()
-	router.Use(chimiddleware.Recoverer)
 	s.RegisterRoutes(router)
 	return router
 }
@@ -80,10 +79,35 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) RegisterRoutes(router chi.Router) {
 	router.Group(func(r chi.Router) {
 		r.Use(s.Middleware)
+		r.Use(s.recoverPanic)
 		r.Get("/health/live", s.handleLive)
 		r.Get("/health/ready", s.handleReady)
 		r.Post("/v1/public/sites/{siteCode}/lead-submissions", s.handleCreate)
 		r.Options("/v1/public/sites/{siteCode}/lead-submissions", s.handleOptions)
+	})
+}
+
+func (s *Server) recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
+				requestID := requestIDFrom(r.Context())
+				s.logger.Error(
+					"public api panic recovered",
+					"panic", recovered,
+					"request_id", requestID,
+					"path", r.URL.Path,
+					"stack", string(debug.Stack()),
+				)
+				if r.Header.Get("Connection") != "Upgrade" {
+					writeError(w, http.StatusInternalServerError, "internal_error", "unexpected server error", requestID, nil)
+				}
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
 }
 
