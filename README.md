@@ -1,13 +1,13 @@
 # KOLSS Platform API
 
-Go API and worker for the KOLSS CRM, Google Sheets imports, and notification outbox.
+Single-process Go API for the KOLSS CRM, Google Sheets imports, public text forms, and Telegram outbox delivery.
 
 ## Current phase
 
 - CRM uses Supabase directly only for Auth/session.
 - All CRM data, workflow, reports, user admin, archive, and file URL operations go through this API.
 - Kyiv and Warsaw Google Sheets use the office-secret import endpoint.
-- Worker runs notification-only by default and sends Telegram per office.
+- The API runs the Telegram dispatcher in-process, immediately after commits and with an hourly recovery sweep.
 - Public UA/PL site forms are feature-disabled (`PUBLIC_SITE_FORMS_ENABLED=false`).
 
 ## Local run
@@ -16,13 +16,11 @@ Go API and worker for the KOLSS CRM, Google Sheets imports, and notification out
 cp .env.example .env
 set -a && source .env && set +a
 go run ./cmd/api
-go run ./cmd/worker
 ```
 
-Notification-only worker does not require S3 credentials. Health endpoints:
+S3 credentials are optional and are retained only for historical CRM attachment download URLs. Health endpoints:
 
 - API: `GET /health/live`, `GET /health/ready`
-- Worker: `GET /health/live` on `WORKER_HEALTH_ADDR` (default `:8081`)
 
 ## Contract and migrations
 
@@ -51,7 +49,7 @@ tab changes also reset it, so a row checkpoint from the previous tab is never re
 
 `TELEGRAM_CHAT_ID_KYIV` remains the primary Kyiv chat. Set
 `TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV=-1002833157899` on the API component to also
-deliver each Kyiv lead to the **Kolss Kyiv** supergroup. The worker records a
+deliver each Kyiv lead to the **Kolss Kyiv** supergroup. The API outbox records a
 separate outbox destination and retry state for every Telegram chat.
 
 For CRM links, set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` exactly; do not add
@@ -59,7 +57,7 @@ For CRM links, set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` exactly; do not ad
 
 ## Deploy
 
-- [`Dockerfile`](./Dockerfile) — `api`, `worker`, and `both` targets
+- [`Dockerfile`](./Dockerfile) — API-only image
 - [`deploy/digitalocean-app.yaml`](./deploy/digitalocean-app.yaml)
 - [`deploy/CUTOVER.md`](./deploy/CUTOVER.md)
 
@@ -70,5 +68,5 @@ Production backend domain: `https://api.kolss.eu`.
 ```bash
 go test ./...
 go vet ./...
-go build ./cmd/api ./cmd/worker
+go build ./cmd/api
 ```

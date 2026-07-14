@@ -17,10 +17,9 @@ import (
 )
 
 type fakeService struct {
-	pingErr  error
-	create   func(ctx context.Context, siteCode string, data validation.ValidatedLeadSubmission) (submissions.CreateResult, error)
-	complete func(ctx context.Context, siteCode string, submissionID uuid.UUID, token string, files []validation.ValidatedCompleteFile) (submissions.CompleteResult, error)
-	calls    int
+	pingErr error
+	create  func(ctx context.Context, siteCode string, data validation.ValidatedLeadSubmission) (submissions.CreateResult, error)
+	calls   int
 }
 
 func (f *fakeService) Ping(ctx context.Context) error { return f.pingErr }
@@ -35,18 +34,7 @@ func (f *fakeService) Create(ctx context.Context, siteCode string, data validati
 	return submissions.CreateResult{
 		SubmissionID: id,
 		Status:       "accepted",
-		LeadID:       &lead,
-	}, nil
-}
-
-func (f *fakeService) Complete(ctx context.Context, siteCode string, submissionID uuid.UUID, token string, files []validation.ValidatedCompleteFile) (submissions.CompleteResult, error) {
-	if f.complete != nil {
-		return f.complete(ctx, siteCode, submissionID, token, files)
-	}
-	return submissions.CompleteResult{
-		LeadID:       uuid.New(),
-		SubmissionID: submissionID,
-		Status:       "accepted",
+		LeadID:       lead,
 	}, nil
 }
 
@@ -55,7 +43,6 @@ func newTestServer(svc *fakeService) http.Handler {
 		Enabled:            true,
 		AllowedOrigins:     []string{"http://localhost:4200", "http://localhost:4201"},
 		BodyLimitBytes:     64 * 1024,
-		CompleteLimitBytes: 16 * 1024,
 		RateLimitPerMinute: 1000,
 		RequireBotToken:    false,
 		BotVerifier:        botcheck.DisabledVerifier{},
@@ -75,7 +62,6 @@ func validBody() map[string]any {
 		"page_url":               "http://localhost:4200/",
 		"bot_token":              "test-token",
 		"website":                "",
-		"files":                  []any{},
 	}
 }
 
@@ -86,13 +72,10 @@ func TestCreate_SuccessNoFiles(t *testing.T) {
 		if siteCode != "kolss-pl" {
 			t.Fatalf("site=%s", siteCode)
 		}
-		if len(data.Files) != 0 {
-			t.Fatalf("expected no files")
-		}
 		return submissions.CreateResult{
 			SubmissionID: subID,
 			Status:       "accepted",
-			LeadID:       &leadID,
+			LeadID:       leadID,
 		}, nil
 	}}
 	handler := newTestServer(svc)
@@ -135,28 +118,65 @@ func TestCreate_Honeypot(t *testing.T) {
 	}
 }
 
-func TestComplete_Success(t *testing.T) {
-	subID := uuid.New()
-	svc := &fakeService{complete: func(ctx context.Context, siteCode string, submissionID uuid.UUID, token string, files []validation.ValidatedCompleteFile) (submissions.CompleteResult, error) {
-		if token != "secret-token" {
-			t.Fatalf("token=%s", token)
-		}
-		return submissions.CompleteResult{
-			LeadID:       uuid.MustParse("11111111-1111-1111-1111-111111111111"),
-			SubmissionID: submissionID,
-			Status:       "accepted",
-			FileCount:    0,
-		}, nil
-	}}
-	handler := newTestServer(svc)
-	body, _ := json.Marshal(map[string]any{"files": []any{}})
-	req := httptest.NewRequest(http.MethodPost, "/v1/public/sites/kolss-pl/lead-submissions/"+subID.String()+"/complete", bytes.NewReader(body))
+func TestCreate_RejectsLegacyFilesField(t *testing.T) {
+	handler := newTestServer(&fakeService{})
+	bodyMap := validBody()
+	bodyMap["files"] = []any{}
+	body, _ := json.Marshal(bodyMap)
+	req := httptest.NewRequest(http.MethodPost, "/v1/public/sites/kolss-pl/lead-submissions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Submission-Token", "secret-token")
 	rr := httptest.NewRecorder()
 	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusCreated {
+	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCompleteRouteRemoved(t *testing.T) {
+	handler := newTestServer(&fakeService{})
+	req := httptest.NewRequest(http.MethodPost, "/v1/public/sites/kolss-pl/lead-submissions/"+uuid.NewString()+"/complete", bytes.NewReader([]byte(`{"files":[]}`)))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCreate_MethodNotAllowed(t *testing.T) {
+	handler := newTestServer(&fakeService{})
+	req := httptest.NewRequest(http.MethodGet, "/v1/public/sites/kolss-pl/lead-submissions", nil)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestCreate_OptionsPreservesCORS(t *testing.T) {
+	handler := newTestServer(&fakeService{})
+	req := httptest.NewRequest(http.MethodOptions, "/v1/public/sites/kolss-pl/lead-submissions", nil)
+	req.Header.Set("Origin", "http://localhost:4200")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:4200" {
+		t.Fatalf("CORS origin = %q", got)
+	}
+}
+
+func TestCreate_PanicRecovery(t *testing.T) {
+	svc := &fakeService{create: func(context.Context, string, validation.ValidatedLeadSubmission) (submissions.CreateResult, error) {
+		panic("boom")
+	}}
+	handler := newTestServer(svc)
+	body, _ := json.Marshal(validBody())
+	request := httptest.NewRequest(http.MethodPost, "/v1/public/sites/kolss-pl/lead-submissions", bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

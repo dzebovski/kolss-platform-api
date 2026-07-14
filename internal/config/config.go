@@ -9,14 +9,16 @@ import (
 )
 
 type Config struct {
-	HTTPAddr               string
-	DatabaseURL            string
-	CORSAllowedOrigins     []string
-	BodyLimitBytes         int64
-	CompleteBodyLimit      int64
-	RateLimitPerMinute     int
-	ShutdownTimeout        time.Duration
-	PublicSiteFormsEnabled bool
+	HTTPAddr                      string
+	DatabaseURL                   string
+	CORSAllowedOrigins            []string
+	BodyLimitBytes                int64
+	RateLimitPerMinute            int
+	ShutdownTimeout               time.Duration
+	PublicSiteFormsEnabled        bool
+	NotificationDispatcherEnabled bool
+	NotificationSweepInterval     time.Duration
+	NotificationBatchSize         int
 
 	SupabaseURL        string
 	SupabaseJWKSURL    string
@@ -25,11 +27,6 @@ type Config struct {
 	ImportSecretKyiv   string
 	ImportSecretWarsaw string
 	ImportBodyLimit    int64
-
-	SubmissionTokenPepper string
-	SubmissionTTL         time.Duration
-	PresignTTL            time.Duration
-	QuarantineBucket      string
 
 	BotcheckDisabled          bool
 	TurnstileSecretKey        string
@@ -49,8 +46,6 @@ type Config struct {
 	TelegramChatIDKyiv            string
 	TelegramChatIDWarsaw          string
 	TelegramAdditionalChatIDsKyiv string
-	SlackWebhookURLKyiv           string
-	SlackWebhookURLWarsaw         string
 }
 
 func Load() (Config, error) {
@@ -61,11 +56,13 @@ func Load() (Config, error) {
 			"CORS_ALLOWED_ORIGINS",
 			"http://localhost:4200,http://localhost:4201,http://127.0.0.1:4200,http://127.0.0.1:4201",
 		)),
-		BodyLimitBytes:         int64(getenvInt("BODY_LIMIT_BYTES", 64*1024)),
-		CompleteBodyLimit:      int64(getenvInt("COMPLETE_BODY_LIMIT_BYTES", 16*1024)),
-		RateLimitPerMinute:     getenvInt("RATE_LIMIT_PER_MINUTE", 30),
-		ShutdownTimeout:        time.Duration(getenvInt("SHUTDOWN_TIMEOUT_SECONDS", 10)) * time.Second,
-		PublicSiteFormsEnabled: getenvBool("PUBLIC_SITE_FORMS_ENABLED", false),
+		BodyLimitBytes:                int64(getenvInt("BODY_LIMIT_BYTES", 64*1024)),
+		RateLimitPerMinute:            getenvInt("RATE_LIMIT_PER_MINUTE", 30),
+		ShutdownTimeout:               time.Duration(getenvInt("SHUTDOWN_TIMEOUT_SECONDS", 10)) * time.Second,
+		PublicSiteFormsEnabled:        getenvBool("PUBLIC_SITE_FORMS_ENABLED", false),
+		NotificationDispatcherEnabled: getenvBool("NOTIFICATION_DISPATCHER_ENABLED", true),
+		NotificationSweepInterval:     time.Duration(getenvInt("NOTIFICATION_SWEEP_INTERVAL_MINUTES", 60)) * time.Minute,
+		NotificationBatchSize:         getenvInt("NOTIFICATION_BATCH_SIZE", 20),
 
 		SupabaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
 		SupabaseJWKSURL:    strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),
@@ -74,11 +71,6 @@ func Load() (Config, error) {
 		ImportSecretKyiv:   strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_KYIV")),
 		ImportSecretWarsaw: strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_WARSAW")),
 		ImportBodyLimit:    int64(getenvInt("IMPORT_BODY_LIMIT_BYTES", 512*1024)),
-
-		SubmissionTokenPepper: strings.TrimSpace(os.Getenv("SUBMISSION_TOKEN_PEPPER")),
-		SubmissionTTL:         time.Duration(getenvInt("SUBMISSION_TTL_MINUTES", 60)) * time.Minute,
-		PresignTTL:            time.Duration(getenvInt("PRESIGN_TTL_MINUTES", 10)) * time.Minute,
-		QuarantineBucket:      getenv("STORAGE_QUARANTINE_BUCKET", "lead-uploads-quarantine"),
 
 		BotcheckDisabled:          getenvBool("BOTCHECK_DISABLED", false),
 		TurnstileSecretKey:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET_KEY")),
@@ -101,14 +93,9 @@ func Load() (Config, error) {
 		TelegramChatIDKyiv:            strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_KYIV")),
 		TelegramChatIDWarsaw:          strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_WARSAW")),
 		TelegramAdditionalChatIDsKyiv: strings.TrimSpace(os.Getenv("TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV")),
-		SlackWebhookURLKyiv:           strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_KYIV")),
-		SlackWebhookURLWarsaw:         strings.TrimSpace(os.Getenv("SLACK_WEBHOOK_URL_WARSAW")),
 	}
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
-	}
-	if cfg.PublicSiteFormsEnabled && cfg.SubmissionTokenPepper == "" {
-		return Config{}, fmt.Errorf("SUBMISSION_TOKEN_PEPPER is required")
 	}
 	if cfg.PublicSiteFormsEnabled && !cfg.BotcheckDisabled && cfg.TurnstileSecretKey == "" {
 		return Config{}, fmt.Errorf("TURNSTILE_SECRET_KEY is required unless BOTCHECK_DISABLED=true")
@@ -120,8 +107,9 @@ func Load() (Config, error) {
 		if cfg.S3Endpoint == "" || cfg.S3AccessKeyID == "" || cfg.S3SecretAccessKey == "" {
 			return Config{}, fmt.Errorf("SUPABASE_S3_ENDPOINT, SUPABASE_S3_ACCESS_KEY_ID, and SUPABASE_S3_SECRET_ACCESS_KEY are required together")
 		}
-	} else if cfg.PublicSiteFormsEnabled && !cfg.BotcheckDisabled {
-		return Config{}, fmt.Errorf("S3 storage credentials are required unless BOTCHECK_DISABLED=true")
+	}
+	if cfg.NotificationSweepInterval <= 0 || cfg.NotificationBatchSize <= 0 {
+		return Config{}, fmt.Errorf("notification dispatcher interval and batch size must be positive")
 	}
 	if cfg.SupabaseURL == "" {
 		return Config{}, fmt.Errorf("SUPABASE_URL is required")
@@ -137,6 +125,20 @@ func Load() (Config, error) {
 
 func (c Config) HasS3() bool {
 	return c.S3Endpoint != "" || c.S3AccessKeyID != "" || c.S3SecretAccessKey != ""
+}
+
+func (c Config) TelegramBotTokenFor(officeCode string) string {
+	switch officeCode {
+	case "kyiv":
+		if c.TelegramBotTokenKyiv != "" {
+			return c.TelegramBotTokenKyiv
+		}
+	case "warsaw":
+		if c.TelegramBotTokenWarsaw != "" {
+			return c.TelegramBotTokenWarsaw
+		}
+	}
+	return c.TelegramBotToken
 }
 
 func getenv(key, fallback string) string {

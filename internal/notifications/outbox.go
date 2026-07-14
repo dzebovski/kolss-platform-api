@@ -26,64 +26,33 @@ type LeadInfo struct {
 	SourceSystem            string
 }
 
-type Enqueuer struct {
+type Waker interface {
+	Wake()
+}
+
+// Outbox writes Telegram delivery tasks in the same transaction as a lead.
+type Outbox struct {
 	CRMSiteURLPublic              string
-	TelegramBotToken              string
-	TelegramBotTokenKyiv          string
-	TelegramBotTokenWarsaw        string
 	TelegramChatIDKyiv            string
 	TelegramChatIDWarsaw          string
 	TelegramAdditionalChatIDsKyiv string
-	SlackWebhookURLKyiv           string
-	SlackWebhookURLWarsaw         string
 }
 
-func (e Enqueuer) telegramConfigured(officeCode string) bool {
-	return e.telegramToken(officeCode) != "" && len(e.telegramChatIDs(officeCode)) > 0
-}
-
-func (e Enqueuer) telegramToken(officeCode string) string {
-	switch officeCode {
-	case "kyiv":
-		if e.TelegramBotTokenKyiv != "" {
-			return e.TelegramBotTokenKyiv
-		}
-	case "warsaw":
-		if e.TelegramBotTokenWarsaw != "" {
-			return e.TelegramBotTokenWarsaw
-		}
-	}
-	return e.TelegramBotToken
-}
-
-func (e Enqueuer) telegramChatIDs(officeCode string) []string {
+func (o Outbox) telegramChatIDs(officeCode string) []string {
 	var primary, additional string
 	switch officeCode {
 	case "kyiv":
-		primary = e.TelegramChatIDKyiv
-		additional = e.TelegramAdditionalChatIDsKyiv
+		primary = o.TelegramChatIDKyiv
+		additional = o.TelegramAdditionalChatIDsKyiv
 	case "warsaw":
-		primary = e.TelegramChatIDWarsaw
+		primary = o.TelegramChatIDWarsaw
 	}
 	return uniqueChatIDs(primary, additional)
 }
 
-func (e Enqueuer) slackWebhook(officeCode string) string {
-	switch officeCode {
-	case "kyiv":
-		return e.SlackWebhookURLKyiv
-	case "warsaw":
-		if e.SlackWebhookURLWarsaw != "" {
-			return e.SlackWebhookURLWarsaw
-		}
-		return e.SlackWebhookURLKyiv
-	default:
-		return e.SlackWebhookURLKyiv
-	}
-}
-
-func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
-	if !e.telegramConfigured(lead.OfficeCode) && e.slackWebhook(lead.OfficeCode) == "" {
+func (o Outbox) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
+	chatIDs := o.telegramChatIDs(lead.OfficeCode)
+	if len(chatIDs) == 0 {
 		return nil
 	}
 
@@ -103,27 +72,20 @@ func (e Enqueuer) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
 		"created_at":               createdAt.Format(time.RFC3339),
 		"source_system":            lead.SourceSystem,
 		"office_code":              lead.OfficeCode,
-		"crm_url":                  crmLeadURL(e.CRMSiteURLPublic, lead.ID),
+		"crm_url":                  crmLeadURL(o.CRMSiteURLPublic, lead.ID),
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 
-	const q = `
+	const query = `
 insert into public.lead_notifications (lead_id, channel, destination, status, payload, attempts, last_error)
-values ($1, $2::public.notification_channel, $3, 'pending', $4::jsonb, 0, null)
+values ($1, 'telegram'::public.notification_channel, $2, 'pending', $3::jsonb, 0, null)
 on conflict (lead_id, channel, destination) do nothing
 `
-	if e.telegramConfigured(lead.OfficeCode) {
-		for _, chatID := range e.telegramChatIDs(lead.OfficeCode) {
-			if _, err := tx.Exec(ctx, q, lead.ID, "telegram", chatID, raw); err != nil {
-				return err
-			}
-		}
-	}
-	if e.slackWebhook(lead.OfficeCode) != "" {
-		if _, err := tx.Exec(ctx, q, lead.ID, "slack", "", raw); err != nil {
+	for _, chatID := range chatIDs {
+		if _, err := tx.Exec(ctx, query, lead.ID, chatID, raw); err != nil {
 			return err
 		}
 	}

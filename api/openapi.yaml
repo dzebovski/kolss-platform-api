@@ -1,11 +1,10 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 1.0.0
+  version: 2.0.0
   description: >
-    Public contact-form API for PL/UA sites. Create returns a draft submission and
-    optional signed upload URLs. Lead + attachments are created only on successful complete
-    (or immediately when create has no files).
+    CRM API, Google Sheets imports, and text-only public contact forms for PL/UA sites.
+    A public submission atomically creates the lead and Telegram outbox rows.
 servers:
   - url: https://api.kolss.eu
     description: Production
@@ -305,10 +304,10 @@ paths:
     post:
       tags: [PublicLeads]
       operationId: createLeadSubmission
-      summary: Create a draft lead submission (and signed uploads)
+      summary: Create a text-only lead submission
       description: >
-        Validates contact fields, consent, honeypot, files allowlist, and Turnstile.
-        Does not create a CRM lead unless files is empty (auto-complete).
+        Validates contact fields, consent, honeypot, and Turnstile, then atomically
+        creates the CRM lead, accepted submission, and Telegram outbox rows.
       parameters:
         - $ref: '#/components/parameters/SiteCode'
       requestBody:
@@ -365,64 +364,6 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: Bot provider unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-  /v1/public/sites/{siteCode}/lead-submissions/{submissionId}/complete:
-    post:
-      tags: [PublicLeads]
-      operationId: completeLeadSubmission
-      summary: Complete submission after uploads
-      parameters:
-        - $ref: '#/components/parameters/SiteCode'
-        - name: submissionId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-        - name: X-Submission-Token
-          in: header
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LeadSubmissionCompleteRequest'
-      responses:
-        '201':
-          description: Lead created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LeadSubmissionCompleteResponse'
-        '200':
-          description: Idempotent replay
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LeadSubmissionCompleteResponse'
-        '401':
-          description: Invalid submission token
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '404':
-          description: Submission not found
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: Expired or conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          description: Upload incomplete
           content:
             application/json:
               schema:
@@ -605,17 +546,6 @@ components:
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]
-    FileMeta:
-      type: object
-      additionalProperties: false
-      required: [client_file_id, filename, content_type, size_bytes]
-      properties:
-        client_file_id: { type: string, format: uuid }
-        filename: { type: string, maxLength: 255 }
-        content_type:
-          type: string
-          enum: [application/pdf, text/plain, text/csv, image/jpeg, image/png, image/webp]
-        size_bytes: { type: integer, minimum: 1, maximum: 5242880 }
     LeadSubmissionRequest:
       type: object
       additionalProperties: false
@@ -638,62 +568,15 @@ components:
         page_url: { type: [string, 'null'], format: uri, maxLength: 2048 }
         bot_token: { type: string, maxLength: 2048 }
         website: { type: [string, 'null'], maxLength: 200, description: Honeypot }
-        files:
-          type: array
-          maxItems: 5
-          items: { $ref: '#/components/schemas/FileMeta' }
-    UploadSession:
-      type: object
-      additionalProperties: false
-      required: [file_id, client_file_id, method, upload_url, headers, expires_at]
-      properties:
-        file_id: { type: string, format: uuid }
-        client_file_id: { type: string, format: uuid }
-        method: { type: string, enum: [PUT] }
-        upload_url: { type: string, format: uri }
-        headers:
-          type: object
-          additionalProperties: { type: string }
-        expires_at: { type: string, format: date-time }
     LeadSubmissionCreateResponse:
       type: object
       additionalProperties: false
-      required: [submission_id, status, duplicate, uploads, request_id]
+      required: [submission_id, lead_id, status, duplicate, request_id]
       properties:
         submission_id: { type: string, format: uuid }
-        status: { type: string, enum: [awaiting_upload, accepted] }
-        duplicate: { type: boolean }
-        submission_token: { type: string }
-        uploads:
-          type: array
-          items: { $ref: '#/components/schemas/UploadSession' }
-        lead_id: { type: [string, 'null'], format: uuid }
-        request_id: { type: string, format: uuid }
-    LeadSubmissionCompleteRequest:
-      type: object
-      additionalProperties: false
-      required: [files]
-      properties:
-        files:
-          type: array
-          maxItems: 5
-          items:
-            type: object
-            additionalProperties: false
-            required: [file_id]
-            properties:
-              file_id: { type: string, format: uuid }
-              etag: { type: [string, 'null'] }
-    LeadSubmissionCompleteResponse:
-      type: object
-      additionalProperties: false
-      required: [id, submission_id, status, duplicate, file_count, request_id]
-      properties:
-        id: { type: string, format: uuid }
-        submission_id: { type: string, format: uuid }
+        lead_id: { type: string, format: uuid }
         status: { type: string, enum: [accepted] }
         duplicate: { type: boolean }
-        file_count: { type: integer, minimum: 0 }
         request_id: { type: string, format: uuid }
     HealthResponse:
       type: object
@@ -718,14 +601,11 @@ components:
                 - consent_required
                 - privacy_version_mismatch
                 - site_not_found
-                - submission_not_found
+                - feature_disabled
                 - rate_limited
                 - payload_too_large
                 - bot_check_failed
                 - bot_provider_unavailable
-                - invalid_submission_token
-                - upload_incomplete
-                - submission_expired
                 - submission_conflict
                 - internal_error
                 - not_ready

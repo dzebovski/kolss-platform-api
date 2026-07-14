@@ -134,7 +134,7 @@ func (s *Server) handleSheetImport(w http.ResponseWriter, r *http.Request) {
 		if inserted {
 			created++
 			if req.Mode == "incremental" {
-				if err := s.notifier.Enqueue(r.Context(), tx, notifications.LeadInfo{
+				if err := s.outbox.Enqueue(r.Context(), tx, notifications.LeadInfo{
 					ID:                      leadID,
 					Name:                    lead.Name,
 					Phone:                   lead.Phone,
@@ -169,6 +169,9 @@ func (s *Server) handleSheetImport(w http.ResponseWriter, r *http.Request) {
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "import_failed", "Could not finish import", nil)
 		return
+	}
+	if req.Mode == "incremental" && created > 0 && s.notificationWaker != nil {
+		s.notificationWaker.Wake()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"runId": runID, "mode": req.Mode, "processed": len(req.Rows), "created": created, "updated": updated, "skipped": skipped})
 }

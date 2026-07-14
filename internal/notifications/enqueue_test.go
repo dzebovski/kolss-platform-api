@@ -8,11 +8,11 @@ import (
 )
 
 func TestTelegramChatIDsKyivIncludesPrimaryAndUniqueAdditionalIDs(t *testing.T) {
-	enqueuer := Enqueuer{
+	outbox := Outbox{
 		TelegramChatIDKyiv:            "-100111",
 		TelegramAdditionalChatIDsKyiv: " -1002833157899, -100111, -100222 ",
 	}
-	if got, want := enqueuer.telegramChatIDs("kyiv"), []string{"-100111", "-1002833157899", "-100222"}; !reflect.DeepEqual(got, want) {
+	if got, want := outbox.telegramChatIDs("kyiv"), []string{"-100111", "-1002833157899", "-100222"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("telegramChatIDs() = %#v, want %#v", got, want)
 	}
 }

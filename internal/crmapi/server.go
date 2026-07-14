@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,7 +31,8 @@ type Options struct {
 	SupabaseURL        string
 	SupabaseSecretKey  string
 	CRMSiteURLPublic   string
-	Notifier           notifications.Enqueuer
+	Outbox             notifications.Outbox
+	NotificationWaker  notifications.Waker
 	Storage            storage.ObjectStorage
 	Logger             *slog.Logger
 }
@@ -44,7 +47,8 @@ type Server struct {
 	supabaseURL        string
 	supabaseSecretKey  string
 	crmSiteURLPublic   string
-	notifier           notifications.Enqueuer
+	outbox             notifications.Outbox
+	notificationWaker  notifications.Waker
 	storage            storage.ObjectStorage
 	logger             *slog.Logger
 }
@@ -72,42 +76,55 @@ func New(opts Options) *Server {
 		supabaseURL:        strings.TrimRight(opts.SupabaseURL, "/"),
 		supabaseSecretKey:  opts.SupabaseSecretKey,
 		crmSiteURLPublic:   strings.TrimRight(opts.CRMSiteURLPublic, "/"),
-		notifier:           opts.Notifier,
+		outbox:             opts.Outbox,
+		notificationWaker:  opts.NotificationWaker,
 		storage:            opts.Storage,
 		logger:             logger,
 	}
 }
 
 func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/me", s.handleMe)
-	mux.HandleFunc("GET /v1/offices", s.handleOffices)
-	mux.HandleFunc("GET /v1/loss-reasons", s.handleLossReasons)
-	mux.HandleFunc("GET /v1/leads", s.handleListLeads)
-	mux.HandleFunc("POST /v1/leads", s.handleCreateLead)
-	mux.HandleFunc("GET /v1/leads/{leadId}", s.handleGetLead)
-	mux.HandleFunc("PATCH /v1/leads/{leadId}", s.handleUpdateLead)
-	mux.HandleFunc("PATCH /v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
-	mux.HandleFunc("POST /v1/leads/{leadId}/archive", s.handleArchiveLead)
-	mux.HandleFunc("POST /v1/leads/{leadId}/restore", s.handleRestoreLead)
-	mux.HandleFunc("POST /v1/leads/{leadId}/actions/{action}", s.handleLeadAction)
-	mux.HandleFunc("GET /v1/users", s.handleListUsers)
-	mux.HandleFunc("GET /v1/managers", s.handleListManagers)
-	mux.HandleFunc("POST /v1/users", s.handleCreateUser)
-	mux.HandleFunc("GET /v1/users/{userId}", s.handleGetUser)
-	mux.HandleFunc("PATCH /v1/users/{userId}", s.handleUpdateUser)
-	mux.HandleFunc("POST /v1/users/{userId}/deactivate", s.handleDeactivateUser)
-	mux.HandleFunc("POST /v1/users/{userId}/reactivate", s.handleReactivateUser)
-	mux.HandleFunc("POST /v1/users/{userId}/delete", s.handleDeleteUser)
-	mux.HandleFunc("GET /v1/dashboard/overview", s.handleDashboardOverview)
-	mux.HandleFunc("GET /v1/reports/leads", s.handleLeadReport)
-	mux.HandleFunc("GET /v1/files/{fileId}/download-url", s.handleFileDownloadURL)
-	mux.HandleFunc("POST /v1/integrations/google-sheets/lead-imports", s.handleSheetImport)
-	mux.HandleFunc("OPTIONS /", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	return s.middleware(mux)
+	router := chi.NewRouter()
+	router.Use(chimiddleware.Recoverer)
+	s.RegisterRoutes(router)
+	return router
 }
 
-func (s *Server) middleware(next http.Handler) http.Handler {
+func (s *Server) RegisterRoutes(router chi.Router) {
+	router.Group(func(r chi.Router) {
+		r.Use(s.BaseMiddleware)
+		r.Post("/v1/integrations/google-sheets/lead-imports", s.handleSheetImport)
+		r.Options("/v1/*", s.handleOptions)
+
+		r.Group(func(r chi.Router) {
+			r.Use(s.AuthMiddleware)
+			r.Get("/v1/me", s.handleMe)
+			r.Get("/v1/offices", s.handleOffices)
+			r.Get("/v1/loss-reasons", s.handleLossReasons)
+			r.Get("/v1/leads", s.handleListLeads)
+			r.Post("/v1/leads", s.handleCreateLead)
+			r.Get("/v1/leads/{leadId}", s.handleGetLead)
+			r.Patch("/v1/leads/{leadId}", s.handleUpdateLead)
+			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
+			r.Post("/v1/leads/{leadId}/archive", s.handleArchiveLead)
+			r.Post("/v1/leads/{leadId}/restore", s.handleRestoreLead)
+			r.Post("/v1/leads/{leadId}/actions/{action}", s.handleLeadAction)
+			r.Get("/v1/users", s.handleListUsers)
+			r.Get("/v1/managers", s.handleListManagers)
+			r.Post("/v1/users", s.handleCreateUser)
+			r.Get("/v1/users/{userId}", s.handleGetUser)
+			r.Patch("/v1/users/{userId}", s.handleUpdateUser)
+			r.Post("/v1/users/{userId}/deactivate", s.handleDeactivateUser)
+			r.Post("/v1/users/{userId}/reactivate", s.handleReactivateUser)
+			r.Post("/v1/users/{userId}/delete", s.handleDeleteUser)
+			r.Get("/v1/dashboard/overview", s.handleDashboardOverview)
+			r.Get("/v1/reports/leads", s.handleLeadReport)
+			r.Get("/v1/files/{fileId}/download-url", s.handleFileDownloadURL)
+		})
+	})
+}
+
+func (s *Server) BaseMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if requestID == "" {
@@ -121,12 +138,12 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 			return
 		}
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
-		r = r.WithContext(ctx)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
-		if r.URL.Path == "/v1/integrations/google-sheets/lead-imports" {
-			next.ServeHTTP(w, r)
-			return
-		}
+func (s *Server) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		actor, err := s.authenticate(r)
 		if err != nil {
 			s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Unauthorized", nil)
@@ -138,6 +155,10 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), contextKey{}, effective)))
 	})
+}
+
+func (s *Server) handleOptions(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 type requestIDContextKey struct{}

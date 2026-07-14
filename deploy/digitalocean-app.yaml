@@ -9,8 +9,6 @@ domains:
 services:
   - name: api
     dockerfile_path: Dockerfile
-    # Default image stage "both" includes /usr/local/bin/api and /usr/local/bin/worker
-    run_command: api
     http_port: 8080
     instance_count: 1
     instance_size_slug: basic-xxs
@@ -31,6 +29,12 @@ services:
         value: "https://crm.kolss.eu,http://localhost:4200"
       - key: PUBLIC_SITE_FORMS_ENABLED
         value: "false"
+      - key: NOTIFICATION_DISPATCHER_ENABLED
+        value: "true"
+      - key: NOTIFICATION_SWEEP_INTERVAL_MINUTES
+        value: "60"
+      - key: NOTIFICATION_BATCH_SIZE
+        value: "20"
       - key: SUPABASE_URL
         scope: RUN_TIME
         type: GENERAL
@@ -57,13 +61,8 @@ services:
         type: GENERAL
       - key: TURNSTILE_EXPECTED_ACTION
         value: "lead_submission"
-      - key: SUBMISSION_TOKEN_PEPPER
-        scope: RUN_TIME
-        type: SECRET
       - key: BOTCHECK_DISABLED
         value: "false"
-      - key: STORAGE_QUARANTINE_BUCKET
-        value: "lead-uploads-quarantine"
       - key: SUPABASE_S3_ENDPOINT
         scope: RUN_TIME
         type: GENERAL
@@ -95,66 +94,5 @@ services:
       - key: TELEGRAM_CHAT_ID_WARSAW
         scope: RUN_TIME
         type: SECRET
-      - key: SLACK_WEBHOOK_URL_KYIV
-        scope: RUN_TIME
-        type: SECRET
-      - key: SLACK_WEBHOOK_URL_WARSAW
-        scope: RUN_TIME
-        type: SECRET
-      - key: SUBMISSION_TTL_MINUTES
-        value: "60"
-      - key: PRESIGN_TTL_MINUTES
-        value: "10"
       - key: SHUTDOWN_TIMEOUT_SECONDS
         value: "10"
-
-workers:
-  - name: worker
-    dockerfile_path: Dockerfile
-    run_command: worker
-    instance_count: 1
-    instance_size_slug: basic-xxs
-    # Internal health endpoint (not publicly routed)
-    envs:
-      - key: WORKER_HEALTH_ADDR
-        value: ":8081"
-      - key: WORKER_CLEANUP_INTERVAL_SECONDS
-        value: "60"
-      - key: WORKER_SCAN_INTERVAL_SECONDS
-        value: "15"
-      - key: WORKER_NOTIFY_INTERVAL_SECONDS
-        value: "10"
-      - key: WORKER_NOTIFY_BATCH_SIZE
-        value: "20"
-      - key: WORKER_SITE_JOBS_ENABLED
-        value: "false"
-      - key: DATABASE_URL
-        scope: RUN_TIME
-        type: SECRET
-      - key: CRM_SITE_URL_PUBLIC
-        value: "https://crm.kolss.eu"
-      - key: TELEGRAM_BOT_TOKEN
-        scope: RUN_TIME
-        type: SECRET
-      - key: TELEGRAM_BOT_TOKEN_KYIV
-        scope: RUN_TIME
-        type: SECRET
-      - key: TELEGRAM_BOT_TOKEN_WARSAW
-        scope: RUN_TIME
-        type: SECRET
-      - key: TELEGRAM_CHAT_ID_KYIV
-        scope: RUN_TIME
-        type: SECRET
-      - key: TELEGRAM_CHAT_ID_WARSAW
-        scope: RUN_TIME
-        type: SECRET
-      - key: SLACK_WEBHOOK_URL_KYIV
-        scope: RUN_TIME
-        type: SECRET
-      - key: SLACK_WEBHOOK_URL_WARSAW
-        scope: RUN_TIME
-        type: SECRET
-      - key: SHUTDOWN_TIMEOUT_SECONDS
-        value: "10"
-      - key: BOTCHECK_DISABLED
-        value: "false"

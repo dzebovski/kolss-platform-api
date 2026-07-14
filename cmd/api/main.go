@@ -7,8 +7,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 
 	platformauth "github.com/dzebovski/kolss-platform-api/internal/auth"
 	"github.com/dzebovski/kolss-platform-api/internal/botcheck"
@@ -70,28 +74,39 @@ func main() {
 	}
 
 	sites := leads.NewRepository(pool)
-	notify := notifications.Enqueuer{
+	outbox := notifications.Outbox{
 		CRMSiteURLPublic:              cfg.CRMSiteURLPublic,
-		TelegramBotToken:              cfg.TelegramBotToken,
-		TelegramBotTokenKyiv:          cfg.TelegramBotTokenKyiv,
-		TelegramBotTokenWarsaw:        cfg.TelegramBotTokenWarsaw,
 		TelegramChatIDKyiv:            cfg.TelegramChatIDKyiv,
 		TelegramChatIDWarsaw:          cfg.TelegramChatIDWarsaw,
 		TelegramAdditionalChatIDsKyiv: cfg.TelegramAdditionalChatIDsKyiv,
-		SlackWebhookURLKyiv:           cfg.SlackWebhookURLKyiv,
-		SlackWebhookURLWarsaw:         cfg.SlackWebhookURLWarsaw,
 	}
-	svc := submissions.NewService(
-		pool, sites, objects, notify,
-		cfg.SubmissionTokenPepper, cfg.QuarantineBucket,
-		cfg.SubmissionTTL, cfg.PresignTTL,
-	)
+	var dispatcher *notifications.Dispatcher
+	var notificationWaker notifications.Waker
+	dispatcherCtx, cancelDispatcher := context.WithCancel(context.Background())
+	var dispatcherWG sync.WaitGroup
+	if cfg.NotificationDispatcherEnabled {
+		dispatcher = notifications.NewDispatcher(
+			pool,
+			cfg,
+			logger,
+			cfg.NotificationBatchSize,
+			cfg.NotificationSweepInterval,
+		)
+		notificationWaker = dispatcher
+		dispatcherWG.Add(1)
+		go func() {
+			defer dispatcherWG.Done()
+			dispatcher.Run(dispatcherCtx)
+		}()
+	} else {
+		logger.Warn("notification dispatcher disabled")
+	}
+	svc := submissions.NewService(pool, sites, outbox, notificationWaker)
 
 	server := httpapi.NewServer(svc, httpapi.Options{
 		Enabled:            cfg.PublicSiteFormsEnabled,
 		AllowedOrigins:     cfg.CORSAllowedOrigins,
 		BodyLimitBytes:     cfg.BodyLimitBytes,
-		CompleteLimitBytes: cfg.CompleteBodyLimit,
 		RateLimitPerMinute: cfg.RateLimitPerMinute,
 		RequireBotToken:    !cfg.BotcheckDisabled,
 		BotVerifier:        bots,
@@ -112,14 +127,12 @@ func main() {
 		SupabaseURL:        cfg.SupabaseURL,
 		SupabaseSecretKey:  cfg.SupabaseSecretKey,
 		CRMSiteURLPublic:   cfg.CRMSiteURLPublic,
-		Notifier:           notify,
+		Outbox:             outbox,
+		NotificationWaker:  notificationWaker,
 		Storage:            objects,
 		Logger:             logger,
 	})
-	root := http.NewServeMux()
-	root.Handle("/health/", server.Handler())
-	root.Handle("/v1/public/", server.Handler())
-	root.Handle("/v1/", crm.Handler())
+	root := buildRouter(server, crm)
 
 	httpServer := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -143,7 +156,19 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		logger.Error("graceful shutdown failed", "error", err)
+		cancelDispatcher()
+		dispatcherWG.Wait()
 		os.Exit(1)
 	}
+	cancelDispatcher()
+	dispatcherWG.Wait()
 	logger.Info("api shut down")
+}
+
+func buildRouter(public *httpapi.Server, crm *crmapi.Server) http.Handler {
+	router := chi.NewRouter()
+	router.Use(chimiddleware.Recoverer)
+	public.RegisterRoutes(router)
+	crm.RegisterRoutes(router)
+	return router
 }

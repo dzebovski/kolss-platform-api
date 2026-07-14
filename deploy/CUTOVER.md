@@ -20,14 +20,15 @@ API requirements:
 - separate Kyiv/Warsaw Google Sheets import secrets;
 - `CORS_ALLOWED_ORIGINS=https://crm.kolss.eu`;
 - `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu`;
-- `PUBLIC_SITE_FORMS_ENABLED=false`.
+- `PUBLIC_SITE_FORMS_ENABLED=false`;
+- `NOTIFICATION_DISPATCHER_ENABLED=true`;
+- `NOTIFICATION_SWEEP_INTERVAL_MINUTES=60`;
+- `NOTIFICATION_BATCH_SIZE=20`;
+- separate Kyiv/Warsaw bot tokens and chat IDs.
 
-Worker requirements:
-
-- `DATABASE_URL` for `kolss_worker`;
-- `WORKER_SITE_JOBS_ENABLED=false`;
-- separate Kyiv/Warsaw bot tokens/chat IDs;
-- no Supabase Auth secret and no mandatory S3 credentials.
+The API service is the only paid component. It writes notification rows in the
+lead transaction and consumes them in-process. S3 credentials remain configured
+only when historical CRM attachment downloads are required.
 
 Verify the starter `*.ondigitalocean.app` ingress first, then add `api.kolss.eu` and create the DigitalOcean-provided CNAME in GoDaddy.
 
@@ -51,6 +52,21 @@ Current Sheet last rows at reconciliation time:
 
 - Kyiv: 81
 - Warsaw: 24
+
+## Single-instance rollout
+
+1. Record counts for pending/failed notifications, unsent Slack rows, and
+   `awaiting_upload` submissions.
+2. Deploy both public frontends with the text-only contract.
+3. Apply migrations through `20260713190000_single_instance_notifications.sql`.
+4. Deploy the API image with the dispatcher enabled while the legacy worker is
+   still active. `FOR UPDATE SKIP LOCKED` and claim tokens prevent duplicate claims.
+5. Verify Kyiv, Warsaw, and all configured Kyiv Telegram destinations.
+6. Apply the App Platform spec without a `workers:` component.
+7. Monitor restarts, memory, notification failures, and pending rows for 24 hours.
+
+Rollback: restore the previous worker image/component and set
+`NOTIFICATION_DISPATCHER_ENABLED=false`. Existing outbox rows remain durable.
 
 ## Final 24-hour lock-down
 
