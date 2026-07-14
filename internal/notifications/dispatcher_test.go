@@ -85,6 +85,22 @@ func TestBuildTelegramNotificationMessageFallsBackToClientInfo(t *testing.T) {
 	}
 }
 
+func TestBuildTelegramNotificationMessageManualSource(t *testing.T) {
+	msg := BuildTelegramNotificationMessage(map[string]any{
+		"name":             "Марія",
+		"phone":            "+380671112233",
+		"source_system":    "manual",
+		"office_code":      "kyiv",
+		"created_at":       "2026-07-14T10:00:00Z",
+		"product_interest": "Кухня",
+		"crm_url":          "https://crm.example/crm/leads/abc",
+	})
+	want := "🔔 Нова заявка! 14.07.2026, 13:00\n👤 Ім'я: Марія\n🏠 Що цікавить?: Кухня\n📞 Тел: +380671112233\n🌐 Джерело: Вручну\n🔗 <a href=\"https://crm.example/crm/leads/abc\">Відкрити в CRM</a>"
+	if msg != want {
+		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
+	}
+}
+
 func TestWakeDrainsQueueLargerThanBatch(t *testing.T) {
 	database := &fakeNotificationDatabase{}
 	for i := 0; i < 45; i++ {

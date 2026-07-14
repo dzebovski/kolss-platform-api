@@ -499,6 +499,23 @@ components:
         archived_by: { type: [string, 'null'], format: uuid }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        first_contact_attempt:
+          description: >
+            Chronologically first contact attempt for this lead (order by created_at asc).
+            Embedded on list items so the leads table can render the first-call column
+            without fetching detail. Null when the lead has no contact attempts.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadFirstContactAttempt'
+    LeadFirstContactAttempt:
+      type: object
+      additionalProperties: false
+      required: [result, comment, created_at, manager_id]
+      properties:
+        result: { type: string, description: Attempt outcome code (reached, no_answer, cannot_talk, bad_lead) }
+        comment: { type: string }
+        created_at: { type: string, format: date-time }
+        manager_id: { type: string, format: uuid }
     LeadListResponse:
       type: object
       required: [items, nextCursor]

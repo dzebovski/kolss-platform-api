@@ -12,12 +12,26 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+
+	"github.com/dzebovski/kolss-platform-api/internal/notifications"
 )
 
 const leadJSONExpression = `
 	to_jsonb(l) || jsonb_build_object(
 		'offices', to_jsonb(o),
-		'profiles', case when p.id is null then null else jsonb_build_object('display_name', p.display_name) end
+		'profiles', case when p.id is null then null else jsonb_build_object('display_name', p.display_name) end,
+		'first_contact_attempt', (
+			select jsonb_build_object(
+				'result', a.result,
+				'comment', a.comment,
+				'created_at', a.created_at,
+				'manager_id', a.manager_id
+			)
+			from public.lead_contact_attempts a
+			where a.lead_id = l.id
+			order by a.created_at asc
+			limit 1
+		)
 	)
 `
 
@@ -309,6 +323,27 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 	}
 	if err == nil && inserted {
 		_, err = tx.Exec(r.Context(), `insert into public.lead_events (lead_id, actor_id, event_type, new_value) values ($1,$2,'created',$3)`, leadID, actor.ID, map[string]any{"source": req.Source, "source_system": sourceSystem, "source_channel": sourceChannel, "workflow_status": "new"})
+		var officeCode string
+		if err == nil {
+			err = tx.QueryRow(r.Context(), `select code from public.offices where id = $1`, req.OfficeID).Scan(&officeCode)
+		}
+		if err == nil {
+			name := strings.TrimSpace(req.Name)
+			phone := strings.TrimSpace(req.Phone)
+			if err := s.outbox.Enqueue(r.Context(), tx, notifications.LeadInfo{
+				ID:              leadID,
+				Name:            &name,
+				Phone:           &phone,
+				Email:           cleanPtr(req.Email),
+				ClientInfo:      clean(req.InitialMessage),
+				ProductInterest: clean(req.ProductInterest),
+				OfficeCode:      officeCode,
+				SourceSystem:    sourceSystem,
+			}); err != nil {
+				s.writeError(w, r, http.StatusInternalServerError, "notification_enqueue_failed", "Could not enqueue lead notification", nil)
+				return
+			}
+		}
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -316,6 +351,9 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "lead_create_failed", "Could not create lead", nil)
 		return
+	}
+	if inserted && s.notificationWaker != nil {
+		s.notificationWaker.Wake()
 	}
 	status := http.StatusCreated
 	if !inserted {
