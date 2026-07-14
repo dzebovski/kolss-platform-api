@@ -104,6 +104,14 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		placeholder := addArg(value)
 		where = append(where, `(coalesce(l.name, '') ilike `+placeholder+` or coalesce(l.phone, '') ilike `+placeholder+` or coalesce(l.email, '') ilike `+placeholder+`)`)
 	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 3660 {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid days filter", map[string]string{"days": "Must be an integer from 1 to 3660"})
+			return
+		}
+		where = append(where, "l.created_at >= now() - make_interval(days => "+addArg(parsed)+")")
+	}
 	archived := strings.TrimSpace(r.URL.Query().Get("archived"))
 	switch archived {
 	case "only":

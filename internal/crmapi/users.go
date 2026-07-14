@@ -90,18 +90,20 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	} else if active == "false" {
 		where = "p.is_active=false"
 	}
-	authUsers, err := s.listAuthUsers(r)
-	if err != nil {
-		s.writeError(w, r, http.StatusBadGateway, "auth_users_load_failed", "Could not load auth users", nil)
-		return
-	}
+	// Join auth.users for emails and aggregate offices once — avoid Auth Admin pagination (504 risk).
 	rows, err := s.pool.Query(r.Context(), `
-		select p.id,to_jsonb(p),
-			coalesce((select jsonb_agg(to_jsonb(o) order by o.code)
-				from public.user_office_memberships m join public.offices o on o.id=m.office_id
-				where m.user_id=p.id),'[]'::jsonb)
+		select p.id, to_jsonb(p), coalesce(u.email, ''),
+			coalesce(offices.offices, '[]'::jsonb)
 		from public.profiles p
-		where `+where+` order by p.display_name nulls last,p.created_at
+		left join auth.users u on u.id = p.id
+		left join lateral (
+			select jsonb_agg(to_jsonb(o) order by o.code) as offices
+			from public.user_office_memberships m
+			join public.offices o on o.id = m.office_id
+			where m.user_id = p.id
+		) offices on true
+		where `+where+`
+		order by p.display_name nulls last, p.created_at
 	`)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "users_load_failed", "Could not load users", nil)
@@ -112,11 +114,16 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id uuid.UUID
 		var profile, offices []byte
-		if err := rows.Scan(&id, &profile, &offices); err != nil {
+		var email string
+		if err := rows.Scan(&id, &profile, &email, &offices); err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, "users_load_failed", "Could not load users", nil)
 			return
 		}
-		items = append(items, map[string]any{"id": id, "email": authUsers[id], "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
+		var emailVal any
+		if email != "" {
+			emailVal = email
+		}
+		items = append(items, map[string]any{"id": id, "email": emailVal, "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -286,7 +293,27 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, act
 		s.writeError(w, r, http.StatusBadRequest, "confirmation_mismatch", "Confirmation email does not match", map[string]string{"confirmEmail": "Email does not match"})
 		return
 	}
-	if _, err := s.pool.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, active); err != nil {
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, active); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
+		return
+	}
+	if !active {
+		if _, err := tx.Exec(r.Context(), `
+			update public.leads
+			set assigned_to = null, updated_at = now()
+			where assigned_to = $1 and archived_at is null
+		`, userID); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not clear lead assignments", nil)
+			return
+		}
+	}
+	if err := tx.Commit(r.Context()); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
 		return
 	}
@@ -369,26 +396,6 @@ func replaceMemberships(r *http.Request, tx pgx.Tx, userID uuid.UUID, officeIDs 
 type authAdminUser struct {
 	ID    uuid.UUID `json:"id"`
 	Email string    `json:"email"`
-}
-
-func (s *Server) listAuthUsers(r *http.Request) (map[uuid.UUID]string, error) {
-	result := map[uuid.UUID]string{}
-	for page := 1; ; page++ {
-		var response struct {
-			Users []authAdminUser `json:"users"`
-		}
-		path := fmt.Sprintf("/auth/v1/admin/users?page=%d&per_page=200", page)
-		if err := s.authAdmin(r, http.MethodGet, path, nil, &response); err != nil {
-			return nil, err
-		}
-		for _, user := range response.Users {
-			result[user.ID] = user.Email
-		}
-		if len(response.Users) < 200 {
-			break
-		}
-	}
-	return result, nil
 }
 
 func (s *Server) getAuthUser(r *http.Request, userID uuid.UUID) (authAdminUser, error) {
