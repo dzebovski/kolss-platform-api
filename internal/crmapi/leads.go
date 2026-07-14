@@ -110,7 +110,7 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid days filter", map[string]string{"days": "Must be an integer from 1 to 3660"})
 			return
 		}
-		where = append(where, "l.created_at >= now() - make_interval(days => "+addArg(parsed)+")")
+		where = append(where, "coalesce(l.source_created_at, l.created_at) >= now() - make_interval(days => "+addArg(parsed)+")")
 	}
 	archived := strings.TrimSpace(r.URL.Query().Get("archived"))
 	switch archived {
