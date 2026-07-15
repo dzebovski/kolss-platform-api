@@ -196,7 +196,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [take, mark-thinking, first-call, schedule-visit, reschedule-visit, complete-visit, comment, close, mark-successful]
+            enum: [take, mark-thinking, activate, reopen, first-call, schedule-visit, reschedule-visit, complete-visit, comment, close, mark-successful]
         - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         content:

@@ -21,6 +21,7 @@ type actionRequest struct {
 	Reason         string   `json:"reason"`
 	ContractNumber string   `json:"contractNumber"`
 	Amount         *float64 `json:"amount"`
+	Currency       string   `json:"currency"`
 	Prepayment     *float64 `json:"prepayment"`
 }
 
@@ -149,6 +150,14 @@ func (s *Server) handleLeadAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
+	if action == "activate" && lead.Workflow != "thinking" {
+		s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only thinking leads can be activated", nil)
+		return
+	}
+	if action == "reopen" && lead.Workflow != "closed" {
+		s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only closed leads can be reopened", nil)
+		return
+	}
 
 	err = s.applyLeadAction(r, tx, actor, leadID, lead, action, req)
 	if err != nil {
@@ -210,7 +219,7 @@ func claimIdempotency(r *http.Request, tx pgx.Tx, actorID uuid.UUID, operation, 
 func validateAction(action string, req actionRequest) map[string]string {
 	fields := map[string]string{}
 	switch action {
-	case "take", "mark-thinking":
+	case "take", "mark-thinking", "activate", "reopen":
 	case "first-call":
 		if strings.TrimSpace(req.Result) == "" {
 			fields["result"] = "Required"
@@ -244,8 +253,10 @@ func validateAction(action string, req actionRequest) map[string]string {
 		if req.Amount == nil || *req.Amount <= 0 {
 			fields["amount"] = "Must be greater than zero"
 		}
-		if req.Prepayment == nil || *req.Prepayment < 0 {
-			fields["prepayment"] = "Must not be negative"
+		switch strings.ToUpper(strings.TrimSpace(req.Currency)) {
+		case "UAH", "USD", "EUR", "PLN":
+		default:
+			fields["currency"] = "Must be UAH, USD, EUR, or PLN"
 		}
 	default:
 		fields["action"] = "Unknown action"
@@ -282,11 +293,28 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 		eventType = "thinking"
 		oldValue = map[string]any{"workflow_status": lead.Workflow}
 		newValue["workflow_status"] = workflow
+	case "activate", "reopen":
+		assignedTo = nil
+		workflow = "new"
+		leadStatus = "new"
+		eventType = action
+		if action == "activate" {
+			eventType = "activated"
+		} else {
+			eventType = "reopened"
+		}
+		callbackDue = nil
+		oldValue = map[string]any{"workflow_status": lead.Workflow, "lead_status": lead.LeadStatus}
+		newValue = map[string]any{"workflow_status": workflow, "lead_status": leadStatus}
 	case "first-call":
 		if _, err := tx.Exec(r.Context(), `insert into public.lead_contact_attempts (lead_id,manager_id,result,comment) values ($1,$2,$3,$4)`, leadID, actor.ID, strings.TrimSpace(req.Result), strings.TrimSpace(req.Comment)); err != nil {
 			return err
 		}
-		workflow = "first_call_done"
+		if strings.TrimSpace(req.Result) == "no_answer" {
+			workflow = "callback_required"
+		} else {
+			workflow = "first_call_done"
+		}
 		leadStatus = "in_progress"
 		eventType = "contact_attempt"
 		newValue = map[string]any{"result": strings.TrimSpace(req.Result), "workflow_status": workflow}
@@ -340,7 +368,13 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 		leadStatus = "converted"
 		eventType = "successful"
 		callbackDue = nil
-		newValue = map[string]any{"workflow_status": workflow, "contract_number": strings.TrimSpace(req.ContractNumber), "amount": req.Amount, "prepayment": req.Prepayment}
+		newValue = map[string]any{
+			"workflow_status":  workflow,
+			"contract_number":  strings.TrimSpace(req.ContractNumber),
+			"amount":           req.Amount,
+			"currency":         strings.ToUpper(strings.TrimSpace(req.Currency)),
+			"signed_at":        now,
+		}
 	}
 
 	query := `update public.leads set workflow_status=$2, lead_status=$3, assigned_to=$4,
@@ -350,7 +384,7 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 		loss_reason=case when $7::text is null then loss_reason else $7 end,
 		callback_due_at=case when $8::boolean then null else callback_due_at end,
 		updated_at=$5, version=version+1 where id=$1`
-	clearCallback := callbackDue == nil && (action == "schedule-visit" || action == "close" || action == "mark-successful")
+	clearCallback := callbackDue == nil && (action == "schedule-visit" || action == "close" || action == "mark-successful" || action == "activate" || action == "reopen")
 	lossReason := (*string)(nil)
 	if action == "close" {
 		reason := strings.TrimSpace(req.Reason)

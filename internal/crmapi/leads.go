@@ -31,6 +31,13 @@ const leadJSONExpression = `
 			where a.lead_id = l.id
 			order by a.created_at asc
 			limit 1
+		),
+		'reactivated_at', (
+			select e.created_at
+			from public.lead_events e
+			where e.lead_id = l.id and e.event_type in ('activated', 'reopened')
+			order by e.created_at desc
+			limit 1
 		)
 	)
 `

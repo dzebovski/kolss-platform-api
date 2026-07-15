@@ -8,12 +8,35 @@ import (
 	"testing"
 )
 
-func TestValidateActionMarkThinking(t *testing.T) {
-	fields := validateAction("mark-thinking", actionRequest{})
+func TestValidateActionMarkSuccessful(t *testing.T) {
+	amount := 1200.0
+	fields := validateAction("mark-successful", actionRequest{
+		ContractNumber: "K-1",
+		Amount:         &amount,
+		Currency:       "uah",
+	})
 	if len(fields) != 0 {
-		t.Fatalf("mark-thinking should need no body fields, got %#v", fields)
+		t.Fatalf("valid mark-successful payload rejected: %#v", fields)
+	}
+
+	fields = validateAction("mark-successful", actionRequest{
+		ContractNumber: "K-1",
+		Amount:         &amount,
+	})
+	if fields["currency"] == "" {
+		t.Fatal("expected currency validation error")
+	}
+
+	fields = validateAction("mark-successful", actionRequest{
+		ContractNumber: "K-1",
+		Amount:         &amount,
+		Currency:       "GBP",
+	})
+	if fields["currency"] == "" {
+		t.Fatal("expected invalid currency rejection")
 	}
 }
+
 
 func TestValidateActionUnknownRejected(t *testing.T) {
 	fields := validateAction("nope", actionRequest{})
@@ -48,5 +71,23 @@ func TestDeleteLeadRouteRegistered(t *testing.T) {
 	}
 	if !strings.Contains(string(src), `r.Post("/v1/leads/{leadId}/delete", s.handleDeleteLead)`) {
 		t.Fatal("delete lead route is not registered")
+	}
+}
+
+func TestValidateActionActivateAndReopen(t *testing.T) {
+	for _, action := range []string{"activate", "reopen"} {
+		fields := validateAction(action, actionRequest{})
+		if len(fields) != 0 {
+			t.Fatalf("%s should need no body fields, got %#v", action, fields)
+		}
+	}
+}
+
+func TestLeadJSONExpressionIncludesReactivatedAt(t *testing.T) {
+	if !strings.Contains(leadJSONExpression, "'reactivated_at'") {
+		t.Fatal("leadJSONExpression missing reactivated_at")
+	}
+	if !strings.Contains(leadJSONExpression, "event_type in ('activated', 'reopened')") {
+		t.Fatal("leadJSONExpression missing activated/reopened filter")
 	}
 }
