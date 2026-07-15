@@ -196,7 +196,7 @@ paths:
           required: true
           schema:
             type: string
-            enum: [take, first-call, schedule-visit, reschedule-visit, complete-visit, comment, close, mark-successful]
+            enum: [take, mark-thinking, first-call, schedule-visit, reschedule-visit, complete-visit, comment, close, mark-successful]
         - { $ref: '#/components/parameters/IdempotencyKey' }
       requestBody:
         content:
@@ -223,6 +223,18 @@ paths:
         - { $ref: '#/components/parameters/LeadId' }
         - { $ref: '#/components/parameters/IdempotencyKey' }
       responses: { '200': { description: Lead restored }, '403': { $ref: '#/components/responses/CRMError' } }
+  /v1/leads/{leadId}/delete:
+    post:
+      tags: [Leads]
+      operationId: deleteLead
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200': { description: Archived lead permanently deleted }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/users:
     get:
       tags: [Users]

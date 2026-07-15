@@ -133,7 +133,7 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusForbidden, "archive_forbidden", "Archived leads are restricted", nil)
 			return
 		}
-		where = append(where, "l.archived_at is not null")
+		where = append(where, "(l.archived_at is not null or l.workflow_status = 'thinking')")
 	case "all":
 		if !actor.IsSuperAdmin() {
 			where = append(where, "l.archived_at is null")
@@ -552,6 +552,66 @@ func (s *Server) handleRestoreLead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"restored": true})
+}
+
+func (s *Server) handleDeleteLead(w http.ResponseWriter, r *http.Request) {
+	actor, _ := actorFromContext(r.Context())
+	if !actor.IsSuperAdmin() {
+		s.writeError(w, r, http.StatusForbidden, "delete_forbidden", "Only super admin can permanently delete leads", nil)
+		return
+	}
+	leadID, err := uuid.Parse(r.PathValue("leadId"))
+	if err != nil || !requireIdempotencyKey(s, w, r) {
+		if err != nil {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead id", nil)
+		}
+		return
+	}
+
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var archivedAt *time.Time
+	err = tx.QueryRow(r.Context(), `select archived_at from public.leads where id=$1 for update`, leadID).Scan(&archivedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	if archivedAt == nil {
+		s.writeError(w, r, http.StatusConflict, "not_archived", "Only archived leads can be permanently deleted", nil)
+		return
+	}
+
+	if _, err := tx.Exec(r.Context(), `update public.leads set converted_project_id=null where id=$1`, leadID); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `delete from public.projects where lead_id=$1`, leadID); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	result, err := tx.Exec(r.Context(), `delete from public.leads where id=$1 and archived_at is not null`, leadID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	if result.RowsAffected() == 0 {
+		s.writeError(w, r, http.StatusConflict, "not_archived", "Only archived leads can be permanently deleted", nil)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }
 
 func requireIdempotencyKey(s *Server, w http.ResponseWriter, r *http.Request) bool {

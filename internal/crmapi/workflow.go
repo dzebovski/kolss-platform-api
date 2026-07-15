@@ -128,6 +128,27 @@ func (s *Server) handleLeadAction(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, response)
 		return
 	}
+	if action == "mark-thinking" && (lead.Workflow == "closed" || lead.Workflow == "successful") {
+		s.writeError(w, r, http.StatusConflict, "lead_terminal", "Terminal leads cannot be marked as thinking", nil)
+		return
+	}
+	if action == "mark-thinking" && lead.Workflow == "thinking" {
+		response := map[string]any{"ok": true, "version": lead.CurrentVersion}
+		rawResponse, _ := json.Marshal(response)
+		if _, err := tx.Exec(r.Context(), `
+			update public.api_idempotency_keys set response_status=$4,response_body=$5::jsonb
+			where actor_id=$1 and operation=$2 and idempotency_key=$3
+		`, actor.ID, "lead.action."+action, key, http.StatusOK, rawResponse); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "action_failed", "Could not update lead", nil)
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "action_failed", "Could not update lead", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, response)
+		return
+	}
 
 	err = s.applyLeadAction(r, tx, actor, leadID, lead, action, req)
 	if err != nil {
@@ -189,7 +210,7 @@ func claimIdempotency(r *http.Request, tx pgx.Tx, actorID uuid.UUID, operation, 
 func validateAction(action string, req actionRequest) map[string]string {
 	fields := map[string]string{}
 	switch action {
-	case "take":
+	case "take", "mark-thinking":
 	case "first-call":
 		if strings.TrimSpace(req.Result) == "" {
 			fields["result"] = "Required"
@@ -251,6 +272,14 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 		workflow = "taken"
 		leadStatus = "in_progress"
 		eventType = "taken"
+		oldValue = map[string]any{"workflow_status": lead.Workflow}
+		newValue["workflow_status"] = workflow
+	case "mark-thinking":
+		workflow = "thinking"
+		if leadStatus == "new" {
+			leadStatus = "in_progress"
+		}
+		eventType = "thinking"
 		oldValue = map[string]any{"workflow_status": lead.Workflow}
 		newValue["workflow_status"] = workflow
 	case "first-call":
