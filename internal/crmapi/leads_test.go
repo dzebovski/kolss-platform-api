@@ -86,3 +86,76 @@ func TestFirstContactAttemptListJSONShape(t *testing.T) {
 		t.Fatalf("lead without attempt: want null, got %s", decoded.Items[1].FirstContactAttempt)
 	}
 }
+
+func TestLeadJSONExpressionEmbedsContractFromSuccessfulEvent(t *testing.T) {
+	expr := leadJSONExpression
+
+	for _, fragment := range []string{
+		"'contract'",
+		"from public.lead_events e",
+		"e.event_type in ('successful', 'contract_signed')",
+		"e.new_value ? 'amount'",
+		"'contract_number', e.new_value->>'contract_number'",
+		"'amount', (e.new_value->>'amount')::numeric",
+		"'currency', e.new_value->>'currency'",
+		"order by e.created_at desc",
+		"limit 1",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+}
+
+func TestContractListJSONShape(t *testing.T) {
+	signedAt := time.Date(2026, 6, 18, 13, 20, 0, 0, time.UTC)
+
+	withContract := map[string]any{
+		"id": "22222222-2222-2222-2222-222222222222",
+		"contract": map[string]any{
+			"contract_number": "K-KY-2026-0618",
+			"amount":          29800,
+			"currency":        "EUR",
+			"signed_at":       signedAt.Format(time.RFC3339),
+		},
+	}
+	withoutContract := map[string]any{
+		"id":       "33333333-3333-3333-3333-333333333333",
+		"contract": nil,
+	}
+
+	raw, err := json.Marshal(map[string]any{"items": []any{withContract, withoutContract}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded struct {
+		Items []struct {
+			ID       string          `json:"id"`
+			Contract json.RawMessage `json:"contract"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Items) != 2 {
+		t.Fatalf("items=%d", len(decoded.Items))
+	}
+
+	var contract struct {
+		ContractNumber string  `json:"contract_number"`
+		Amount         float64 `json:"amount"`
+		Currency       string  `json:"currency"`
+		SignedAt       string  `json:"signed_at"`
+	}
+	if err := json.Unmarshal(decoded.Items[0].Contract, &contract); err != nil {
+		t.Fatalf("lead with contract: %v", err)
+	}
+	if contract.ContractNumber != "K-KY-2026-0618" || contract.Amount != 29800 || contract.Currency != "EUR" {
+		t.Fatalf("unexpected contract: %#v", contract)
+	}
+
+	if string(decoded.Items[1].Contract) != "null" {
+		t.Fatalf("lead without contract: want null, got %s", decoded.Items[1].Contract)
+	}
+}

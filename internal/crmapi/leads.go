@@ -38,6 +38,20 @@ const leadJSONExpression = `
 			where e.lead_id = l.id and e.event_type in ('activated', 'reopened')
 			order by e.created_at desc
 			limit 1
+		),
+		'contract', (
+			select jsonb_build_object(
+				'contract_number', e.new_value->>'contract_number',
+				'amount', (e.new_value->>'amount')::numeric,
+				'currency', e.new_value->>'currency',
+				'signed_at', coalesce(e.new_value->>'signed_at', e.created_at::text)
+			)
+			from public.lead_events e
+			where e.lead_id = l.id
+				and e.event_type in ('successful', 'contract_signed')
+				and e.new_value ? 'amount'
+			order by e.created_at desc
+			limit 1
 		)
 	)
 `
