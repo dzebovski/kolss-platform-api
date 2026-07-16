@@ -83,6 +83,28 @@ func TestValidateActionActivateAndReopen(t *testing.T) {
 	}
 }
 
+func TestReopenAllowsClosedOrSuccessful(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	src, err := os.ReadFile(filepath.Join(filepath.Dir(file), "workflow.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(src)
+	wantGuard := `action == "reopen" && lead.Workflow != "closed" && lead.Workflow != "successful"`
+	if !strings.Contains(content, wantGuard) {
+		t.Fatalf("workflow.go reopen guard missing successful: %q", wantGuard)
+	}
+	if !strings.Contains(content, "Only closed or successful leads can be reopened") {
+		t.Fatal("workflow.go reopen error message should mention closed or successful")
+	}
+	if strings.Contains(content, "Only closed leads can be reopened") {
+		t.Fatal("workflow.go still has old closed-only reopen error message")
+	}
+}
+
 func TestLeadJSONExpressionIncludesReactivatedAt(t *testing.T) {
 	if !strings.Contains(leadJSONExpression, "'reactivated_at'") {
 		t.Fatal("leadJSONExpression missing reactivated_at")

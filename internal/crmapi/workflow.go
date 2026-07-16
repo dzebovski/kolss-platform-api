@@ -154,8 +154,8 @@ func (s *Server) handleLeadAction(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only thinking leads can be activated", nil)
 		return
 	}
-	if action == "reopen" && lead.Workflow != "closed" {
-		s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only closed leads can be reopened", nil)
+	if action == "reopen" && lead.Workflow != "closed" && lead.Workflow != "successful" {
+		s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only closed or successful leads can be reopened", nil)
 		return
 	}
 
