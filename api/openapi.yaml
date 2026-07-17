@@ -183,10 +183,21 @@ paths:
           application/json:
             schema:
               type: object
-              required: [eventType, comment]
-              properties: { eventType: { type: string }, comment: { type: string } }
+              required: [comment]
+              properties: { comment: { type: string } }
       responses:
         '200': { description: Event updated }
+    delete:
+      tags: [Leads]
+      operationId: deleteLeadEvent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200': { description: Event deleted }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/activities:
     post:
       tags: [Activities]

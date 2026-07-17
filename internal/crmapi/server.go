@@ -106,6 +106,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/leads/{leadId}", s.handleGetLead)
 			r.Patch("/v1/leads/{leadId}", s.handleUpdateLead)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
+			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
 			r.Post("/v1/leads/{leadId}/archive", s.handleArchiveLead)
 			r.Post("/v1/leads/{leadId}/restore", s.handleRestoreLead)
 			r.Post("/v1/leads/{leadId}/delete", s.handleDeleteLead)

@@ -509,37 +509,66 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 }
 
 type eventUpdateRequest struct {
-	EventType string `json:"eventType"`
-	Comment   string `json:"comment"`
+	Comment string `json:"comment"`
 }
 
 func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
+	if !s.requireSuperAdmin(w, r) {
+		return
+	}
 	leadID, leadErr := uuid.Parse(r.PathValue("leadId"))
 	eventID, eventErr := uuid.Parse(r.PathValue("eventId"))
 	var req eventUpdateRequest
-	if leadErr != nil || eventErr != nil || decodeJSON(w, r, 32*1024, &req) != nil || strings.TrimSpace(req.EventType) == "" {
+	if leadErr != nil || eventErr != nil || decodeJSON(w, r, 32*1024, &req) != nil {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid history event", nil)
 		return
 	}
-	var officeID uuid.UUID
-	if err := s.pool.QueryRow(r.Context(), `select office_id from public.leads where id=$1 and archived_at is null`, leadID).Scan(&officeID); err != nil {
+	var exists bool
+	if err := s.pool.QueryRow(r.Context(), `select exists(select 1 from public.leads where id=$1 and archived_at is null)`, leadID).Scan(&exists); err != nil || !exists {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
 	}
-	if !actor.CanEditLead(officeID) {
-		s.writeError(w, r, http.StatusForbidden, "event_edit_forbidden", "History editing is not allowed", nil)
-		return
+	editedByName := ""
+	if actor.DisplayName != nil {
+		editedByName = *actor.DisplayName
 	}
 	command, err := s.pool.Exec(r.Context(), `
-		update public.lead_events set event_type=$3, comment=nullif(trim($4),'')
-		where id=$1 and lead_id=$2 and event_category is null
-	`, eventID, leadID, strings.TrimSpace(req.EventType), req.Comment)
+		update public.lead_events
+		set comment=nullif(trim($3),''),
+		    new_value = coalesce(new_value, '{}'::jsonb) || jsonb_build_object(
+		      'edit_audit', jsonb_build_object(
+		        'fields', jsonb_build_array('message'),
+		        'edited_at', now(),
+		        'edited_by', $4::text,
+		        'edited_by_name', $5::text))
+		where id=$1 and lead_id=$2
+	`, eventID, leadID, req.Comment, actor.ID.String(), editedByName)
 	if err != nil || command.RowsAffected() == 0 {
 		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"changedFields": []string{"type", "message"}})
+	writeJSON(w, http.StatusOK, map[string]any{"changedFields": []string{"message"}})
+}
+
+func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSuperAdmin(w, r) {
+		return
+	}
+	leadID, leadErr := uuid.Parse(r.PathValue("leadId"))
+	eventID, eventErr := uuid.Parse(r.PathValue("eventId"))
+	if leadErr != nil || eventErr != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid history event", nil)
+		return
+	}
+	command, err := s.pool.Exec(r.Context(), `
+		delete from public.lead_events where id=$1 and lead_id=$2
+	`, eventID, leadID)
+	if err != nil || command.RowsAffected() == 0 {
+		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleArchiveLead(w http.ResponseWriter, r *http.Request) {
