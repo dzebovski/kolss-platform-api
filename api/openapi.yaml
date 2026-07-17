@@ -14,6 +14,7 @@ tags:
   - name: Health
   - name: Context
   - name: Leads
+  - name: Activities
   - name: Workflow
   - name: Users
   - name: Reports
@@ -105,7 +106,9 @@ paths:
         - { name: search, in: query, schema: { type: string } }
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
         - { name: source, in: query, schema: { type: string } }
-        - { name: workflow, in: query, schema: { type: string } }
+        - { name: workflow, in: query, deprecated: true, schema: { type: string } }
+        - { name: callStatus, in: query, schema: { $ref: '#/components/schemas/CallStatus' } }
+        - { name: clientStatus, in: query, schema: { $ref: '#/components/schemas/ClientStatus' } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 }, description: When set, only leads created within the last N days }
@@ -184,9 +187,37 @@ paths:
               properties: { eventType: { type: string }, comment: { type: string } }
       responses:
         '200': { description: Event updated }
+  /v1/leads/{leadId}/activities:
+    post:
+      tags: [Activities]
+      operationId: createLeadActivity
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadActivityRequest' }
+      responses:
+        '200':
+          description: Status snapshot and immutable timeline event committed transactionally
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, version]
+                properties:
+                  ok: { type: boolean }
+                  version: { type: integer }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/actions/{action}:
     post:
       tags: [Workflow]
+      deprecated: true
+      summary: Retired legacy workflow endpoint; returns 410 without mutating data
       operationId: performLeadAction
       security: [{ bearerAuth: [] }]
       parameters:
@@ -203,7 +234,7 @@ paths:
           application/json:
             schema: { type: object, additionalProperties: true }
       responses:
-        '200': { description: Workflow action committed transactionally }
+        '410': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/archive:
     post:
@@ -497,7 +528,7 @@ components:
     Lead:
       type: object
       additionalProperties: true
-      required: [id, office_id, source_system, external_lead_id, lead_status, workflow_status, version, created_at, updated_at]
+      required: [id, office_id, source_system, external_lead_id, lead_status, workflow_status, client_status, version, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
         office_id: { type: string, format: uuid }
@@ -506,6 +537,13 @@ components:
         external_lead_id: { type: string }
         lead_status: { type: string }
         workflow_status: { type: string }
+        call_status:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CallStatus'
+        call_status_changed_at: { type: [string, 'null'], format: date-time }
+        client_status: { $ref: '#/components/schemas/ClientStatus' }
+        client_status_changed_at: { type: string, format: date-time }
         version: { type: integer, minimum: 1 }
         archived_at: { type: [string, 'null'], format: date-time }
         archived_by: { type: [string, 'null'], format: uuid }
@@ -519,6 +557,68 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LeadFirstContactAttempt'
+        latest_timeline_comment:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LatestTimelineComment'
+    CallStatus:
+      type: string
+      enum: [reached, no_answer, callback_requested]
+    ClientStatus:
+      type: string
+      enum: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]
+    LatestTimelineComment:
+      type: object
+      additionalProperties: false
+      required: [comment, created_at, event_type]
+      properties:
+        comment: { type: string }
+        created_at: { type: string, format: date-time }
+        event_type: { type: string }
+        event_category: { type: [string, 'null'] }
+        status_code: { type: [string, 'null'] }
+        new_value: {}
+    LeadActivityRequest:
+      oneOf:
+        - $ref: '#/components/schemas/CallStatusActivityRequest'
+        - $ref: '#/components/schemas/ClientStatusActivityRequest'
+        - $ref: '#/components/schemas/CommentActivityRequest'
+        - $ref: '#/components/schemas/ReopenActivityRequest'
+      discriminator:
+        propertyName: type
+    CallStatusActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, status]
+      properties:
+        type: { type: string, const: call_status }
+        status: { $ref: '#/components/schemas/CallStatus' }
+        comment: { type: string }
+    ClientStatusActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, status]
+      properties:
+        type: { type: string, const: client_status }
+        status: { $ref: '#/components/schemas/ClientStatus' }
+        reason: { type: string, enum: [expensive, invalid, other] }
+        comment: { type: string }
+        contractNumber: { type: string }
+        amount: { type: number, exclusiveMinimum: 0 }
+        currency: { type: string, enum: [UAH, USD, EUR, PLN] }
+    CommentActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, comment]
+      properties:
+        type: { type: string, const: comment }
+        comment: { type: string }
+    ReopenActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type]
+      properties:
+        type: { type: string, const: reopen }
     LeadFirstContactAttempt:
       type: object
       additionalProperties: false

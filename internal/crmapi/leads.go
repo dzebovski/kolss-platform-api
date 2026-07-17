@@ -35,11 +35,26 @@ const leadJSONExpression = `
 		'reactivated_at', (
 			select e.created_at
 			from public.lead_events e
-			where e.lead_id = l.id and e.event_type in ('activated', 'reopened')
+			where e.lead_id = l.id and e.event_type in ('activated', 'reopened', 'lead_reopened')
 			order by e.created_at desc
 			limit 1
 		),
-		'contract', (
+		'contract', coalesce((
+			select jsonb_build_object(
+				'contract_number', c.contract_number,
+				'amount', c.amount,
+				'currency', c.currency,
+				'signed_at', c.signed_at
+			)
+			from public.lead_contracts c
+			where c.lead_id = l.id
+				and c.status = 'signed'
+				and c.contract_number is not null
+				and c.amount is not null
+				and c.currency is not null
+			order by c.signed_at desc nulls last, c.created_at desc
+			limit 1
+		), (
 			select jsonb_build_object(
 				'contract_number', e.new_value->>'contract_number',
 				'amount', (e.new_value->>'amount')::numeric,
@@ -50,6 +65,22 @@ const leadJSONExpression = `
 			where e.lead_id = l.id
 				and e.event_type in ('successful', 'contract_signed')
 				and e.new_value ? 'amount'
+			order by e.created_at desc
+			limit 1
+		)),
+		'latest_timeline_comment', (
+			select jsonb_build_object(
+				'comment', e.comment,
+				'created_at', e.created_at,
+				'event_type', e.event_type,
+				'event_category', e.event_category,
+				'status_code', e.status_code,
+				'new_value', e.new_value
+			)
+			from public.lead_events e
+			where e.lead_id = l.id
+				and e.comment is not null
+				and btrim(e.comment) <> ''
 			order by e.created_at desc
 			limit 1
 		)
@@ -129,8 +160,28 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 	for _, filter := range []struct {
 		query  string
 		column string
-	}{{"source", "l.source_system"}, {"workflow", "l.workflow_status"}} {
+	}{
+		{"source", "l.source_system"},
+		{"workflow", "l.workflow_status"},
+	} {
 		if raw := strings.TrimSpace(r.URL.Query().Get(filter.query)); raw != "" {
+			where = append(where, filter.column+" = "+addArg(raw))
+		}
+	}
+	statusFilters := []struct {
+		query   string
+		column  string
+		allowed map[string]bool
+	}{
+		{"callStatus", "l.call_status", map[string]bool{"reached": true, "no_answer": true, "callback_requested": true}},
+		{"clientStatus", "l.client_status", map[string]bool{"new_lead": true, "showroom_invited": true, "calculation_in_progress": true, "thinking": true, "closed_lost": true, "contract_signed": true}},
+	}
+	for _, filter := range statusFilters {
+		if raw := strings.TrimSpace(r.URL.Query().Get(filter.query)); raw != "" {
+			if !filter.allowed[raw] {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{filter.query: "Unknown status"})
+				return
+			}
 			where = append(where, filter.column+" = "+addArg(raw))
 		}
 	}
@@ -154,7 +205,7 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusForbidden, "archive_forbidden", "Archived leads are restricted", nil)
 			return
 		}
-		where = append(where, "(l.archived_at is not null or l.workflow_status = 'thinking')")
+		where = append(where, "l.archived_at is not null")
 	case "all":
 		if !actor.IsSuperAdmin() {
 			where = append(where, "l.archived_at is null")
@@ -330,9 +381,9 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		with inserted as (
 			insert into public.leads (
 				office_id, source_system, source_channel, external_lead_id,
-				lead_status, workflow_status, workflow_status_changed_at, source_created_at,
+				source_created_at,
 				name, phone, email, city_region, product_interest, estimated_budget, order_comment
-			) values ($1,$2,$3,$4,'new','new',now(),now(),$5,$6,$7,$8,$9,$10,$11)
+			) values ($1,$2,$3,$4,now(),$5,$6,$7,$8,$9,$10,$11)
 			on conflict (source_system,external_lead_id) do nothing
 			returning *
 		)
@@ -343,7 +394,7 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		err = tx.QueryRow(r.Context(), `select id,to_jsonb(l) from public.leads l where source_system=$1 and external_lead_id=$2`, sourceSystem, externalID).Scan(&leadID, &raw)
 	}
 	if err == nil && inserted {
-		_, err = tx.Exec(r.Context(), `insert into public.lead_events (lead_id, actor_id, event_type, new_value) values ($1,$2,'created',$3)`, leadID, actor.ID, map[string]any{"source": req.Source, "source_system": sourceSystem, "source_channel": sourceChannel, "workflow_status": "new"})
+		_, err = tx.Exec(r.Context(), `insert into public.lead_events (lead_id, actor_id, event_type, new_value) values ($1,$2,'created',$3)`, leadID, actor.ID, map[string]any{"source": req.Source, "source_system": sourceSystem, "source_channel": sourceChannel})
 		var officeCode string
 		if err == nil {
 			err = tx.QueryRow(r.Context(), `select code from public.offices where id = $1`, req.OfficeID).Scan(&officeCode)
@@ -482,7 +533,7 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	command, err := s.pool.Exec(r.Context(), `
 		update public.lead_events set event_type=$3, comment=nullif(trim($4),'')
-		where id=$1 and lead_id=$2
+		where id=$1 and lead_id=$2 and event_category is null
 	`, eventID, leadID, strings.TrimSpace(req.EventType), req.Comment)
 	if err != nil || command.RowsAffected() == 0 {
 		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)

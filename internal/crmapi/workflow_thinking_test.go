@@ -37,7 +37,6 @@ func TestValidateActionMarkSuccessful(t *testing.T) {
 	}
 }
 
-
 func TestValidateActionUnknownRejected(t *testing.T) {
 	fields := validateAction("nope", actionRequest{})
 	if fields["action"] == "" {
@@ -45,7 +44,7 @@ func TestValidateActionUnknownRejected(t *testing.T) {
 	}
 }
 
-func TestArchiveOnlyIncludesThinkingLeads(t *testing.T) {
+func TestArchiveOnlyIncludesOnlyArchivedLeads(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -54,9 +53,9 @@ func TestArchiveOnlyIncludesThinkingLeads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "(l.archived_at is not null or l.workflow_status = 'thinking')"
+	want := "l.archived_at is not null"
 	if !strings.Contains(string(src), want) {
-		t.Fatalf("leads.go archived=only filter missing thinking: %q", want)
+		t.Fatalf("leads.go archived=only filter missing archived condition: %q", want)
 	}
 }
 
@@ -109,7 +108,7 @@ func TestLeadJSONExpressionIncludesReactivatedAt(t *testing.T) {
 	if !strings.Contains(leadJSONExpression, "'reactivated_at'") {
 		t.Fatal("leadJSONExpression missing reactivated_at")
 	}
-	if !strings.Contains(leadJSONExpression, "event_type in ('activated', 'reopened')") {
-		t.Fatal("leadJSONExpression missing activated/reopened filter")
+	if !strings.Contains(leadJSONExpression, "event_type in ('activated', 'reopened', 'lead_reopened')") {
+		t.Fatal("leadJSONExpression missing legacy and typed reopen filter")
 	}
 }
