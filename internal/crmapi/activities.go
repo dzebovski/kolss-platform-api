@@ -82,7 +82,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.ContractNumber = strings.TrimSpace(req.ContractNumber)
 	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
-	if fields := validateLeadActivity(req); len(fields) > 0 {
+	if fields := validateLeadActivity(req, actor.IsSuperAdmin()); len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
 		return
 	}
@@ -175,7 +175,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-func validateLeadActivity(req leadActivityRequest) map[string]string {
+func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string]string {
 	fields := map[string]string{}
 	reject := func(name, value string) {
 		if value != "" {
@@ -192,7 +192,7 @@ func validateLeadActivity(req leadActivityRequest) map[string]string {
 		}
 		switch req.Status {
 		case "reached":
-			if req.Comment == "" {
+			if req.Comment == "" && !isSuperAdmin {
 				fields["comment"] = "Required for a successful call"
 			}
 		case "no_answer", "callback_requested":

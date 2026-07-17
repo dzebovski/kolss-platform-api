@@ -5,12 +5,14 @@ import "testing"
 func TestValidateLeadActivity(t *testing.T) {
 	amount := 1250.0
 	tests := []struct {
-		name    string
-		request leadActivityRequest
-		field   string
+		name         string
+		request      leadActivityRequest
+		isSuperAdmin bool
+		field        string
 	}{
 		{name: "successful call", request: leadActivityRequest{Type: activityCallStatus, Status: "reached", Comment: "Discussed quote"}},
 		{name: "successful call requires comment", request: leadActivityRequest{Type: activityCallStatus, Status: "reached"}, field: "comment"},
+		{name: "super admin skips successful call comment", request: leadActivityRequest{Type: activityCallStatus, Status: "reached"}, isSuperAdmin: true},
 		{name: "no answer", request: leadActivityRequest{Type: activityCallStatus, Status: "no_answer"}},
 		{name: "callback", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested"}},
 		{name: "simple status", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}},
@@ -26,7 +28,7 @@ func TestValidateLeadActivity(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fields := validateLeadActivity(test.request)
+			fields := validateLeadActivity(test.request, test.isSuperAdmin)
 			if test.field == "" && len(fields) != 0 {
 				t.Fatalf("valid request rejected: %#v", fields)
 			}
