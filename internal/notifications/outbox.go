@@ -38,7 +38,8 @@ type Outbox struct {
 	TelegramAdditionalChatIDsKyiv string
 }
 
-func (o Outbox) telegramChatIDs(officeCode string) []string {
+// TelegramChatIDs returns the Telegram chat IDs configured for an office.
+func (o Outbox) TelegramChatIDs(officeCode string) []string {
 	var primary, additional string
 	switch officeCode {
 	case "kyiv":
@@ -48,6 +49,10 @@ func (o Outbox) telegramChatIDs(officeCode string) []string {
 		primary = o.TelegramChatIDWarsaw
 	}
 	return uniqueChatIDs(primary, additional)
+}
+
+func (o Outbox) telegramChatIDs(officeCode string) []string {
+	return o.TelegramChatIDs(officeCode)
 }
 
 func (o Outbox) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {

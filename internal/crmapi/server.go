@@ -105,6 +105,8 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/leads", s.handleCreateLead)
 			r.Get("/v1/leads/{leadId}", s.handleGetLead)
 			r.Patch("/v1/leads/{leadId}", s.handleUpdateLead)
+			r.Put("/v1/leads/{leadId}/markers/{kind}", s.handleSetLeadMarker)
+			r.Delete("/v1/leads/{leadId}/markers/{kind}", s.handleDeleteLeadMarker)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
 			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
 			r.Post("/v1/leads/{leadId}/archive", s.handleArchiveLead)
@@ -164,6 +166,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/loss-reasons",
 	"/v1/leads",
 	"/v1/leads/{leadId}",
+	"/v1/leads/{leadId}/markers/{kind}",
 	"/v1/leads/{leadId}/events/{eventId}",
 	"/v1/leads/{leadId}/archive",
 	"/v1/leads/{leadId}/restore",
@@ -274,7 +277,7 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Vary", "Origin")
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-Id, X-Impersonate-User-Id")
 		w.Header().Set("Access-Control-Max-Age", "600")
 	}

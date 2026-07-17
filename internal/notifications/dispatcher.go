@@ -260,6 +260,19 @@ func (d *Dispatcher) sendTelegram(ctx context.Context, client *http.Client, offi
 	if token == "" || chatID == "" {
 		return fmt.Errorf("missing Telegram config for office %q", officeCode)
 	}
+	return SendTelegramMessage(ctx, client, token, chatID, message)
+}
+
+// SendTelegramMessage posts a single HTML message to the Telegram Bot API.
+func SendTelegramMessage(ctx context.Context, client *http.Client, token, chatID, message string) error {
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	token = strings.TrimSpace(token)
+	chatID = strings.TrimSpace(chatID)
+	if token == "" || chatID == "" {
+		return errors.New("missing Telegram token or chat ID")
+	}
 	body, _ := json.Marshal(map[string]any{
 		"chat_id":                  chatID,
 		"text":                     message,

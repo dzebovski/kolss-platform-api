@@ -53,6 +53,9 @@ func TestCRMOptionsPreservesCORSWithoutAuth(t *testing.T) {
 	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://crm.kolss.eu" {
 		t.Fatalf("CORS origin = %q", got)
 	}
+	if methods := response.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(methods, http.MethodPut) {
+		t.Fatalf("CORS methods do not allow marker PUT: %q", methods)
+	}
 }
 
 func TestUnknownCRMRouteIsNotClaimedByOptionsWildcard(t *testing.T) {

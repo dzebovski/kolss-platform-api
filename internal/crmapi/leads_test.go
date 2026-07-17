@@ -33,6 +33,24 @@ func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) 
 	}
 }
 
+func TestLeadJSONExpressionEmbedsSharedMarkers(t *testing.T) {
+	expr := leadJSONExpression
+	for _, fragment := range []string{
+		"'markers'",
+		"from public.lead_markers m",
+		"left join public.profiles mp on mp.id = m.actor_id",
+		"'kind', m.kind",
+		"'actor_id', m.actor_id",
+		"'actor_name', coalesce(mp.display_name, '')",
+		"'marked_at', m.marked_at",
+		"'[]'::jsonb",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+}
+
 func TestFirstContactAttemptListJSONShape(t *testing.T) {
 	managerID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	createdAt := time.Date(2026, 7, 14, 14, 14, 0, 0, time.UTC)
@@ -58,8 +76,8 @@ func TestFirstContactAttemptListJSONShape(t *testing.T) {
 
 	var decoded struct {
 		Items []struct {
-			ID                   string          `json:"id"`
-			FirstContactAttempt  json.RawMessage `json:"first_contact_attempt"`
+			ID                  string          `json:"id"`
+			FirstContactAttempt json.RawMessage `json:"first_contact_attempt"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &decoded); err != nil {

@@ -35,6 +35,10 @@ services:
         value: "60"
       - key: NOTIFICATION_BATCH_SIZE
         value: "20"
+      - key: DAILY_REPORT_ENABLED
+        value: "true"
+      - key: DAILY_REPORT_HOUR_LOCAL
+        value: "9"
       - key: SUPABASE_URL
         scope: RUN_TIME
         type: GENERAL

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.0.0
+  version: 2.1.0
   description: >
     CRM API, Google Sheets imports, and text-only public contact forms for PL/UA sites.
     A public submission atomically creates the lead and Telegram outbox rows.
@@ -169,6 +169,37 @@ paths:
                 required: [version]
                 properties: { version: { type: integer } }
         '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/markers/{kind}:
+    parameters:
+      - { $ref: '#/components/parameters/LeadId' }
+      - name: kind
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/LeadMarkerKind' }
+    put:
+      tags: [Leads]
+      operationId: setLeadMarker
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current marker state
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadMarker' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [Leads]
+      operationId: deleteLeadMarker
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Marker removed }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/events/{eventId}:
     patch:
       tags: [Leads]
@@ -332,9 +363,16 @@ paths:
       operationId: getLeadReport
       security: [{ bearerAuth: [] }]
       parameters:
-        - { name: days, in: query, schema: { type: integer, default: 40 } }
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
-      responses: { '200': { description: Funnel and manager aggregates } }
+      responses:
+        '200':
+          description: Current-status management report for leads created or human-active in the selected period
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadReportResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
   /v1/files/{fileId}/download-url:
     get:
       tags: [Leads]
@@ -572,12 +610,27 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LatestTimelineComment'
+        markers:
+          type: array
+          items: { $ref: '#/components/schemas/LeadMarker' }
     CallStatus:
       type: string
       enum: [reached, no_answer, callback_requested]
     ClientStatus:
       type: string
       enum: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]
+    LeadMarkerKind:
+      type: string
+      enum: [reviewed, manager_aware]
+    LeadMarker:
+      type: object
+      additionalProperties: false
+      required: [kind, actor_id, actor_name, marked_at]
+      properties:
+        kind: { $ref: '#/components/schemas/LeadMarkerKind' }
+        actor_id: { type: string, format: uuid }
+        actor_name: { type: string }
+        marked_at: { type: string, format: date-time }
     LatestTimelineComment:
       type: object
       additionalProperties: false
@@ -659,6 +712,108 @@ components:
             showroomVisits: { type: array, items: { type: object, additionalProperties: true } }
             contracts: { type: array, items: { type: object, additionalProperties: true } }
             events: { type: array, items: { type: object, additionalProperties: true } }
+    ReportPeriod:
+      type: object
+      additionalProperties: false
+      required: [from, to]
+      properties:
+        from: { type: [string, 'null'], format: date }
+        to: { type: [string, 'null'], format: date }
+    ReportStatusCounts:
+      type: object
+      additionalProperties: false
+      required: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]
+      properties:
+        new_lead: { type: integer, minimum: 0 }
+        showroom_invited: { type: integer, minimum: 0 }
+        calculation_in_progress: { type: integer, minimum: 0 }
+        thinking: { type: integer, minimum: 0 }
+        closed_lost: { type: integer, minimum: 0 }
+        contract_signed: { type: integer, minimum: 0 }
+    ReportTotals:
+      type: object
+      additionalProperties: false
+      required: [total, active, contractSigned, closedLost, callback, inactive7d, conversionPercent, byClientStatus]
+      properties:
+        total: { type: integer, minimum: 0 }
+        active: { type: integer, minimum: 0 }
+        contractSigned: { type: integer, minimum: 0 }
+        closedLost: { type: integer, minimum: 0 }
+        callback: { type: integer, minimum: 0 }
+        inactive7d: { type: integer, minimum: 0 }
+        conversionPercent: { type: integer, minimum: 0, maximum: 100 }
+        byClientStatus: { $ref: '#/components/schemas/ReportStatusCounts' }
+    ReportComment:
+      type: object
+      additionalProperties: false
+      required: [body, occurredAt, authorId, authorName, eventType]
+      properties:
+        body: { type: string }
+        occurredAt: { type: string, format: date-time }
+        authorId: { type: string, format: uuid }
+        authorName: { type: string }
+        eventType: { type: string }
+    ReportLead:
+      type: object
+      additionalProperties: false
+      required: [id, name, phone, createdAt, clientStatus, clientStatusChangedAt, callStatus, callStatusChangedAt, lossReason, lastHumanActivityAt, inactiveDays, inactive7d, comments]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        phone: { type: string }
+        createdAt: { type: string, format: date-time }
+        clientStatus: { $ref: '#/components/schemas/ClientStatus' }
+        clientStatusChangedAt: { type: string, format: date-time }
+        callStatus:
+          oneOf:
+            - { $ref: '#/components/schemas/CallStatus' }
+            - { type: 'null' }
+        callStatusChangedAt: { type: [string, 'null'], format: date-time }
+        lossReason: { type: [string, 'null'] }
+        lastHumanActivityAt: { type: [string, 'null'], format: date-time }
+        inactiveDays: { type: integer, minimum: 0 }
+        inactive7d: { type: boolean }
+        comments:
+          type: array
+          maxItems: 2
+          items: { $ref: '#/components/schemas/ReportComment' }
+    ManagerLeadReport:
+      type: object
+      additionalProperties: false
+      required: [officeCode, managerId, managerName, totals, leads]
+      properties:
+        officeCode: { type: string }
+        managerId: { type: [string, 'null'], format: uuid }
+        managerName: { type: string }
+        totals: { $ref: '#/components/schemas/ReportTotals' }
+        leads:
+          type: array
+          items: { $ref: '#/components/schemas/ReportLead' }
+    ReportLossReason:
+      type: object
+      additionalProperties: false
+      required: [code, labelUk, labelPl, labelEn, count, percent]
+      properties:
+        code: { type: string }
+        labelUk: { type: string }
+        labelPl: { type: string }
+        labelEn: { type: string }
+        count: { type: integer, minimum: 0 }
+        percent: { type: integer, minimum: 0, maximum: 100 }
+    LeadReportResponse:
+      type: object
+      additionalProperties: false
+      required: [generatedAt, period, totals, lossReasons, managers]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        period: { $ref: '#/components/schemas/ReportPeriod' }
+        totals: { $ref: '#/components/schemas/ReportTotals' }
+        lossReasons:
+          type: array
+          items: { $ref: '#/components/schemas/ReportLossReason' }
+        managers:
+          type: array
+          items: { $ref: '#/components/schemas/ManagerLeadReport' }
     CreateLeadRequest:
       type: object
       additionalProperties: false

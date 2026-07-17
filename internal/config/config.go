@@ -19,6 +19,8 @@ type Config struct {
 	NotificationDispatcherEnabled bool
 	NotificationSweepInterval     time.Duration
 	NotificationBatchSize         int
+	DailyReportEnabled            bool
+	DailyReportHourLocal          int
 
 	SupabaseURL        string
 	SupabaseJWKSURL    string
@@ -63,6 +65,8 @@ func Load() (Config, error) {
 		NotificationDispatcherEnabled: getenvBool("NOTIFICATION_DISPATCHER_ENABLED", true),
 		NotificationSweepInterval:     time.Duration(getenvInt("NOTIFICATION_SWEEP_INTERVAL_MINUTES", 60)) * time.Minute,
 		NotificationBatchSize:         getenvInt("NOTIFICATION_BATCH_SIZE", 20),
+		DailyReportEnabled:            getenvBool("DAILY_REPORT_ENABLED", true),
+		DailyReportHourLocal:          getenvInt("DAILY_REPORT_HOUR_LOCAL", 9),
 
 		SupabaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
 		SupabaseJWKSURL:    strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),

@@ -17,6 +17,7 @@ import (
 	"github.com/dzebovski/kolss-platform-api/internal/botcheck"
 	"github.com/dzebovski/kolss-platform-api/internal/config"
 	"github.com/dzebovski/kolss-platform-api/internal/crmapi"
+	"github.com/dzebovski/kolss-platform-api/internal/dailyreport"
 	"github.com/dzebovski/kolss-platform-api/internal/httpapi"
 	"github.com/dzebovski/kolss-platform-api/internal/leads"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
@@ -99,6 +100,16 @@ func main() {
 		}()
 	} else {
 		logger.Warn("notification dispatcher disabled")
+	}
+	if cfg.DailyReportEnabled {
+		reporter := dailyreport.New(pool, cfg, outbox, cfg.CRMSiteURLPublic, cfg.DailyReportHourLocal, logger)
+		dispatcherWG.Add(1)
+		go func() {
+			defer dispatcherWG.Done()
+			reporter.Run(dispatcherCtx)
+		}()
+	} else {
+		logger.Warn("daily report scheduler disabled")
 	}
 	svc := submissions.NewService(pool, sites, outbox, notificationWaker)
 

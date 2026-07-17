@@ -83,7 +83,18 @@ const leadJSONExpression = `
 				and btrim(e.comment) <> ''
 			order by e.created_at desc
 			limit 1
-		)
+		),
+		'markers', coalesce((
+			select jsonb_agg(jsonb_build_object(
+				'kind', m.kind,
+				'actor_id', m.actor_id,
+				'actor_name', coalesce(mp.display_name, ''),
+				'marked_at', m.marked_at
+			) order by m.kind)
+			from public.lead_markers m
+			left join public.profiles mp on mp.id = m.actor_id
+			where m.lead_id = l.id
+		), '[]'::jsonb)
 	)
 `
 
