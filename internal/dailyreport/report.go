@@ -17,9 +17,17 @@ import (
 )
 
 const (
-	greetingLine     = "Доброго ранку колеги, ось заявки на які треба звернути увагу:"
-	emptyMessage     = "Доброго ранку колеги, наразі немає заявок, які потребують уваги. Гарного дня!"
+	greetingLine     = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
+	emptyMessage     = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
 	maxMessageLength = 3500
+
+	sectionNewHeader      = "<b>Нові заявки:</b>"
+	sectionNoAnswerHeader = "<b>Не дозвонилися:</b>"
+	sectionCallbackHeader = "<b>Потрібно передзвонити:</b>"
+
+	emojiNew      = "🆕"
+	emojiNoAnswer = "📵"
+	emojiCallback = "📞"
 )
 
 // ChatSource resolves the Telegram chat IDs configured for an office.
@@ -33,11 +41,12 @@ type office struct {
 }
 
 var scheduledOffices = []struct {
-	code string
-	tz   string
+	code    string
+	tz      string
+	enabled bool
 }{
-	{code: "kyiv", tz: "Europe/Kyiv"},
-	{code: "warsaw", tz: "Europe/Warsaw"},
+	{code: "kyiv", tz: "Europe/Kyiv", enabled: true},
+	{code: "warsaw", tz: "Europe/Warsaw", enabled: false}, // на паузі
 }
 
 // Scheduler sends a per-office morning report at a fixed local hour.
@@ -106,6 +115,9 @@ func (s *Scheduler) Run(ctx context.Context) {
 func (s *Scheduler) offices() []office {
 	out := make([]office, 0, len(scheduledOffices))
 	for _, def := range scheduledOffices {
+		if !def.enabled {
+			continue
+		}
 		loc, err := time.LoadLocation(def.tz)
 		if err != nil {
 			s.log().Error("daily report timezone load failed", "office", def.code, "timezone", def.tz, "error", err)
@@ -117,7 +129,12 @@ func (s *Scheduler) offices() []office {
 }
 
 func (s *Scheduler) runForOffice(ctx context.Context, off office) {
-	reportDate := time.Now().In(off.loc).Format("2006-01-02")
+	nowLocal := time.Now().In(off.loc)
+	if nowLocal.Weekday() == time.Sunday {
+		s.log().Info("daily report skipped on Sunday", "office", off.code)
+		return
+	}
+	reportDate := nowLocal.Format("2006-01-02")
 	claimed, err := s.claim(ctx, off.code, reportDate)
 	if err != nil {
 		s.log().Error("daily report claim failed", "office", off.code, "date", reportDate, "error", err)
@@ -205,28 +222,81 @@ func (s *Scheduler) fetchLeads(ctx context.Context, officeCode string) ([]report
 	return leads, rows.Err()
 }
 
+type leadSection struct {
+	header string
+	emoji  string
+	leads  []reportLead
+}
+
+func groupLeadsBySection(leads []reportLead) []leadSection {
+	sections := []leadSection{
+		{header: sectionNewHeader, emoji: emojiNew},
+		{header: sectionNoAnswerHeader, emoji: emojiNoAnswer},
+		{header: sectionCallbackHeader, emoji: emojiCallback},
+	}
+	for _, lead := range leads {
+		switch {
+		case lead.CallStatus != nil && *lead.CallStatus == "no_answer":
+			sections[1].leads = append(sections[1].leads, lead)
+		case lead.CallStatus != nil && *lead.CallStatus == "callback_requested":
+			sections[2].leads = append(sections[2].leads, lead)
+		default:
+			sections[0].leads = append(sections[0].leads, lead)
+		}
+	}
+	return sections
+}
+
 func (s *Scheduler) formatMessages(leads []reportLead) []string {
 	if len(leads) == 0 {
 		return []string{emptyMessage}
 	}
+
 	var messages []string
 	var builder strings.Builder
 	builder.WriteString(greetingLine)
-	for _, lead := range leads {
-		line := s.formatLine(lead)
-		if builder.Len()+1+len(line) > maxMessageLength {
-			messages = append(messages, builder.String())
-			builder.Reset()
-			builder.WriteString(greetingLine)
-		}
-		builder.WriteByte('\n')
-		builder.WriteString(line)
+	activeHeader := ""
+
+	flush := func() {
+		messages = append(messages, builder.String())
+		builder.Reset()
+		builder.WriteString(greetingLine)
+		activeHeader = ""
 	}
+
+	for _, section := range groupLeadsBySection(leads) {
+		if len(section.leads) == 0 {
+			continue
+		}
+		for _, lead := range section.leads {
+			line := s.formatLine(lead, section.emoji)
+			block := leadBlock(section.header, line, activeHeader != section.header)
+			if builder.Len()+len(block) > maxMessageLength && builder.Len() > len(greetingLine) {
+				flush()
+				block = leadBlock(section.header, line, true)
+			}
+			builder.WriteString(block)
+			activeHeader = section.header
+		}
+	}
+
 	messages = append(messages, builder.String())
 	return messages
 }
 
-func (s *Scheduler) formatLine(lead reportLead) string {
+func leadBlock(header, line string, withHeader bool) string {
+	var b strings.Builder
+	if withHeader {
+		b.WriteString("\n\n")
+		b.WriteString(header)
+		b.WriteString("\n")
+	}
+	b.WriteByte('\n')
+	b.WriteString(line)
+	return b.String()
+}
+
+func (s *Scheduler) formatLine(lead reportLead, emoji string) string {
 	name := strings.TrimSpace(lead.Name)
 	if name == "" {
 		name = "—"
@@ -235,25 +305,11 @@ func (s *Scheduler) formatLine(lead reportLead) string {
 	if phone == "" {
 		phone = "—"
 	}
-	line := "- " + html.EscapeString(name) + ", " + html.EscapeString(phone) + ", " + callStatusLabel(lead.CallStatus)
+	line := emoji + " " + html.EscapeString(name) + ", " + html.EscapeString(phone)
 	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
-		line += ", <a href=\"" + html.EscapeString(link) + "\">Відкрити в CRM</a>"
+		line += ", <a href=\"" + html.EscapeString(link) + "\">відкрити</a>"
 	}
 	return line
-}
-
-func callStatusLabel(status *string) string {
-	if status == nil {
-		return "Нова заявка"
-	}
-	switch *status {
-	case "no_answer":
-		return "Не дозвонилися"
-	case "callback_requested":
-		return "Передзвонити"
-	default:
-		return "Нова заявка"
-	}
 }
 
 func crmLeadURL(base string, leadID uuid.UUID) string {
@@ -272,6 +328,9 @@ func nextFireTime(now time.Time, loc *time.Location, hourLocal int) time.Time {
 	local := now.In(loc)
 	candidate := time.Date(local.Year(), local.Month(), local.Day(), hourLocal, 0, 0, 0, loc)
 	if !candidate.After(now) {
+		candidate = candidate.AddDate(0, 0, 1)
+	}
+	for candidate.Weekday() == time.Sunday {
 		candidate = candidate.AddDate(0, 0, 1)
 	}
 	return candidate
