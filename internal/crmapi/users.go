@@ -137,19 +137,19 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user id", nil)
 		return
 	}
-	authUser, authErr := s.getAuthUser(r, userID)
-	if authErr != nil {
-		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
-		return
-	}
+	// Same source as listUsers: profiles + auth.users. Avoid Auth Admin GET —
+	// a missing/failed admin lookup was returning 404 even when the profile exists.
 	var profile, offices []byte
+	var email string
 	err = s.pool.QueryRow(r.Context(), `
-		select to_jsonb(p),
+		select to_jsonb(p), coalesce(u.email, ''),
 			coalesce((select jsonb_agg(to_jsonb(o) order by o.code)
 				from public.user_office_memberships m join public.offices o on o.id=m.office_id
 				where m.user_id=p.id),'[]'::jsonb)
-		from public.profiles p where p.id=$1
-	`, userID).Scan(&profile, &offices)
+		from public.profiles p
+		left join auth.users u on u.id = p.id
+		where p.id=$1
+	`, userID).Scan(&profile, &email, &offices)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
 		return
@@ -158,7 +158,11 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "user_load_failed", "Could not load user", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": userID, "email": authUser.Email, "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
+	var emailVal any
+	if email != "" {
+		emailVal = email
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": userID, "email": emailVal, "profile": json.RawMessage(profile), "offices": json.RawMessage(offices)})
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -279,17 +283,26 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, act
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user request", nil)
 		return
 	}
-	authUser, authErr := s.getAuthUser(r, userID)
-	var role string
-	if authErr != nil || s.pool.QueryRow(r.Context(), `select role::text from public.profiles where id=$1`, userID).Scan(&role) != nil {
+	var role, email string
+	err = s.pool.QueryRow(r.Context(), `
+		select p.role::text, coalesce(u.email, '')
+		from public.profiles p
+		left join auth.users u on u.id = p.id
+		where p.id=$1
+	`, userID).Scan(&role, &email)
+	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not load user", nil)
 		return
 	}
 	if role == "super_admin" && !active {
 		s.writeError(w, r, http.StatusBadRequest, "super_admin_immutable", "Super admin cannot be deactivated", nil)
 		return
 	}
-	if !active && !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), authUser.Email) {
+	if !active && !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), email) {
 		s.writeError(w, r, http.StatusBadRequest, "confirmation_mismatch", "Confirmation email does not match", map[string]string{"confirmEmail": "Email does not match"})
 		return
 	}
@@ -339,14 +352,23 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user request", nil)
 		return
 	}
-	authUser, authErr := s.getAuthUser(r, userID)
-	var role string
+	var role, email string
 	var active bool
-	if authErr != nil || s.pool.QueryRow(r.Context(), `select role::text,is_active from public.profiles where id=$1`, userID).Scan(&role, &active) != nil {
+	err = s.pool.QueryRow(r.Context(), `
+		select p.role::text, p.is_active, coalesce(u.email, '')
+		from public.profiles p
+		left join auth.users u on u.id = p.id
+		where p.id=$1
+	`, userID).Scan(&role, &active, &email)
+	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
 		return
 	}
-	if active || role == "super_admin" || !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), authUser.Email) {
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_delete_failed", "Could not load user", nil)
+		return
+	}
+	if active || role == "super_admin" || !strings.EqualFold(strings.TrimSpace(req.ConfirmEmail), email) {
 		s.writeError(w, r, http.StatusBadRequest, "delete_not_allowed", "Deactivate the user and confirm the exact email first", nil)
 		return
 	}
@@ -391,29 +413,6 @@ func replaceMemberships(r *http.Request, tx pgx.Tx, userID uuid.UUID, officeIDs 
 		}
 	}
 	return nil
-}
-
-type authAdminUser struct {
-	ID    uuid.UUID `json:"id"`
-	Email string    `json:"email"`
-}
-
-func (s *Server) getAuthUser(r *http.Request, userID uuid.UUID) (authAdminUser, error) {
-	var raw json.RawMessage
-	if err := s.authAdmin(r, http.MethodGet, "/auth/v1/admin/users/"+userID.String(), nil, &raw); err != nil {
-		return authAdminUser{}, err
-	}
-	var wrapped struct {
-		User authAdminUser `json:"user"`
-	}
-	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.User.ID != uuid.Nil {
-		return wrapped.User, nil
-	}
-	var user authAdminUser
-	if err := json.Unmarshal(raw, &user); err != nil || user.ID == uuid.Nil {
-		return authAdminUser{}, errors.New("invalid auth user response")
-	}
-	return user, nil
 }
 
 func (s *Server) authAdmin(r *http.Request, method, path string, payload any, out any) error {
