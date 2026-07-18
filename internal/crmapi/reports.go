@@ -20,20 +20,33 @@ var reportClientStatuses = [...]string{
 	"closed_lost",
 }
 
+var reportCurrencyOrder = map[string]int{
+	"UAH": 0,
+	"USD": 1,
+	"EUR": 2,
+	"PLN": 3,
+}
+
 type reportPeriod struct {
 	From *string `json:"from"`
 	To   *string `json:"to"`
 }
 
 type reportTotals struct {
-	Total             int            `json:"total"`
-	Active            int            `json:"active"`
-	ContractSigned    int            `json:"contractSigned"`
-	ClosedLost        int            `json:"closedLost"`
-	Callback          int            `json:"callback"`
-	Inactive7d        int            `json:"inactive7d"`
-	ConversionPercent int            `json:"conversionPercent"`
-	ByClientStatus    map[string]int `json:"byClientStatus"`
+	Total             int                   `json:"total"`
+	Active            int                   `json:"active"`
+	ContractSigned    int                   `json:"contractSigned"`
+	ContractTotals    []reportContractTotal `json:"contractTotals"`
+	ClosedLost        int                   `json:"closedLost"`
+	Callback          int                   `json:"callback"`
+	Inactive7d        int                   `json:"inactive7d"`
+	ConversionPercent int                   `json:"conversionPercent"`
+	ByClientStatus    map[string]int        `json:"byClientStatus"`
+}
+
+type reportContractTotal struct {
+	Currency string  `json:"currency"`
+	Total    float64 `json:"total"`
 }
 
 type reportComment struct {
@@ -58,6 +71,8 @@ type reportLead struct {
 	InactiveDays          int             `json:"inactiveDays"`
 	Inactive7d            bool            `json:"inactive7d"`
 	Comments              []reportComment `json:"comments"`
+	ContractAmount        *float64        `json:"-"`
+	ContractCurrency      *string         `json:"-"`
 }
 
 type managerLeadReport struct {
@@ -171,7 +186,7 @@ func newReportTotals() reportTotals {
 	for _, status := range reportClientStatuses {
 		counts[status] = 0
 	}
-	return reportTotals{ByClientStatus: counts}
+	return reportTotals{ByClientStatus: counts, ContractTotals: []reportContractTotal{}}
 }
 
 func addLeadToTotals(totals *reportTotals, lead reportLead) {
@@ -186,6 +201,7 @@ func addLeadToTotals(totals *reportTotals, lead reportLead) {
 	}
 	if lead.ClientStatus == "contract_signed" {
 		totals.ContractSigned++
+		addContractToTotals(totals, lead.ContractAmount, lead.ContractCurrency)
 	}
 	if lead.ClientStatus == "closed_lost" {
 		totals.ClosedLost++
@@ -195,10 +211,33 @@ func addLeadToTotals(totals *reportTotals, lead reportLead) {
 	}
 }
 
+func addContractToTotals(totals *reportTotals, amount *float64, currency *string) {
+	if amount == nil || *amount <= 0 || currency == nil {
+		return
+	}
+	code := strings.ToUpper(strings.TrimSpace(*currency))
+	if _, ok := reportCurrencyOrder[code]; !ok {
+		return
+	}
+	for index := range totals.ContractTotals {
+		if totals.ContractTotals[index].Currency == code {
+			totals.ContractTotals[index].Total += *amount
+			return
+		}
+	}
+	totals.ContractTotals = append(totals.ContractTotals, reportContractTotal{
+		Currency: code,
+		Total:    *amount,
+	})
+}
+
 func finalizeTotals(totals *reportTotals) {
 	if totals.Total > 0 {
 		totals.ConversionPercent = int(math.Round(float64(totals.ContractSigned) / float64(totals.Total) * 100))
 	}
+	sort.SliceStable(totals.ContractTotals, func(i, j int) bool {
+		return reportCurrencyOrder[totals.ContractTotals[i].Currency] < reportCurrencyOrder[totals.ContractTotals[j].Currency]
+	})
 }
 
 func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
@@ -246,9 +285,31 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 				(now() at time zone l.timezone_name)::date -
 				(coalesce(activity.last_activity_at,l.source_created_at,l.created_at) at time zone l.timezone_name)::date
 			))::int as inactive_days,
+			coalesce(signed_contract.amount, legacy_contract.amount),
+			coalesce(signed_contract.currency, legacy_contract.currency),
 			comments.items
 		from scoped_leads l
 		left join public.profiles manager on manager.id=l.assigned_to
+		left join lateral (
+			select c.amount,c.currency
+			from public.lead_contracts c
+			where c.lead_id=l.id
+			  and c.status='signed'
+			  and c.amount is not null
+			  and c.currency is not null
+			order by c.signed_at desc nulls last,c.created_at desc
+			limit 1
+		) signed_contract on true
+		left join lateral (
+			select (e.new_value->>'amount')::numeric as amount,e.new_value->>'currency' as currency
+			from public.lead_events e
+			where e.lead_id=l.id
+			  and e.event_type in ('successful','contract_signed')
+			  and e.new_value ? 'amount'
+			  and e.new_value ? 'currency'
+			order by e.created_at desc
+			limit 1
+		) legacy_contract on true
 		left join lateral (
 			select max(e.created_at) as last_activity_at
 			from public.lead_events e
@@ -318,6 +379,8 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 			&lead.LossReason,
 			&lead.LastHumanActivityAt,
 			&lead.InactiveDays,
+			&lead.ContractAmount,
+			&lead.ContractCurrency,
 			&commentsJSON,
 		); err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not load report", nil)

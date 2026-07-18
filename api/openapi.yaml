@@ -733,16 +733,26 @@ components:
     ReportTotals:
       type: object
       additionalProperties: false
-      required: [total, active, contractSigned, closedLost, callback, inactive7d, conversionPercent, byClientStatus]
+      required: [total, active, contractSigned, contractTotals, closedLost, callback, inactive7d, conversionPercent, byClientStatus]
       properties:
         total: { type: integer, minimum: 0 }
         active: { type: integer, minimum: 0 }
         contractSigned: { type: integer, minimum: 0 }
+        contractTotals:
+          type: array
+          items: { $ref: '#/components/schemas/ReportContractTotal' }
         closedLost: { type: integer, minimum: 0 }
         callback: { type: integer, minimum: 0 }
         inactive7d: { type: integer, minimum: 0 }
         conversionPercent: { type: integer, minimum: 0, maximum: 100 }
         byClientStatus: { $ref: '#/components/schemas/ReportStatusCounts' }
+    ReportContractTotal:
+      type: object
+      additionalProperties: false
+      required: [currency, total]
+      properties:
+        currency: { type: string, enum: [UAH, USD, EUR, PLN] }
+        total: { type: number, minimum: 0 }
     ReportComment:
       type: object
       additionalProperties: false

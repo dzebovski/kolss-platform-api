@@ -77,6 +77,34 @@ func TestReportTotalsUseCurrentIndependentStatuses(t *testing.T) {
 	}
 }
 
+func TestReportTotalsSumSignedContractsByCurrency(t *testing.T) {
+	totals := newReportTotals()
+	eur := "EUR"
+	uah := "UAH"
+	eurFirst := 29800.0
+	eurSecond := 200.0
+	uahAmount := 500000.0
+
+	addLeadToTotals(&totals, reportLead{ClientStatus: "contract_signed", ContractAmount: &eurFirst, ContractCurrency: &eur})
+	addLeadToTotals(&totals, reportLead{ClientStatus: "contract_signed", ContractAmount: &uahAmount, ContractCurrency: &uah})
+	addLeadToTotals(&totals, reportLead{ClientStatus: "contract_signed", ContractAmount: &eurSecond, ContractCurrency: &eur})
+	addLeadToTotals(&totals, reportLead{ClientStatus: "new_lead", ContractAmount: &eurFirst, ContractCurrency: &eur})
+	finalizeTotals(&totals)
+
+	if totals.ContractSigned != 3 {
+		t.Fatalf("contractSigned=%d", totals.ContractSigned)
+	}
+	if len(totals.ContractTotals) != 2 {
+		t.Fatalf("contractTotals=%#v", totals.ContractTotals)
+	}
+	if totals.ContractTotals[0].Currency != "UAH" || totals.ContractTotals[0].Total != 500000 {
+		t.Fatalf("first contract total=%#v", totals.ContractTotals[0])
+	}
+	if totals.ContractTotals[1].Currency != "EUR" || totals.ContractTotals[1].Total != 30000 {
+		t.Fatalf("second contract total=%#v", totals.ContractTotals[1])
+	}
+}
+
 func TestInactiveBoundaryIsMoreThanSevenCalendarDays(t *testing.T) {
 	for _, test := range []struct {
 		days int
