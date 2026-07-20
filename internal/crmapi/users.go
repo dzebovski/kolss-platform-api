@@ -2,6 +2,7 @@ package crmapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -169,6 +170,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSuperAdmin(w, r) || !requireIdempotencyKey(s, w, r) {
 		return
 	}
+	actor, _ := actorFromContext(r.Context())
 	var req userMutationRequest
 	if err := decodeJSON(w, r, 64*1024, &req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", nil)
@@ -196,6 +198,9 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback(r.Context())
 	}
 	if err == nil {
+		err = setLocalActor(r.Context(), tx, actor.ID)
+	}
+	if err == nil {
 		_, err = tx.Exec(r.Context(), `insert into public.profiles (id,role,display_name,is_active,deactivated_at) values ($1,$2,$3,true,null) on conflict (id) do update set role=excluded.role,display_name=excluded.display_name,is_active=true,deactivated_at=null`, created.ID, req.Role, strings.TrimSpace(req.DisplayName))
 	}
 	if err == nil {
@@ -218,6 +223,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSuperAdmin(w, r) {
 		return
 	}
+	actor, _ := actorFromContext(r.Context())
 	userID, err := uuid.Parse(r.PathValue("userId"))
 	var req userMutationRequest
 	if err != nil || decodeJSON(w, r, 64*1024, &req) != nil {
@@ -250,6 +256,9 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback(r.Context())
 	}
 	if err == nil {
+		err = setLocalActor(r.Context(), tx, actor.ID)
+	}
+	if err == nil {
 		_, err = tx.Exec(r.Context(), `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, strings.TrimSpace(req.DisplayName))
 	}
 	if err == nil {
@@ -277,6 +286,7 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, act
 	if !s.requireSuperAdmin(w, r) || !requireIdempotencyKey(s, w, r) {
 		return
 	}
+	actor, _ := actorFromContext(r.Context())
 	userID, err := uuid.Parse(r.PathValue("userId"))
 	var req userMutationRequest
 	if err != nil || decodeJSON(w, r, 16*1024, &req) != nil {
@@ -312,6 +322,10 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, act
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if err := setLocalActor(r.Context(), tx, actor.ID); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
+		return
+	}
 	if _, err := tx.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, active); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "user_status_failed", "Could not update user status", nil)
 		return
@@ -335,7 +349,20 @@ func (s *Server) handleSetUserActive(w http.ResponseWriter, r *http.Request, act
 		ban = "none"
 	}
 	if err := s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), map[string]string{"ban_duration": ban}, nil); err != nil {
-		_, _ = s.pool.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, !active)
+		rollbackTx, rollbackErr := s.pool.Begin(r.Context())
+		if rollbackErr == nil {
+			defer rollbackTx.Rollback(r.Context())
+			rollbackErr = setLocalActor(r.Context(), rollbackTx, actor.ID)
+		}
+		if rollbackErr == nil {
+			_, rollbackErr = rollbackTx.Exec(r.Context(), `update public.profiles set is_active=$2,deactivated_at=case when $2 then null else now() end,updated_at=now() where id=$1`, userID, !active)
+		}
+		if rollbackErr == nil {
+			rollbackErr = rollbackTx.Commit(r.Context())
+		}
+		if rollbackErr != nil {
+			s.logger.Error("could not roll back user status after auth update failure", "error", rollbackErr, "user_id", userID, "request_id", requestID(r.Context()))
+		}
 		s.writeError(w, r, http.StatusBadGateway, "auth_user_status_failed", "Could not update auth user status", nil)
 		return
 	}
@@ -413,6 +440,15 @@ func replaceMemberships(r *http.Request, tx pgx.Tx, userID uuid.UUID, officeIDs 
 		}
 	}
 	return nil
+}
+
+// setLocalActor propagates the already authenticated request actor into the
+// current database transaction. Supabase auth helpers such as auth.uid() read
+// this transaction-local setting, allowing the profiles guard trigger to
+// enforce that sensitive fields are changed only by an active super admin.
+func setLocalActor(ctx context.Context, tx pgx.Tx, actorID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `select set_config('request.jwt.claim.sub', $1, true)`, actorID.String())
+	return err
 }
 
 func (s *Server) authAdmin(r *http.Request, method, path string, payload any, out any) error {
