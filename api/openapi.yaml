@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.1.0
+  version: 2.2.0
   description: >
     CRM API, Google Sheets imports, and text-only public contact forms for PL/UA sites.
     A public submission atomically creates the lead and Telegram outbox rows.
@@ -229,6 +229,27 @@ paths:
         '200': { description: Event deleted }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/events/{eventId}/translate:
+    post:
+      tags: [Leads]
+      operationId: translateLeadEvent
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      responses:
+        '200':
+          description: Existing or newly saved English translation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadEventTranslation' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '422': { $ref: '#/components/responses/CRMError' }
+        '429': { $ref: '#/components/responses/CRMError' }
+        '503': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/activities:
     post:
       tags: [Activities]
@@ -642,6 +663,14 @@ components:
         event_category: { type: [string, 'null'] }
         status_code: { type: [string, 'null'] }
         new_value: {}
+    LeadEventTranslation:
+      type: object
+      additionalProperties: false
+      required: [translation, sourceLanguage, translatedAt]
+      properties:
+        translation: { type: string, minLength: 1 }
+        sourceLanguage: { type: string, enum: [UK, PL] }
+        translatedAt: { type: string, format: date-time }
     LeadActivityRequest:
       oneOf:
         - $ref: '#/components/schemas/CallStatusActivityRequest'

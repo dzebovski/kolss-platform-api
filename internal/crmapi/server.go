@@ -34,6 +34,7 @@ type Options struct {
 	Outbox             notifications.Outbox
 	NotificationWaker  notifications.Waker
 	Storage            storage.ObjectStorage
+	Translator         Translator
 	Logger             *slog.Logger
 }
 
@@ -50,6 +51,7 @@ type Server struct {
 	outbox             notifications.Outbox
 	notificationWaker  notifications.Waker
 	storage            storage.ObjectStorage
+	translator         Translator
 	logger             *slog.Logger
 }
 
@@ -79,6 +81,7 @@ func New(opts Options) *Server {
 		outbox:             opts.Outbox,
 		notificationWaker:  opts.NotificationWaker,
 		storage:            opts.Storage,
+		translator:         opts.Translator,
 		logger:             logger,
 	}
 }
@@ -109,6 +112,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Delete("/v1/leads/{leadId}/markers/{kind}", s.handleDeleteLeadMarker)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
 			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
+			r.Post("/v1/leads/{leadId}/events/{eventId}/translate", s.handleTranslateEvent)
 			r.Post("/v1/leads/{leadId}/archive", s.handleArchiveLead)
 			r.Post("/v1/leads/{leadId}/restore", s.handleRestoreLead)
 			r.Post("/v1/leads/{leadId}/delete", s.handleDeleteLead)
@@ -168,6 +172,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}",
 	"/v1/leads/{leadId}/markers/{kind}",
 	"/v1/leads/{leadId}/events/{eventId}",
+	"/v1/leads/{leadId}/events/{eventId}/translate",
 	"/v1/leads/{leadId}/archive",
 	"/v1/leads/{leadId}/restore",
 	"/v1/leads/{leadId}/delete",

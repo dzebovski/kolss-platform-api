@@ -81,6 +81,9 @@ services:
         type: SECRET
       - key: CRM_SITE_URL_PUBLIC
         value: "https://crm.kolss.eu"
+      - key: DEEPL_API_KEY
+        scope: RUN_TIME
+        type: SECRET
       - key: TELEGRAM_BOT_TOKEN
         scope: RUN_TIME
         type: SECRET

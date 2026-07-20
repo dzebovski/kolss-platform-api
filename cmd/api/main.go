@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/dzebovski/kolss-platform-api/internal/config"
 	"github.com/dzebovski/kolss-platform-api/internal/crmapi"
 	"github.com/dzebovski/kolss-platform-api/internal/dailyreport"
+	"github.com/dzebovski/kolss-platform-api/internal/deepl"
 	"github.com/dzebovski/kolss-platform-api/internal/httpapi"
 	"github.com/dzebovski/kolss-platform-api/internal/leads"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
@@ -140,6 +142,7 @@ func main() {
 		Outbox:             outbox,
 		NotificationWaker:  notificationWaker,
 		Storage:            objects,
+		Translator:         configuredTranslator(cfg.DeepLAPIKey),
 		Logger:             logger,
 	})
 	root := buildRouter(server, crm)
@@ -173,6 +176,13 @@ func main() {
 	cancelDispatcher()
 	dispatcherWG.Wait()
 	logger.Info("api shut down")
+}
+
+func configuredTranslator(apiKey string) crmapi.Translator {
+	if strings.TrimSpace(apiKey) == "" {
+		return nil
+	}
+	return deepl.NewClient(apiKey)
 }
 
 func buildRouter(public *httpapi.Server, crm *crmapi.Server) http.Handler {

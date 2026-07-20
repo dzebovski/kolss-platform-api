@@ -547,6 +547,9 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	command, err := s.pool.Exec(r.Context(), `
 		update public.lead_events
 		set comment=nullif(trim($3),''),
+		    comment_translation_en=null,
+		    comment_translation_source_lang=null,
+		    comment_translated_at=null,
 		    new_value = coalesce(new_value, '{}'::jsonb) || jsonb_build_object(
 		      'edit_audit', jsonb_build_object(
 		        'fields', jsonb_build_array('message'),

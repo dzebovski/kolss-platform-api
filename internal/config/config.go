@@ -41,6 +41,7 @@ type Config struct {
 	S3SecretAccessKey string
 
 	CRMSiteURLPublic string
+	DeepLAPIKey      string
 
 	TelegramBotToken              string
 	TelegramBotTokenKyiv          string
@@ -90,6 +91,7 @@ func Load() (Config, error) {
 			os.Getenv("CRM_SITE_URL_PUBLIC"),
 			os.Getenv("SITE_URL_PUBLIC"),
 		)),
+		DeepLAPIKey: strings.TrimSpace(os.Getenv("DEEPL_API_KEY")),
 
 		TelegramBotToken:              strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		TelegramBotTokenKyiv:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_KYIV")),
