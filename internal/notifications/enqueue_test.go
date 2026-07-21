@@ -17,6 +17,25 @@ func TestTelegramChatIDsKyivIncludesPrimaryAndUniqueAdditionalIDs(t *testing.T) 
 	}
 }
 
+func TestDeliveryDestinationsRouteKyivToTelegramAndWarsawToSlack(t *testing.T) {
+	outbox := Outbox{
+		TelegramChatIDKyiv:            "-100111",
+		TelegramAdditionalChatIDsKyiv: "-100222",
+		SlackChannelIDWarsaw:          " C123WARSAW ",
+	}
+	if got, want := outbox.deliveryDestinations("kyiv"), []deliveryDestination{
+		{channel: "telegram", destination: "-100111"},
+		{channel: "telegram", destination: "-100222"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Kyiv destinations = %#v, want %#v", got, want)
+	}
+	if got, want := outbox.deliveryDestinations("warsaw"), []deliveryDestination{
+		{channel: "slack", destination: "C123WARSAW"},
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Warsaw destinations = %#v, want %#v", got, want)
+	}
+}
+
 func TestCRMLeadURLUsesCRMDomainRoot(t *testing.T) {
 	leadID := uuid.MustParse("ceaf7ee5-28fe-4133-8a54-84dda27d0f8b")
 	if got := crmLeadURL("https://crm.kolss.eu/crm/leads/:id?stale=true", leadID); got == nil || *got != "https://crm.kolss.eu/crm/leads/ceaf7ee5-28fe-4133-8a54-84dda27d0f8b" {

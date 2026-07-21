@@ -119,15 +119,15 @@ services:
       - key: TELEGRAM_BOT_TOKEN_KYIV
         scope: RUN_TIME
         type: SECRET
-      - key: TELEGRAM_BOT_TOKEN_WARSAW
-        scope: RUN_TIME
-        type: SECRET
       - key: TELEGRAM_CHAT_ID_KYIV
         scope: RUN_TIME
         type: SECRET
       - key: TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV
         value: "-1002833157899"
-      - key: TELEGRAM_CHAT_ID_WARSAW
+      - key: SLACK_BOT_TOKEN_WARSAW
+        scope: RUN_TIME
+        type: SECRET
+      - key: SLACK_CHANNEL_ID_WARSAW
         scope: RUN_TIME
         type: SECRET
       - key: SHUTDOWN_TIMEOUT_SECONDS

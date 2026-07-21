@@ -1,7 +1,7 @@
 # KOLSS Platform API
 
 Single-process Go API for the KOLSS CRM, direct Meta Lead Ads ingestion, public
-text forms, and Telegram outbox delivery.
+text forms, and office-specific notification outbox delivery.
 
 ## Current phase
 
@@ -9,7 +9,7 @@ text forms, and Telegram outbox delivery.
 - All CRM data, workflow, reports, user admin, archive, and file URL operations go through this API.
 - Kyiv and Warsaw Facebook Pages send signed `leadgen` webhooks directly to this API.
 - A durable Postgres inbox and periodic Meta Graph API reconciliation prevent lost leads.
-- Telegram delivery runs in-process immediately after commits and with an hourly recovery sweep.
+- Kyiv Telegram and Warsaw Slack delivery run in-process immediately after commits and with an hourly recovery sweep.
 - Public UA/PL site forms are feature-disabled (`PUBLIC_SITE_FORMS_ENABLED=false`).
 
 ## Local run
@@ -48,6 +48,13 @@ older lead, including from archived forms.
 `TELEGRAM_CHAT_ID_KYIV` remains the primary Kyiv chat. Set
 `TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV=-1002833157899` to also deliver each Kyiv lead
 to the **Kolss Kyiv** supergroup. Each destination has independent outbox retry state.
+
+### Warsaw Slack delivery
+
+Set `SLACK_BOT_TOKEN_WARSAW` to the installed app's `xoxb-…` Bot User OAuth
+Token and `SLACK_CHANNEL_ID_WARSAW` to the target channel ID. The app needs the
+`chat:write` scope and must be a member of private target channels. Warsaw lead
+notifications are delivered only to Slack; the Warsaw daily report remains disabled.
 
 Set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without `/crm/leads/:id`.
 

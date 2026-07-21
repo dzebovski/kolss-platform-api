@@ -29,4 +29,4 @@ Use the complete setup instructions in
 
 Rollback does not delete leads: deploy the previous API image and, if necessary,
 restore the old Apps Script endpoint from the previous release. Existing Meta inbox
-events and Telegram outbox rows remain durable.
+events and notification outbox rows remain durable.

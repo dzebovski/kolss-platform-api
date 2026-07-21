@@ -55,10 +55,10 @@ type Config struct {
 
 	TelegramBotToken              string
 	TelegramBotTokenKyiv          string
-	TelegramBotTokenWarsaw        string
 	TelegramChatIDKyiv            string
-	TelegramChatIDWarsaw          string
 	TelegramAdditionalChatIDsKyiv string
+	SlackBotTokenWarsaw           string
+	SlackChannelIDWarsaw          string
 }
 
 func Load() (Config, error) {
@@ -114,10 +114,10 @@ func Load() (Config, error) {
 
 		TelegramBotToken:              strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		TelegramBotTokenKyiv:          strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_KYIV")),
-		TelegramBotTokenWarsaw:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN_WARSAW")),
 		TelegramChatIDKyiv:            strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_KYIV")),
-		TelegramChatIDWarsaw:          strings.TrimSpace(os.Getenv("TELEGRAM_CHAT_ID_WARSAW")),
 		TelegramAdditionalChatIDsKyiv: strings.TrimSpace(os.Getenv("TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV")),
+		SlackBotTokenWarsaw:           strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN_WARSAW")),
+		SlackChannelIDWarsaw:          strings.TrimSpace(os.Getenv("SLACK_CHANNEL_ID_WARSAW")),
 	}
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -162,7 +162,8 @@ func Load() (Config, error) {
 			"META_ALERT_TELEGRAM_CHAT_ID":   cfg.MetaAlertTelegramChatID,
 			"TELEGRAM_BOT_TOKEN":            cfg.TelegramBotToken,
 			"TELEGRAM_CHAT_ID_KYIV":         cfg.TelegramChatIDKyiv,
-			"TELEGRAM_CHAT_ID_WARSAW":       cfg.TelegramChatIDWarsaw,
+			"SLACK_BOT_TOKEN_WARSAW":        cfg.SlackBotTokenWarsaw,
+			"SLACK_CHANNEL_ID_WARSAW":       cfg.SlackChannelIDWarsaw,
 		}
 		for name, value := range metaRequired {
 			if strings.TrimSpace(value) == "" {
@@ -198,12 +199,15 @@ func (c Config) TelegramBotTokenFor(officeCode string) string {
 		if c.TelegramBotTokenKyiv != "" {
 			return c.TelegramBotTokenKyiv
 		}
-	case "warsaw":
-		if c.TelegramBotTokenWarsaw != "" {
-			return c.TelegramBotTokenWarsaw
-		}
 	}
 	return c.TelegramBotToken
+}
+
+func (c Config) SlackBotTokenFor(officeCode string) string {
+	if officeCode == "warsaw" {
+		return c.SlackBotTokenWarsaw
+	}
+	return ""
 }
 
 func getenv(key, fallback string) string {

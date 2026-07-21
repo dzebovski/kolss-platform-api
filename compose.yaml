@@ -1,4 +1,4 @@
-# Local API with an in-process Telegram dispatcher against local Supabase.
+# Local API with an in-process notification dispatcher against local Supabase.
 #
 # Prerequisites:
 #   1. `supabase start` in this repo (Postgres on 54322, Storage S3 endpoint from `supabase status`)

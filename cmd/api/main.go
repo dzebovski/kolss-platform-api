@@ -80,8 +80,8 @@ func main() {
 	outbox := notifications.Outbox{
 		CRMSiteURLPublic:              cfg.CRMSiteURLPublic,
 		TelegramChatIDKyiv:            cfg.TelegramChatIDKyiv,
-		TelegramChatIDWarsaw:          cfg.TelegramChatIDWarsaw,
 		TelegramAdditionalChatIDsKyiv: cfg.TelegramAdditionalChatIDsKyiv,
+		SlackChannelIDWarsaw:          cfg.SlackChannelIDWarsaw,
 	}
 	var dispatcher *notifications.Dispatcher
 	var notificationWaker notifications.Waker

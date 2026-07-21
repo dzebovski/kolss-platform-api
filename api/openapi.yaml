@@ -4,7 +4,7 @@ info:
   version: 2.4.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
-    Lead creation atomically persists the CRM record and Telegram outbox rows.
+    Lead creation atomically persists the CRM record and office notification outbox rows.
 servers:
   - url: https://api.kolss.eu
     description: Production
@@ -446,7 +446,7 @@ paths:
       summary: Create a text-only lead submission
       description: >
         Validates contact fields, consent, honeypot, and Turnstile, then atomically
-        creates the CRM lead, accepted submission, and Telegram outbox rows.
+        creates the CRM lead, accepted submission, and office notification outbox rows.
       parameters:
         - $ref: '#/components/parameters/SiteCode'
       requestBody:

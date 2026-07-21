@@ -15,7 +15,7 @@ import (
 	"github.com/dzebovski/kolss-platform-api/internal/validation"
 )
 
-func TestCreateCommitsLeadSubmissionAndTelegramBeforeWake(t *testing.T) {
+func TestCreateCommitsLeadSubmissionAndSlackBeforeWake(t *testing.T) {
 	leadID := uuid.New()
 	tx := &fakeTx{}
 	tx.queryRow = func(sql string, args ...any) pgx.Row {
@@ -35,9 +35,9 @@ func TestCreateCommitsLeadSubmissionAndTelegramBeforeWake(t *testing.T) {
 			return scanRow(func(...any) error { return errors.New("unexpected query") })
 		}
 	}
-	tx.exec = func(sql string, _ ...any) (pgconn.CommandTag, error) {
-		if !strings.Contains(sql, "'telegram'::public.notification_channel") || strings.Contains(sql, "slack") {
-			t.Fatalf("unexpected outbox query: %s", sql)
+	tx.exec = func(sql string, args ...any) (pgconn.CommandTag, error) {
+		if !strings.Contains(sql, "$2::public.notification_channel") || args[1] != "slack" || args[2] != "C123WARSAW" {
+			t.Fatalf("unexpected outbox insert: sql=%s args=%v", sql, args)
 		}
 		tx.notificationInserts++
 		return pgconn.NewCommandTag("INSERT 0 1"), nil
@@ -46,7 +46,7 @@ func TestCreateCommitsLeadSubmissionAndTelegramBeforeWake(t *testing.T) {
 		return scanRow(func(...any) error { return pgx.ErrNoRows })
 	}}
 	waker := &countingWaker{}
-	service := NewService(db, fixedSiteRepository(), notifications.Outbox{TelegramChatIDWarsaw: "-1001"}, waker)
+	service := NewService(db, fixedSiteRepository(), notifications.Outbox{SlackChannelIDWarsaw: "C123WARSAW"}, waker)
 
 	result, err := service.Create(context.Background(), "kolss-pl", validSubmission())
 	if err != nil {
@@ -69,7 +69,7 @@ func TestCreateRollsBackAndDoesNotWakeWhenOutboxInsertFails(t *testing.T) {
 		return scanRow(func(...any) error { return pgx.ErrNoRows })
 	}}
 	waker := &countingWaker{}
-	service := NewService(db, fixedSiteRepository(), notifications.Outbox{TelegramChatIDWarsaw: "-1001"}, waker)
+	service := NewService(db, fixedSiteRepository(), notifications.Outbox{SlackChannelIDWarsaw: "C123WARSAW"}, waker)
 
 	if _, err := service.Create(context.Background(), "kolss-pl", validSubmission()); err == nil {
 		t.Fatal("expected outbox error")
@@ -90,7 +90,7 @@ func TestCreateIdempotencyReplayDoesNotBeginOrWake(t *testing.T) {
 		})
 	}}
 	waker := &countingWaker{}
-	service := NewService(db, fixedSiteRepository(), notifications.Outbox{TelegramChatIDWarsaw: "-1001"}, waker)
+	service := NewService(db, fixedSiteRepository(), notifications.Outbox{SlackChannelIDWarsaw: "C123WARSAW"}, waker)
 
 	result, err := service.Create(context.Background(), "kolss-pl", validSubmission())
 	if err != nil {

@@ -2,6 +2,7 @@ package notifications
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -20,6 +21,18 @@ func TestDispatcherWakeIsNonBlockingAndCoalesced(t *testing.T) {
 	dispatcher.Wake()
 	if got := len(dispatcher.wake); got != 1 {
 		t.Fatalf("queued wakes = %d, want 1", got)
+	}
+}
+
+func TestDispatcherSchedulesRateLimitRecoveryWake(t *testing.T) {
+	dispatcher := NewDispatcher(nil, nil, nil, 20, time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dispatcher.scheduleRetry(ctx, 10*time.Millisecond)
+	select {
+	case <-dispatcher.retry:
+	case <-time.After(time.Second):
+		t.Fatal("retry wake was not scheduled")
 	}
 }
 
@@ -49,6 +62,78 @@ func TestSendTelegramUsesOfficeTokenAndHTML(t *testing.T) {
 	}
 	if request == nil || request.URL.String() != "https://api.telegram.org/botkyiv-token/sendMessage" {
 		t.Fatalf("request URL = %v", request)
+	}
+}
+
+func TestSendSlackUsesBotTokenAndChannel(t *testing.T) {
+	var request *http.Request
+	var body map[string]any
+	client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		request = req
+		raw, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Fatal(err)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+			Header:     make(http.Header),
+		}, nil
+	})}
+	dispatcher := NewDispatcher(nil, testCredentials{}, nil, 20, time.Hour)
+	if err := dispatcher.sendSlack(context.Background(), client, "warsaw", "C123WARSAW", "cześć"); err != nil {
+		t.Fatal(err)
+	}
+	if request == nil || request.URL.String() != "https://slack.com/api/chat.postMessage" {
+		t.Fatalf("request URL = %v", request)
+	}
+	if got := request.Header.Get("Authorization"); got != "Bearer warsaw-slack-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if body["channel"] != "C123WARSAW" || body["text"] != "cześć" || body["unfurl_links"] != false || body["unfurl_media"] != false {
+		t.Fatalf("body = %#v", body)
+	}
+}
+
+func TestSendSlackRejectsHTTPAndAPIErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{name: "http", status: http.StatusBadGateway, body: `{"ok":false}`, want: "status 502"},
+		{name: "api", status: http.StatusOK, body: `{"ok":false,"error":"channel_not_found"}`, want: "channel_not_found"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: test.status, Body: io.NopCloser(strings.NewReader(test.body)), Header: make(http.Header)}, nil
+			})}
+			err := SendSlackMessage(context.Background(), client, "xoxb-secret", "C123", "hello")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+			if strings.Contains(err.Error(), "xoxb-secret") {
+				t.Fatalf("error exposed token: %v", err)
+			}
+		})
+	}
+}
+
+func TestSendSlackHonorsRetryAfter(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Retry-After", "7")
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"ok":false}`)), Header: header}, nil
+	})}
+	err := SendSlackMessage(context.Background(), client, "xoxb-secret", "C123", "hello")
+	var rateLimit *rateLimitError
+	if !errors.As(err, &rateLimit) || rateLimit.RetryAfter != 7*time.Second {
+		t.Fatalf("error = %#v", err)
 	}
 }
 
@@ -98,6 +183,66 @@ func TestBuildTelegramNotificationMessageManualSource(t *testing.T) {
 	want := "🔔 Нова заявка! 14.07.2026, 13:00\n👤 Ім'я: Марія\n🏠 Що цікавить?: Кухня\n📞 Тел: +380671112233\n🌐 Джерело: Вручну\n🔗 <a href=\"https://crm.example/crm/leads/abc\">Відкрити в CRM</a>"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
+	}
+}
+
+func TestBuildSlackNotificationMessage(t *testing.T) {
+	msg := BuildSlackNotificationMessage(map[string]any{
+		"name":                     "Jan <Admin>",
+		"phone":                    "+48123123123",
+		"email":                    "jan@example.pl",
+		"source_system":            "manual",
+		"office_code":              "warsaw",
+		"created_at":               "2026-07-13T12:15:00Z",
+		"product_interest":         "Kuchnia & szafa",
+		"project_stage":            "Projekt <start>",
+		"communication_preference": "Telefon",
+		"crm_url":                  "https://crm.example/crm/leads/1?a=1&b=2",
+	})
+	want := "🔔 Nowe zgłoszenie! 13.07.2026, 14:15\n👤 Imię: Jan &lt;Admin&gt;\n🏠 Czego dotyczy?: Kuchnia &amp; szafa\n🪜 Etap projektu?: Projekt &lt;start&gt;\n💬 Preferowany kontakt: Telefon\n📞 Telefon: +48123123123\n✉️ E-mail: jan@example.pl\n🌐 Źródło: Ręcznie\n🔗 <https://crm.example/crm/leads/1?a=1&amp;b=2|Otwórz w CRM>"
+	if msg != want {
+		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
+	}
+}
+
+func TestDispatcherSendsSlackNotification(t *testing.T) {
+	row := newFakeSlackNotification("pending", 0, true)
+	database := &fakeNotificationDatabase{rows: []*fakeNotification{row}}
+	sender := &countingTransport{status: http.StatusOK}
+	dispatcher := NewDispatcher(database, testCredentials{}, nil, 20, time.Hour)
+	dispatcher.HTTP = &http.Client{Transport: sender}
+
+	sent, failed, err := dispatcher.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent != 1 || failed != 0 || row.status != "sent" || sender.requests != 1 {
+		t.Fatalf("sent=%d failed=%d row=%#v requests=%d", sent, failed, row, sender.requests)
+	}
+}
+
+func TestDispatcherStopsBatchAndSchedulesSlackRateLimitRetry(t *testing.T) {
+	first := newFakeSlackNotification("pending", 0, true)
+	second := newFakeSlackNotification("pending", 0, true)
+	database := &fakeNotificationDatabase{rows: []*fakeNotification{first, second}}
+	requests := 0
+	client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		header := make(http.Header)
+		header.Set("Retry-After", "7")
+		return &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader(`{"ok":false}`)), Header: header}, nil
+	})}
+	dispatcher := NewDispatcher(database, testCredentials{}, nil, 20, time.Hour)
+	dispatcher.HTTP = client
+	sent, failed, err := dispatcher.RunOnce(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent != 0 || failed != 1 || requests != 1 || first.status != "failed" || second.status != "pending" {
+		t.Fatalf("sent=%d failed=%d requests=%d first=%#v second=%#v", sent, failed, requests, first, second)
+	}
+	if first.nextDelay != 7*time.Second {
+		t.Fatalf("next delay = %s", first.nextDelay)
 	}
 }
 
@@ -169,6 +314,10 @@ func (testCredentials) TelegramBotTokenFor(officeCode string) string {
 	return officeCode + "-token"
 }
 
+func (testCredentials) SlackBotTokenFor(officeCode string) string {
+	return officeCode + "-slack-token"
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -191,6 +340,7 @@ func (transport *countingTransport) RoundTrip(*http.Request) (*http.Response, er
 
 type fakeNotification struct {
 	id          string
+	channel     string
 	destination string
 	payload     []byte
 	status      string
@@ -198,17 +348,27 @@ type fakeNotification struct {
 	due         bool
 	claimed     bool
 	claimToken  string
+	nextDelay   time.Duration
 }
 
 func newFakeNotification(status string, attempts int, due bool) *fakeNotification {
 	return &fakeNotification{
 		id:          uuid.NewString(),
+		channel:     "telegram",
 		destination: "-1001",
 		payload:     []byte(`{"office_code":"kyiv","name":"Anna"}`),
 		status:      status,
 		attempts:    attempts,
 		due:         due,
 	}
+}
+
+func newFakeSlackNotification(status string, attempts int, due bool) *fakeNotification {
+	row := newFakeNotification(status, attempts, due)
+	row.channel = "slack"
+	row.destination = "C123WARSAW"
+	row.payload = []byte(`{"office_code":"warsaw","name":"Anna"}`)
+	return row
 }
 
 type fakeNotificationDatabase struct {
@@ -236,6 +396,7 @@ func (database *fakeNotificationDatabase) Exec(_ context.Context, sql string, ar
 		row.due = false
 		row.claimed = false
 		row.claimToken = ""
+		row.nextDelay = time.Duration(args[4].(int64)) * time.Millisecond
 	default:
 		return pgconn.CommandTag{}, errors.New("unexpected notification update")
 	}
@@ -283,9 +444,10 @@ func (tx *fakeNotificationTx) QueryRow(_ context.Context, _ string, args ...any)
 			tx.selected = row
 			return notificationScanRow(func(dest ...any) error {
 				*dest[0].(*string) = row.id
-				*dest[1].(*string) = row.destination
-				*dest[2].(*[]byte) = row.payload
-				*dest[3].(*int) = row.attempts
+				*dest[1].(*string) = row.channel
+				*dest[2].(*string) = row.destination
+				*dest[3].(*[]byte) = row.payload
+				*dest[4].(*int) = row.attempts
 				return nil
 			})
 		}

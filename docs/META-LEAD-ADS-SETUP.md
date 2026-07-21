@@ -150,12 +150,14 @@ META_RECONCILIATION_INTERVAL_MINUTES=15
 META_RECONCILIATION_LOOKBACK_HOURS=72
 META_ALERT_TELEGRAM_CHAT_ID=<technical alerts chat id>
 TELEGRAM_CHAT_ID_KYIV=<Kyiv lead notifications chat id>
-TELEGRAM_CHAT_ID_WARSAW=<Warsaw lead notifications chat id>
+SLACK_BOT_TOKEN_WARSAW=<Warsaw Slack Bot User OAuth Token>
+SLACK_CHANNEL_ID_WARSAW=<Warsaw Slack channel id>
 ```
 
-`TELEGRAM_BOT_TOKEN` must also be configured because it sends lead notifications
-and integration alerts. The API refuses to start with Meta enabled, with the
-notification dispatcher disabled, or with an incomplete configuration.
+`TELEGRAM_BOT_TOKEN` must also be configured because it sends Kyiv lead
+notifications and integration alerts. The Warsaw Slack app needs `chat:write` and
+must be added to a private destination channel. The API refuses to start with Meta
+enabled, with the notification dispatcher disabled, or with an incomplete configuration.
 
 `META_INGEST_AFTER` is permanent for the first connection record. Set it before
 the first production start. Reconciliation never imports an older lead.
@@ -260,11 +262,12 @@ Use the [Meta Lead Ads Testing Tool](https://developers.facebook.com/tools/lead-
 1. Select the Kyiv Page and one active form; create a test lead.
 2. Confirm one `meta_lead_events` row becomes `processed`.
 3. Confirm one CRM lead exists with `external_lead_id = 'l:<leadgen_id>'`.
-4. Confirm one Telegram message is delivered.
+4. Confirm one Telegram message is delivered for Kyiv.
 5. Repeat for Warsaw.
-6. Test a form with email but no phone.
-7. Resend the same webhook/test lead and confirm no duplicate CRM lead or notification.
-8. Create a new temporary form and confirm it appears after the next 15-minute discovery cycle.
+6. Confirm one Polish Slack message is delivered for Warsaw.
+7. Test a form with email but no phone.
+8. Resend the same webhook/test lead and confirm no duplicate CRM lead or notification.
+9. Create a new temporary form and confirm it appears after the next 15-minute discovery cycle.
 
 Useful queries:
 
@@ -287,7 +290,7 @@ limit 50;
 3. The difference must be zero for Kyiv and Warsaw.
 4. Disable and delete the time triggers in both Apps Script projects.
 5. Wait at least 15 minutes and create one new lead per Page.
-6. Confirm both leads reach CRM and Telegram without a new spreadsheet row.
+6. Confirm the Kyiv lead reaches Telegram and the Warsaw lead reaches Slack without a new spreadsheet row.
 7. Deploy the final release that removes the Google Sheets endpoint and secrets.
 8. Confirm the removed endpoint returns `404`.
 

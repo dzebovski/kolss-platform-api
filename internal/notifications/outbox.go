@@ -30,12 +30,12 @@ type Waker interface {
 	Wake()
 }
 
-// Outbox writes Telegram delivery tasks in the same transaction as a lead.
+// Outbox writes office-specific delivery tasks in the same transaction as a lead.
 type Outbox struct {
 	CRMSiteURLPublic              string
 	TelegramChatIDKyiv            string
-	TelegramChatIDWarsaw          string
 	TelegramAdditionalChatIDsKyiv string
+	SlackChannelIDWarsaw          string
 }
 
 // TelegramChatIDs returns the Telegram chat IDs configured for an office.
@@ -45,8 +45,6 @@ func (o Outbox) TelegramChatIDs(officeCode string) []string {
 	case "kyiv":
 		primary = o.TelegramChatIDKyiv
 		additional = o.TelegramAdditionalChatIDsKyiv
-	case "warsaw":
-		primary = o.TelegramChatIDWarsaw
 	}
 	return uniqueChatIDs(primary, additional)
 }
@@ -55,9 +53,31 @@ func (o Outbox) telegramChatIDs(officeCode string) []string {
 	return o.TelegramChatIDs(officeCode)
 }
 
+type deliveryDestination struct {
+	channel     string
+	destination string
+}
+
+func (o Outbox) deliveryDestinations(officeCode string) []deliveryDestination {
+	switch officeCode {
+	case "kyiv":
+		chatIDs := o.telegramChatIDs(officeCode)
+		destinations := make([]deliveryDestination, 0, len(chatIDs))
+		for _, chatID := range chatIDs {
+			destinations = append(destinations, deliveryDestination{channel: "telegram", destination: chatID})
+		}
+		return destinations
+	case "warsaw":
+		if channelID := strings.TrimSpace(o.SlackChannelIDWarsaw); channelID != "" {
+			return []deliveryDestination{{channel: "slack", destination: channelID}}
+		}
+	}
+	return nil
+}
+
 func (o Outbox) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
-	chatIDs := o.telegramChatIDs(lead.OfficeCode)
-	if len(chatIDs) == 0 {
+	destinations := o.deliveryDestinations(lead.OfficeCode)
+	if len(destinations) == 0 {
 		return nil
 	}
 
@@ -86,11 +106,11 @@ func (o Outbox) Enqueue(ctx context.Context, tx pgx.Tx, lead LeadInfo) error {
 
 	const query = `
 insert into public.lead_notifications (lead_id, channel, destination, status, payload, attempts, last_error)
-values ($1, 'telegram'::public.notification_channel, $2, 'pending', $3::jsonb, 0, null)
+values ($1, $2::public.notification_channel, $3, 'pending', $4::jsonb, 0, null)
 on conflict (lead_id, channel, destination) do nothing
 `
-	for _, chatID := range chatIDs {
-		if _, err := tx.Exec(ctx, query, lead.ID, chatID, raw); err != nil {
+	for _, destination := range destinations {
+		if _, err := tx.Exec(ctx, query, lead.ID, destination.channel, destination.destination, raw); err != nil {
 			return err
 		}
 	}
