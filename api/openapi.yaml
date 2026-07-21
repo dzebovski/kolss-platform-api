@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.3.0
+  version: 2.4.0
   description: >
-    CRM API, Google Sheets imports, and text-only public contact forms for PL/UA sites.
-    A public submission atomically creates the lead and Telegram outbox rows.
+    CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
+    Lead creation atomically persists the CRM record and Telegram outbox rows.
 servers:
   - url: https://api.kolss.eu
     description: Production
@@ -401,19 +401,44 @@ paths:
       security: [{ bearerAuth: [] }]
       parameters: [{ name: fileId, in: path, required: true, schema: { type: string, format: uuid } }]
       responses: { '200': { description: Short-lived private download URL } }
-  /v1/integrations/google-sheets/lead-imports:
+  /v1/integrations/meta/webhook:
+    get:
+      tags: [Integrations]
+      operationId: verifyMetaWebhook
+      summary: Complete Meta webhook subscription verification
+      security: []
+      parameters:
+        - { name: hub.mode, in: query, required: true, schema: { type: string, const: subscribe } }
+        - { name: hub.verify_token, in: query, required: true, schema: { type: string } }
+        - { name: hub.challenge, in: query, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: Meta challenge echoed as plain text
+          content:
+            text/plain:
+              schema: { type: string }
+        '403': { description: Verify token rejected }
     post:
       tags: [Integrations]
-      operationId: importGoogleSheetLeads
-      security: [{ sheetSecret: [] }]
+      operationId: receiveMetaWebhook
+      summary: Persist signed Meta Page leadgen events
+      description: The raw request body must be signed with `X-Hub-Signature-256` using the Meta App Secret.
+      security: []
+      parameters:
+        - name: X-Hub-Signature-256
+          in: header
+          required: true
+          schema: { type: string, pattern: '^sha256=[0-9a-f]{64}$' }
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: '#/components/schemas/SheetImportRequest' }
+            schema: { type: object, additionalProperties: true }
       responses:
-        '200': { description: Incremental or reconcile batch result }
-        '401': { $ref: '#/components/responses/CRMError' }
+        '200': { description: Event batch durably accepted or idempotently replayed }
+        '400': { description: Invalid webhook payload }
+        '401': { description: Missing or invalid Meta signature }
+        '500': { description: Event batch could not be persisted; Meta should retry }
   /v1/public/sites/{siteCode}/lead-submissions:
     post:
       tags: [PublicLeads]
@@ -495,9 +520,6 @@ components:
         the impersonated manager. Any invalid impersonation attempt (non super_admin
         caller, malformed UUID, missing/inactive target, or target is a super_admin)
         is rejected with HTTP 403 and error code `invalid_impersonation`.
-    sheetSecret:
-      type: http
-      scheme: bearer
   responses:
     CRMError:
       description: CRM API error
@@ -687,6 +709,10 @@ components:
         type: { type: string, const: call_status }
         status: { $ref: '#/components/schemas/CallStatus' }
         comment: { type: string }
+        dueAt:
+          type: string
+          format: date-time
+          description: Required when status is callback_requested.
     ClientStatusActivityRequest:
       type: object
       additionalProperties: false
@@ -699,6 +725,10 @@ components:
         contractNumber: { type: string }
         amount: { type: number, exclusiveMinimum: 0 }
         currency: { type: string, enum: [UAH, USD, EUR, PLN] }
+        dueAt:
+          type: string
+          format: date-time
+          description: Required when status is thinking.
     CommentActivityRequest:
       type: object
       additionalProperties: false
@@ -872,17 +902,6 @@ components:
           pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$'
           example: '2026-07-20T12:00'
           description: Lead source date and time in the selected office's local timezone.
-    SheetImportRequest:
-      type: object
-      additionalProperties: false
-      required: [source_id, mode, rows]
-      properties:
-        source_id: { type: string, format: uuid }
-        mode: { type: string, enum: [incremental, reconcile] }
-        rows:
-          type: array
-          maxItems: 100
-          items: { type: object, additionalProperties: true }
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]

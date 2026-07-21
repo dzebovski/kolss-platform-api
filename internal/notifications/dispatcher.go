@@ -336,10 +336,11 @@ func BuildTelegramNotificationMessage(payload map[string]any) string {
 			lines = append(lines, "ℹ️ Інформація: "+escape(clientInfo))
 		}
 	}
-	lines = append(lines,
-		"📞 Тел: "+escape(notificationPhone(payload)),
-		"🌐 Джерело: "+escape(notificationSourceLabel(payload)),
-	)
+	lines = append(lines, "📞 Тел: "+escape(notificationPhone(payload)))
+	if email := strings.TrimSpace(stringify(payload["email"])); email != "" {
+		lines = append(lines, "✉️ Email: "+escape(email))
+	}
+	lines = append(lines, "🌐 Джерело: "+escape(notificationSourceLabel(payload)))
 	if crmURL := strings.TrimSpace(stringify(payload["crm_url"])); crmURL != "" {
 		lines = append(lines, "🔗 <a href=\""+escape(crmURL)+"\">Відкрити в CRM</a>")
 	}

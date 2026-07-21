@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/dzebovski/kolss-platform-api/internal/metaleads"
 )
 
 func TestProtectedRouteRequiresCRMAuth(t *testing.T) {
@@ -26,17 +28,32 @@ func TestProtectedRouteRequiresCRMAuth(t *testing.T) {
 	}
 }
 
-func TestImportRouteUsesImportSecretInsteadOfCRMAuth(t *testing.T) {
+func TestRemovedGoogleSheetsImportRouteReturnsNotFound(t *testing.T) {
 	server := New(Options{})
 	request := httptest.NewRequest(http.MethodPost, "/v1/integrations/google-sheets/lead-imports", strings.NewReader(`{}`))
 	response := httptest.NewRecorder()
 	server.Handler().ServeHTTP(response, request)
 
-	if response.Code != http.StatusUnauthorized {
+	if response.Code != http.StatusNotFound {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if !strings.Contains(response.Body.String(), `"message":"Invalid import secret"`) {
-		t.Fatalf("import route incorrectly used CRM auth: %s", response.Body.String())
+}
+
+func TestMetaWebhookVerificationDoesNotUseCRMAuth(t *testing.T) {
+	server := New(Options{MetaIntegration: &metaleads.Integration{Config: metaleads.Config{
+		Enabled:            true,
+		WebhookVerifyToken: "verify-secret",
+	}}})
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/v1/integrations/meta/webhook?hub.mode=subscribe&hub.verify_token=verify-secret&hub.challenge=42",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || response.Body.String() != "42" {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

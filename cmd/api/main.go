@@ -22,6 +22,7 @@ import (
 	"github.com/dzebovski/kolss-platform-api/internal/deepl"
 	"github.com/dzebovski/kolss-platform-api/internal/httpapi"
 	"github.com/dzebovski/kolss-platform-api/internal/leads"
+	"github.com/dzebovski/kolss-platform-api/internal/metaleads"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
 	"github.com/dzebovski/kolss-platform-api/internal/postgres"
 	"github.com/dzebovski/kolss-platform-api/internal/storage"
@@ -114,6 +115,32 @@ func main() {
 		logger.Warn("daily report scheduler disabled")
 	}
 	svc := submissions.NewService(pool, sites, outbox, notificationWaker)
+	var metaIntegration *metaleads.Integration
+	if cfg.MetaIntegrationEnabled {
+		metaIntegration = metaleads.New(pool, metaleads.Config{
+			Enabled:            true,
+			GraphAPIVersion:    cfg.MetaGraphAPIVersion,
+			AppID:              cfg.MetaAppID,
+			AppSecret:          cfg.MetaAppSecret,
+			WebhookVerifyToken: cfg.MetaWebhookVerifyToken,
+			Pages: []metaleads.Page{
+				{OfficeCode: "kyiv", PageID: cfg.MetaPageIDKyiv, Token: cfg.MetaPageAccessTokenKyiv},
+				{OfficeCode: "warsaw", PageID: cfg.MetaPageIDWarsaw, Token: cfg.MetaPageAccessTokenWarsaw},
+			},
+			IngestAfter:            cfg.MetaIngestAfter,
+			ReconciliationInterval: cfg.MetaReconciliationInterval,
+			ReconciliationLookback: cfg.MetaReconciliationLookback,
+			AlertTelegramBotToken:  cfg.TelegramBotToken,
+			AlertTelegramChatID:    cfg.MetaAlertTelegramChatID,
+		}, outbox, notificationWaker, logger)
+		dispatcherWG.Add(1)
+		go func() {
+			defer dispatcherWG.Done()
+			metaIntegration.Run(dispatcherCtx)
+		}()
+	} else {
+		logger.Warn("Meta Lead Ads integration disabled")
+	}
 
 	server := httpapi.NewServer(svc, httpapi.Options{
 		Enabled:            cfg.PublicSiteFormsEnabled,
@@ -130,20 +157,18 @@ func main() {
 		Audience: "authenticated",
 	}
 	crm := crmapi.New(crmapi.Options{
-		Pool:               pool,
-		Verifier:           verifier,
-		AllowedOrigins:     cfg.CORSAllowedOrigins,
-		ImportSecretKyiv:   cfg.ImportSecretKyiv,
-		ImportSecretWarsaw: cfg.ImportSecretWarsaw,
-		ImportBodyLimit:    cfg.ImportBodyLimit,
-		SupabaseURL:        cfg.SupabaseURL,
-		SupabaseSecretKey:  cfg.SupabaseSecretKey,
-		CRMSiteURLPublic:   cfg.CRMSiteURLPublic,
-		Outbox:             outbox,
-		NotificationWaker:  notificationWaker,
-		Storage:            objects,
-		Translator:         configuredTranslator(cfg.DeepLAPIKey),
-		Logger:             logger,
+		Pool:              pool,
+		Verifier:          verifier,
+		AllowedOrigins:    cfg.CORSAllowedOrigins,
+		SupabaseURL:       cfg.SupabaseURL,
+		SupabaseSecretKey: cfg.SupabaseSecretKey,
+		CRMSiteURLPublic:  cfg.CRMSiteURLPublic,
+		Outbox:            outbox,
+		NotificationWaker: notificationWaker,
+		Storage:           objects,
+		Translator:        configuredTranslator(cfg.DeepLAPIKey),
+		Logger:            logger,
+		MetaIntegration:   metaIntegration,
 	})
 	root := buildRouter(server, crm)
 

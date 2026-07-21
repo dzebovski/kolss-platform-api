@@ -1,78 +1,32 @@
-# CRM production cutover checklist
+# Meta Lead Ads production cutover
 
-## Database
+Use the complete setup instructions in
+[`../docs/META-LEAD-ADS-SETUP.md`](../docs/META-LEAD-ADS-SETUP.md).
 
-- [x] Production custom backup and schema dump created before migrations.
-- [x] July migrations applied through `20260710180000`.
-- [x] Kyiv and Warsaw import sources point to separate confirmed spreadsheets.
-- [x] Last 20 rows reconciled without notifications; Warsaw gap of 19 leads imported.
-- [x] Pending/failed outbox count is zero after reconcile.
-- [ ] Keep `post-cutover-revoke-browser-data.sql` unapplied until 24 stable hours.
+## Release A — parallel validation
 
-## DigitalOcean App Platform
+- Back up production and apply migrations through `20260721120000_meta_lead_ads_direct.sql`.
+- Deploy the API with all required `META_*` variables.
+- Subscribe the Kyiv and Warsaw Pages to the `leadgen` webhook.
+- Keep the existing Google Apps Script triggers running for 48 hours.
+- Verify one lead per Page, an email-only lead, a duplicate webhook, and a newly created form.
+- Compare Meta lead IDs with `public.leads.external_lead_id`; the difference must be zero after `META_INGEST_AFTER`.
 
-Deploy [`digitalocean-app.yaml`](./digitalocean-app.yaml) to the existing application.
+## Release B — Google Sheets shutdown
 
-API requirements:
+- Disable and delete both Apps Script time triggers.
+- Confirm direct Meta leads continue to reach CRM and Telegram for at least 15 minutes.
+- Deploy the final code that removes the Sheets endpoint and secrets.
+- Confirm `POST /v1/integrations/google-sheets/lead-imports` returns `404`.
+- Keep `lead_import_sources` and `lead_import_runs` as read-only history.
 
-- `DATABASE_URL` for `kolss_api` (or the current production DB user during transition);
-- `SUPABASE_URL`, JWKS URL, JWT issuer, and API-only `SUPABASE_SECRET_KEY`;
-- separate Kyiv/Warsaw Google Sheets import secrets;
-- `CORS_ALLOWED_ORIGINS=https://crm.kolss.eu`;
-- `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu`;
-- `PUBLIC_SITE_FORMS_ENABLED=false`;
-- `NOTIFICATION_DISPATCHER_ENABLED=true`;
-- `NOTIFICATION_SWEEP_INTERVAL_MINUTES=60`;
-- `NOTIFICATION_BATCH_SIZE=20`;
-- separate Kyiv/Warsaw bot tokens and chat IDs.
+## Runtime checks
 
-The API service is the only paid component. It writes notification rows in the
-lead transaction and consumes them in-process. S3 credentials remain configured
-only when historical CRM attachment downloads are required.
+- `meta_page_connections.last_success_at` is newer than 30 minutes for both Pages.
+- No `meta_lead_events` rows remain in `dead_letter` without investigation.
+- `meta_sync_runs` shows successful `active_reconcile` runs every 15 minutes.
+- Token and sync failures reach `META_ALERT_TELEGRAM_CHAT_ID`.
 
-Verify the starter `*.ondigitalocean.app` ingress first, then add `api.kolss.eu` and create the DigitalOcean-provided CNAME in GoDaddy.
-
-## CRM / Vercel
-
-- Set `API_BASE_URL=https://api.kolss.eu`, Supabase Auth URL/anon key, and `SITE_URL_PUBLIC=https://crm.kolss.eu`.
-- Deploy preview and test all four roles.
-- Confirm browser network traffic has no Supabase Data API, Functions, RPC, or Storage business calls.
-- Promote the verified deployment; do not dual-write.
-
-## Google Apps Script
-
-Source IDs:
-
-- Kyiv: `f21b5c38-ed09-4cf1-ab23-7e6e854f3f4d`
-- Warsaw: `31b5aa24-7b79-48a3-b3fe-178cf2aea0b2`
-
-In both spreadsheets paste the canonical script, preserve the existing `LAST_ROW`, set the office-specific secret, change the URL to `https://api.kolss.eu/v1/integrations/google-sheets/lead-imports`, and verify one five-minute trigger.
-
-Current Sheet last rows at reconciliation time:
-
-- Kyiv: 81
-- Warsaw: 24
-
-## Single-instance rollout
-
-- [x] Record counts for pending/failed notifications, unsent Slack rows, and
-  `awaiting_upload` submissions.
-- [x] Deploy both public frontends with the text-only contract.
-- [x] Apply migrations through `20260713190000_single_instance_notifications.sql`.
-- [x] Deploy the API image with the in-process dispatcher enabled.
-- [x] Verify a Kyiv test lead through Google Sheets, CRM, and all configured
-  Kyiv Telegram destinations (`САШКО ТЕСТ 3`, 2026-07-14).
-- [ ] Verify a Warsaw test lead and its configured Telegram destination.
-- [x] Apply the App Platform spec without a `workers:` component.
-- [ ] Monitor restarts, memory, notification failures, and pending rows for 24 hours.
-
-Rollback: restore the previous worker image/component and set
-`NOTIFICATION_DISPATCHER_ENABLED=false`. Existing outbox rows remain durable.
-
-## Final 24-hour lock-down
-
-After 24 stable hours:
-
-1. Apply the reviewed browser Data API grant revocation.
-2. Confirm CRM still operates entirely through Go.
-3. Undeploy `import-lead`, `site-lead`, `process-notifications`, and `admin-users` Edge Functions.
+Rollback does not delete leads: deploy the previous API image and, if necessary,
+restore the old Apps Script endpoint from the previous release. Existing Meta inbox
+events and Telegram outbox rows remain durable.

@@ -22,13 +22,14 @@ const (
 )
 
 type leadActivityRequest struct {
-	Type           string   `json:"type"`
-	Status         string   `json:"status"`
-	Comment        string   `json:"comment"`
-	Reason         string   `json:"reason"`
-	ContractNumber string   `json:"contractNumber"`
-	Amount         *float64 `json:"amount"`
-	Currency       string   `json:"currency"`
+	Type           string     `json:"type"`
+	Status         string     `json:"status"`
+	Comment        string     `json:"comment"`
+	DueAt          *time.Time `json:"dueAt"`
+	Reason         string     `json:"reason"`
+	ContractNumber string     `json:"contractNumber"`
+	Amount         *float64   `json:"amount"`
+	Currency       string     `json:"currency"`
 }
 
 type activityLead struct {
@@ -36,6 +37,7 @@ type activityLead struct {
 	AssignedTo     *uuid.UUID
 	CallStatus     *string
 	ClientStatus   string
+	CallbackDueAt  *time.Time
 	ArchivedAt     *time.Time
 	CurrentVersion int64
 }
@@ -112,13 +114,14 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 	var lead activityLead
 	err = tx.QueryRow(r.Context(), `
-		select office_id, assigned_to, call_status, client_status, archived_at, version
+		select office_id, assigned_to, call_status, client_status, callback_due_at, archived_at, version
 		from public.leads where id=$1 for update
 	`, leadID).Scan(
 		&lead.OfficeID,
 		&lead.AssignedTo,
 		&lead.CallStatus,
 		&lead.ClientStatus,
+		&lead.CallbackDueAt,
 		&lead.ArchivedAt,
 		&lead.CurrentVersion,
 	)
@@ -182,6 +185,11 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields[name] = "Not allowed for this activity type"
 		}
 	}
+	rejectDueAt := func() {
+		if req.DueAt != nil {
+			fields["dueAt"] = "Not allowed for this status"
+		}
+	}
 	switch req.Type {
 	case activityCallStatus:
 		reject("reason", req.Reason)
@@ -192,16 +200,34 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		}
 		switch req.Status {
 		case "reached":
+			rejectDueAt()
 			if req.Comment == "" && !isSuperAdmin {
 				fields["comment"] = "Required for a successful call"
 			}
-		case "no_answer", "callback_requested":
+		case "no_answer":
+			rejectDueAt()
+		case "callback_requested":
+			if req.DueAt == nil {
+				fields["dueAt"] = "Required for callback"
+			}
 		default:
 			fields["status"] = "Unknown call status"
 		}
 	case activityClientStatus:
 		switch req.Status {
-		case "showroom_invited", "calculation_in_progress", "thinking":
+		case "showroom_invited", "calculation_in_progress":
+			rejectDueAt()
+			reject("reason", req.Reason)
+			reject("comment", req.Comment)
+			reject("contractNumber", req.ContractNumber)
+			reject("currency", req.Currency)
+			if req.Amount != nil {
+				fields["amount"] = "Not allowed for this status"
+			}
+		case "thinking":
+			if req.DueAt == nil {
+				fields["dueAt"] = "Required for waiting client"
+			}
 			reject("reason", req.Reason)
 			reject("comment", req.Comment)
 			reject("contractNumber", req.ContractNumber)
@@ -210,6 +236,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 				fields["amount"] = "Not allowed for this status"
 			}
 		case "closed_lost":
+			rejectDueAt()
 			reject("contractNumber", req.ContractNumber)
 			reject("currency", req.Currency)
 			if req.Amount != nil {
@@ -224,6 +251,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 				fields["comment"] = "Required"
 			}
 		case "contract_signed":
+			rejectDueAt()
 			reject("reason", req.Reason)
 			reject("comment", req.Comment)
 			if req.ContractNumber == "" {
@@ -241,6 +269,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["status"] = "Unknown client status"
 		}
 	case activityComment:
+		rejectDueAt()
 		reject("status", req.Status)
 		reject("reason", req.Reason)
 		reject("contractNumber", req.ContractNumber)
@@ -252,6 +281,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["comment"] = "Required"
 		}
 	case activityReopen:
+		rejectDueAt()
 		reject("status", req.Status)
 		reject("comment", req.Comment)
 		reject("reason", req.Reason)
@@ -281,6 +311,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	newValue := map[string]any{}
 	callStatus := lead.CallStatus
 	clientStatus := lead.ClientStatus
+	callbackDueAt := lead.CallbackDueAt
 	changeCall := false
 	changeClient := false
 	lossReason := (*string)(nil)
@@ -294,6 +325,12 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		newValue["call_status"] = req.Status
 		callStatus = &req.Status
 		changeCall = true
+		if req.Status == "callback_requested" {
+			callbackDueAt = req.DueAt
+			newValue["callback_due_at"] = req.DueAt
+		} else if lead.ClientStatus != "thinking" {
+			callbackDueAt = nil
+		}
 	case activityComment:
 		eventType = "comment_added"
 		eventCategory = activityComment
@@ -305,6 +342,12 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		newValue["client_status"] = req.Status
 		clientStatus = req.Status
 		changeClient = true
+		if req.Status == "thinking" {
+			callbackDueAt = req.DueAt
+			newValue["callback_due_at"] = req.DueAt
+		} else if lead.CallStatus == nil || *lead.CallStatus != "callback_requested" {
+			callbackDueAt = nil
+		}
 		if req.Status == "closed_lost" {
 			var exists bool
 			if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.Reason).Scan(&exists); err != nil {
@@ -342,6 +385,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		callStatus = nil
 		changeCall = true
 		changeClient = true
+		callbackDueAt = nil
 	}
 
 	_, err := tx.Exec(r.Context(), `
@@ -352,10 +396,11 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		  client_status_changed_at=case when $5 then $6 else client_status_changed_at end,
 		  assigned_to=$7,
 		  loss_reason=case when $8::text is null then loss_reason else $8 end,
+		  callback_due_at=$9,
 		  updated_at=$6,
 		  version=version+1
 		where id=$1
-	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason)
+	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt)
 	if err != nil {
 		return err
 	}

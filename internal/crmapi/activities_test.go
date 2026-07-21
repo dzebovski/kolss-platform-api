@@ -1,9 +1,13 @@
 package crmapi
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestValidateLeadActivity(t *testing.T) {
 	amount := 1250.0
+	dueAt := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name         string
 		request      leadActivityRequest
@@ -14,8 +18,11 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "successful call requires comment", request: leadActivityRequest{Type: activityCallStatus, Status: "reached"}, field: "comment"},
 		{name: "super admin skips successful call comment", request: leadActivityRequest{Type: activityCallStatus, Status: "reached"}, isSuperAdmin: true},
 		{name: "no answer", request: leadActivityRequest{Type: activityCallStatus, Status: "no_answer"}},
-		{name: "callback", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested"}},
+		{name: "callback", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested", DueAt: &dueAt}},
+		{name: "callback requires date", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested"}, field: "dueAt"},
 		{name: "simple status", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}},
+		{name: "thinking", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking", DueAt: &dueAt}},
+		{name: "thinking requires date", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking"}, field: "dueAt"},
 		{name: "close", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "invalid", Comment: "Duplicate request"}},
 		{name: "close requires comment", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "other"}, field: "comment"},
 		{name: "contract", request: leadActivityRequest{Type: activityClientStatus, Status: "contract_signed", ContractNumber: "K-42", Amount: &amount, Currency: "EUR"}},

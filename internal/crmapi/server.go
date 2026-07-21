@@ -2,7 +2,6 @@ package crmapi
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,42 +16,39 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	platformauth "github.com/dzebovski/kolss-platform-api/internal/auth"
+	"github.com/dzebovski/kolss-platform-api/internal/metaleads"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
 	"github.com/dzebovski/kolss-platform-api/internal/storage"
 )
 
 type Options struct {
-	Pool               *pgxpool.Pool
-	Verifier           *platformauth.Verifier
-	AllowedOrigins     []string
-	ImportSecretKyiv   string
-	ImportSecretWarsaw string
-	ImportBodyLimit    int64
-	SupabaseURL        string
-	SupabaseSecretKey  string
-	CRMSiteURLPublic   string
-	Outbox             notifications.Outbox
-	NotificationWaker  notifications.Waker
-	Storage            storage.ObjectStorage
-	Translator         Translator
-	Logger             *slog.Logger
+	Pool              *pgxpool.Pool
+	Verifier          *platformauth.Verifier
+	AllowedOrigins    []string
+	SupabaseURL       string
+	SupabaseSecretKey string
+	CRMSiteURLPublic  string
+	Outbox            notifications.Outbox
+	NotificationWaker notifications.Waker
+	Storage           storage.ObjectStorage
+	Translator        Translator
+	Logger            *slog.Logger
+	MetaIntegration   *metaleads.Integration
 }
 
 type Server struct {
-	pool               *pgxpool.Pool
-	verifier           *platformauth.Verifier
-	allowedOrigins     map[string]struct{}
-	importSecretKyiv   string
-	importSecretWarsaw string
-	importBodyLimit    int64
-	supabaseURL        string
-	supabaseSecretKey  string
-	crmSiteURLPublic   string
-	outbox             notifications.Outbox
-	notificationWaker  notifications.Waker
-	storage            storage.ObjectStorage
-	translator         Translator
-	logger             *slog.Logger
+	pool              *pgxpool.Pool
+	verifier          *platformauth.Verifier
+	allowedOrigins    map[string]struct{}
+	supabaseURL       string
+	supabaseSecretKey string
+	crmSiteURLPublic  string
+	outbox            notifications.Outbox
+	notificationWaker notifications.Waker
+	storage           storage.ObjectStorage
+	translator        Translator
+	logger            *slog.Logger
+	metaIntegration   *metaleads.Integration
 }
 
 func New(opts Options) *Server {
@@ -64,25 +60,19 @@ func New(opts Options) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	limit := opts.ImportBodyLimit
-	if limit <= 0 {
-		limit = 512 * 1024
-	}
 	return &Server{
-		pool:               opts.Pool,
-		verifier:           opts.Verifier,
-		allowedOrigins:     origins,
-		importSecretKyiv:   opts.ImportSecretKyiv,
-		importSecretWarsaw: opts.ImportSecretWarsaw,
-		importBodyLimit:    limit,
-		supabaseURL:        strings.TrimRight(opts.SupabaseURL, "/"),
-		supabaseSecretKey:  opts.SupabaseSecretKey,
-		crmSiteURLPublic:   strings.TrimRight(opts.CRMSiteURLPublic, "/"),
-		outbox:             opts.Outbox,
-		notificationWaker:  opts.NotificationWaker,
-		storage:            opts.Storage,
-		translator:         opts.Translator,
-		logger:             logger,
+		pool:              opts.Pool,
+		verifier:          opts.Verifier,
+		allowedOrigins:    origins,
+		supabaseURL:       strings.TrimRight(opts.SupabaseURL, "/"),
+		supabaseSecretKey: opts.SupabaseSecretKey,
+		crmSiteURLPublic:  strings.TrimRight(opts.CRMSiteURLPublic, "/"),
+		outbox:            opts.Outbox,
+		notificationWaker: opts.NotificationWaker,
+		storage:           opts.Storage,
+		translator:        opts.Translator,
+		logger:            logger,
+		metaIntegration:   opts.MetaIntegration,
 	}
 }
 
@@ -96,8 +86,10 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 	router.Group(func(r chi.Router) {
 		r.Use(s.BaseMiddleware)
 		r.Use(s.recoverPanic)
-		r.Post("/v1/integrations/google-sheets/lead-imports", s.handleSheetImport)
-		r.Options("/v1/integrations/google-sheets/lead-imports", s.handleOptions)
+		if s.metaIntegration != nil {
+			r.Get("/v1/integrations/meta/webhook", s.metaIntegration.VerifyWebhook)
+			r.Post("/v1/integrations/meta/webhook", s.metaIntegration.ReceiveWebhook)
+		}
 
 		r.Group(func(r chi.Router) {
 			r.Use(s.AuthMiddleware)
@@ -286,27 +278,6 @@ func (s *Server) applyCORS(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, If-Match, X-Request-Id, X-Impersonate-User-Id")
 		w.Header().Set("Access-Control-Max-Age", "600")
 	}
-}
-
-func (s *Server) importOffice(secret string) string {
-	secret = strings.TrimSpace(secret)
-	if secret == "" {
-		return ""
-	}
-	if secureEqual(secret, s.importSecretKyiv) {
-		return "kyiv"
-	}
-	if secureEqual(secret, s.importSecretWarsaw) {
-		return "warsaw"
-	}
-	return ""
-}
-
-func secureEqual(a, b string) bool {
-	if a == "" || b == "" || len(a) != len(b) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) error {

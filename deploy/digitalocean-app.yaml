@@ -51,10 +51,39 @@ services:
       - key: SUPABASE_SECRET_KEY
         scope: RUN_TIME
         type: SECRET
-      - key: GOOGLE_SHEETS_IMPORT_SECRET_KYIV
+      - key: META_INTEGRATION_ENABLED
+        value: "true"
+      - key: META_GRAPH_API_VERSION
+        value: "v25.0"
+      - key: META_APP_ID
         scope: RUN_TIME
         type: SECRET
-      - key: GOOGLE_SHEETS_IMPORT_SECRET_WARSAW
+      - key: META_APP_SECRET
+        scope: RUN_TIME
+        type: SECRET
+      - key: META_WEBHOOK_VERIFY_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: META_PAGE_ID_KYIV
+        scope: RUN_TIME
+        type: GENERAL
+      - key: META_PAGE_ACCESS_TOKEN_KYIV
+        scope: RUN_TIME
+        type: SECRET
+      - key: META_PAGE_ID_WARSAW
+        scope: RUN_TIME
+        type: GENERAL
+      - key: META_PAGE_ACCESS_TOKEN_WARSAW
+        scope: RUN_TIME
+        type: SECRET
+      - key: META_INGEST_AFTER
+        scope: RUN_TIME
+        type: GENERAL
+      - key: META_RECONCILIATION_INTERVAL_MINUTES
+        value: "15"
+      - key: META_RECONCILIATION_LOOKBACK_HOURS
+        value: "72"
+      - key: META_ALERT_TELEGRAM_CHAT_ID
         scope: RUN_TIME
         type: SECRET
       - key: TURNSTILE_SECRET_KEY

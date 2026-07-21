@@ -33,7 +33,7 @@ func TestBuildRouterCombinesHealthPublicAndCRMRoutes(t *testing.T) {
 	}{
 		{method: http.MethodGet, path: "/health/live", want: http.StatusOK},
 		{method: http.MethodGet, path: "/v1/me", want: http.StatusUnauthorized},
-		{method: http.MethodPost, path: "/v1/integrations/google-sheets/lead-imports", want: http.StatusUnauthorized},
+		{method: http.MethodPost, path: "/v1/integrations/google-sheets/lead-imports", want: http.StatusNotFound},
 	}
 	for _, test := range tests {
 		response := httptest.NewRecorder()

@@ -21,14 +21,24 @@ type Config struct {
 	NotificationBatchSize         int
 	DailyReportEnabled            bool
 	DailyReportHourLocal          int
+	MetaIntegrationEnabled        bool
+	MetaGraphAPIVersion           string
+	MetaAppID                     string
+	MetaAppSecret                 string
+	MetaWebhookVerifyToken        string
+	MetaPageIDKyiv                string
+	MetaPageAccessTokenKyiv       string
+	MetaPageIDWarsaw              string
+	MetaPageAccessTokenWarsaw     string
+	MetaIngestAfter               time.Time
+	MetaReconciliationInterval    time.Duration
+	MetaReconciliationLookback    time.Duration
+	MetaAlertTelegramChatID       string
 
-	SupabaseURL        string
-	SupabaseJWKSURL    string
-	SupabaseJWTIssuer  string
-	SupabaseSecretKey  string
-	ImportSecretKyiv   string
-	ImportSecretWarsaw string
-	ImportBodyLimit    int64
+	SupabaseURL       string
+	SupabaseJWKSURL   string
+	SupabaseJWTIssuer string
+	SupabaseSecretKey string
 
 	BotcheckDisabled          bool
 	TurnstileSecretKey        string
@@ -68,14 +78,23 @@ func Load() (Config, error) {
 		NotificationBatchSize:         getenvInt("NOTIFICATION_BATCH_SIZE", 20),
 		DailyReportEnabled:            getenvBool("DAILY_REPORT_ENABLED", true),
 		DailyReportHourLocal:          getenvInt("DAILY_REPORT_HOUR_LOCAL", 9),
+		MetaIntegrationEnabled:        getenvBool("META_INTEGRATION_ENABLED", false),
+		MetaGraphAPIVersion:           getenv("META_GRAPH_API_VERSION", "v25.0"),
+		MetaAppID:                     strings.TrimSpace(os.Getenv("META_APP_ID")),
+		MetaAppSecret:                 strings.TrimSpace(os.Getenv("META_APP_SECRET")),
+		MetaWebhookVerifyToken:        strings.TrimSpace(os.Getenv("META_WEBHOOK_VERIFY_TOKEN")),
+		MetaPageIDKyiv:                strings.TrimSpace(os.Getenv("META_PAGE_ID_KYIV")),
+		MetaPageAccessTokenKyiv:       strings.TrimSpace(os.Getenv("META_PAGE_ACCESS_TOKEN_KYIV")),
+		MetaPageIDWarsaw:              strings.TrimSpace(os.Getenv("META_PAGE_ID_WARSAW")),
+		MetaPageAccessTokenWarsaw:     strings.TrimSpace(os.Getenv("META_PAGE_ACCESS_TOKEN_WARSAW")),
+		MetaReconciliationInterval:    time.Duration(getenvInt("META_RECONCILIATION_INTERVAL_MINUTES", 15)) * time.Minute,
+		MetaReconciliationLookback:    time.Duration(getenvInt("META_RECONCILIATION_LOOKBACK_HOURS", 72)) * time.Hour,
+		MetaAlertTelegramChatID:       strings.TrimSpace(os.Getenv("META_ALERT_TELEGRAM_CHAT_ID")),
 
-		SupabaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
-		SupabaseJWKSURL:    strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),
-		SupabaseJWTIssuer:  strings.TrimSpace(os.Getenv("SUPABASE_JWT_ISSUER")),
-		SupabaseSecretKey:  strings.TrimSpace(os.Getenv("SUPABASE_SECRET_KEY")),
-		ImportSecretKyiv:   strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_KYIV")),
-		ImportSecretWarsaw: strings.TrimSpace(os.Getenv("GOOGLE_SHEETS_IMPORT_SECRET_WARSAW")),
-		ImportBodyLimit:    int64(getenvInt("IMPORT_BODY_LIMIT_BYTES", 512*1024)),
+		SupabaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
+		SupabaseJWKSURL:   strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),
+		SupabaseJWTIssuer: strings.TrimSpace(os.Getenv("SUPABASE_JWT_ISSUER")),
+		SupabaseSecretKey: strings.TrimSpace(os.Getenv("SUPABASE_SECRET_KEY")),
 
 		BotcheckDisabled:          getenvBool("BOTCHECK_DISABLED", false),
 		TurnstileSecretKey:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET_KEY")),
@@ -116,6 +135,46 @@ func Load() (Config, error) {
 	}
 	if cfg.NotificationSweepInterval <= 0 || cfg.NotificationBatchSize <= 0 {
 		return Config{}, fmt.Errorf("notification dispatcher interval and batch size must be positive")
+	}
+	if cfg.MetaIntegrationEnabled {
+		if !cfg.NotificationDispatcherEnabled {
+			return Config{}, fmt.Errorf("NOTIFICATION_DISPATCHER_ENABLED must be true when META_INTEGRATION_ENABLED=true")
+		}
+		var err error
+		cfg.MetaIngestAfter, err = time.Parse(time.RFC3339, strings.TrimSpace(os.Getenv("META_INGEST_AFTER")))
+		if err != nil {
+			return Config{}, fmt.Errorf("META_INGEST_AFTER must be an RFC3339 timestamp")
+		}
+		if strings.TrimPrefix(cfg.MetaGraphAPIVersion, "v") == "" {
+			return Config{}, fmt.Errorf("META_GRAPH_API_VERSION is required")
+		}
+		if !strings.HasPrefix(cfg.MetaGraphAPIVersion, "v") {
+			cfg.MetaGraphAPIVersion = "v" + cfg.MetaGraphAPIVersion
+		}
+		metaRequired := map[string]string{
+			"META_APP_ID":                   cfg.MetaAppID,
+			"META_APP_SECRET":               cfg.MetaAppSecret,
+			"META_WEBHOOK_VERIFY_TOKEN":     cfg.MetaWebhookVerifyToken,
+			"META_PAGE_ID_KYIV":             cfg.MetaPageIDKyiv,
+			"META_PAGE_ACCESS_TOKEN_KYIV":   cfg.MetaPageAccessTokenKyiv,
+			"META_PAGE_ID_WARSAW":           cfg.MetaPageIDWarsaw,
+			"META_PAGE_ACCESS_TOKEN_WARSAW": cfg.MetaPageAccessTokenWarsaw,
+			"META_ALERT_TELEGRAM_CHAT_ID":   cfg.MetaAlertTelegramChatID,
+			"TELEGRAM_BOT_TOKEN":            cfg.TelegramBotToken,
+			"TELEGRAM_CHAT_ID_KYIV":         cfg.TelegramChatIDKyiv,
+			"TELEGRAM_CHAT_ID_WARSAW":       cfg.TelegramChatIDWarsaw,
+		}
+		for name, value := range metaRequired {
+			if strings.TrimSpace(value) == "" {
+				return Config{}, fmt.Errorf("%s is required when META_INTEGRATION_ENABLED=true", name)
+			}
+		}
+		if cfg.MetaPageIDKyiv == cfg.MetaPageIDWarsaw {
+			return Config{}, fmt.Errorf("META_PAGE_ID_KYIV and META_PAGE_ID_WARSAW must be different")
+		}
+		if cfg.MetaReconciliationInterval <= 0 || cfg.MetaReconciliationLookback <= 0 {
+			return Config{}, fmt.Errorf("Meta reconciliation interval and lookback must be positive")
+		}
 	}
 	if cfg.SupabaseURL == "" {
 		return Config{}, fmt.Errorf("SUPABASE_URL is required")

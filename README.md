@@ -1,13 +1,15 @@
 # KOLSS Platform API
 
-Single-process Go API for the KOLSS CRM, Google Sheets imports, public text forms, and Telegram outbox delivery.
+Single-process Go API for the KOLSS CRM, direct Meta Lead Ads ingestion, public
+text forms, and Telegram outbox delivery.
 
 ## Current phase
 
 - CRM uses Supabase directly only for Auth/session.
 - All CRM data, workflow, reports, user admin, archive, and file URL operations go through this API.
-- Kyiv and Warsaw Google Sheets use the office-secret import endpoint.
-- The API runs the Telegram dispatcher in-process, immediately after commits and with an hourly recovery sweep.
+- Kyiv and Warsaw Facebook Pages send signed `leadgen` webhooks directly to this API.
+- A durable Postgres inbox and periodic Meta Graph API reconciliation prevent lost leads.
+- Telegram delivery runs in-process immediately after commits and with an hourly recovery sweep.
 - Public UA/PL site forms are feature-disabled (`PUBLIC_SITE_FORMS_ENABLED=false`).
 
 ## Local run
@@ -18,42 +20,36 @@ set -a && source .env && set +a
 go run ./cmd/api
 ```
 
-S3 credentials are optional and are retained only for historical CRM attachment download URLs. Health endpoints:
+S3 credentials are optional and retained only for historical CRM attachment URLs.
+Health endpoints are `GET /health/live` and `GET /health/ready`.
 
-- API: `GET /health/live`, `GET /health/ready`
+## Contract, migrations, and Meta setup
 
-## Contract and migrations
-
-- OpenAPI 1.0: [`api/openapi.yaml`](./api/openapi.yaml)
+- OpenAPI 2.4: [`api/openapi.yaml`](./api/openapi.yaml)
 - Canonical Supabase migrations: [`supabase/migrations`](./supabase/migrations)
-- Manual post-stability grant revocation: [`deploy/post-cutover-revoke-browser-data.sql`](./deploy/post-cutover-revoke-browser-data.sql)
-- Google Apps Script: [`integrations/google-apps-script/meta-leads-import.gs`](./integrations/google-apps-script/meta-leads-import.gs)
+- Meta App setup and cutover: [`docs/META-LEAD-ADS-SETUP.md`](./docs/META-LEAD-ADS-SETUP.md)
+- Manual browser grant revocation: [`deploy/post-cutover-revoke-browser-data.sql`](./deploy/post-cutover-revoke-browser-data.sql)
 
-Do not run the browser grant revocation until the Go-backed CRM has been stable in production for 24 hours.
+Do not run the browser grant revocation until the Go-backed CRM has been stable in
+production for 24 hours.
 
-### Kyiv Meta Leads: Sheet2
+### Meta Lead Ads
 
-The Kyiv import source is configured by migration
-[`20260713100000_switch_kyiv_meta_leads_to_sheet2.sql`](./supabase/migrations/20260713100000_switch_kyiv_meta_leads_to_sheet2.sql).
-After the API and migration are deployed, update the bound Google Apps Script properties:
+The public callback is `GET|POST /v1/integrations/meta/webhook`. GET performs Meta
+subscription verification; POST requires `X-Hub-Signature-256`. The webhook only
+persists events. Contact retrieval, retry, form discovery, and reconciliation run
+after commit.
 
-- `SHEET_NAME=Sheet2`
-- `HEADER_ROW=1`
-
-Run `syncFromHeader` once to import any rows already present in the new tab, then
-confirm the execution log has no errors. The regular five-minute trigger continues
-to run `syncNewLeads`. `syncFromHeader` resets the checkpoint for `Sheet2`; later
-tab changes also reset it, so a row checkpoint from the previous tab is never reused.
+`META_INGEST_AFTER` is a hard historical cutoff. Reconciliation never imports an
+older lead, including from archived forms.
 
 ### Kyiv Telegram delivery
 
 `TELEGRAM_CHAT_ID_KYIV` remains the primary Kyiv chat. Set
-`TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV=-1002833157899` on the API component to also
-deliver each Kyiv lead to the **Kolss Kyiv** supergroup. The API outbox records a
-separate outbox destination and retry state for every Telegram chat.
+`TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV=-1002833157899` to also deliver each Kyiv lead
+to the **Kolss Kyiv** supergroup. Each destination has independent outbox retry state.
 
-For CRM links, set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` exactly; do not add
-`/crm/leads/:id` to that value.
+Set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without `/crm/leads/:id`.
 
 ## Deploy
 
@@ -61,12 +57,14 @@ For CRM links, set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` exactly; do not ad
 - [`deploy/digitalocean-app.yaml`](./deploy/digitalocean-app.yaml)
 - [`deploy/CUTOVER.md`](./deploy/CUTOVER.md)
 
-Production backend domain: `https://api.kolss.eu`.
+Production backend: `https://api.kolss.eu`.
 
 ## Verification
 
 ```bash
 go test ./...
 go vet ./...
-go build ./cmd/api
+go build -o /tmp/kolss-platform-api ./cmd/api
 ```
+
+The explicit output path avoids colliding with the repository's `api/` OpenAPI directory.

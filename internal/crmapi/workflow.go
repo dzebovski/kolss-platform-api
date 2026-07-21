@@ -369,11 +369,11 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 		eventType = "successful"
 		callbackDue = nil
 		newValue = map[string]any{
-			"workflow_status":  workflow,
-			"contract_number":  strings.TrimSpace(req.ContractNumber),
-			"amount":           req.Amount,
-			"currency":         strings.ToUpper(strings.TrimSpace(req.Currency)),
-			"signed_at":        now,
+			"workflow_status": workflow,
+			"contract_number": strings.TrimSpace(req.ContractNumber),
+			"amount":          req.Amount,
+			"currency":        strings.ToUpper(strings.TrimSpace(req.Currency)),
+			"signed_at":       now,
 		}
 	}
 
