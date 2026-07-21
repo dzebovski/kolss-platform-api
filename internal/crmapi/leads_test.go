@@ -177,3 +177,75 @@ func TestContractListJSONShape(t *testing.T) {
 		t.Fatalf("lead without contract: want null, got %s", decoded.Items[1].Contract)
 	}
 }
+
+func TestParseSourceCreatedAtLocalUsesOfficeTimezone(t *testing.T) {
+	tests := []struct {
+		name       string
+		value      string
+		officeCode string
+		wantUTC    string
+	}{
+		{name: "Kyiv winter", value: "2026-01-15T12:00", officeCode: "kyiv", wantUTC: "2026-01-15T10:00:00Z"},
+		{name: "Kyiv summer", value: "2026-07-20T12:00", officeCode: "kyiv", wantUTC: "2026-07-20T09:00:00Z"},
+		{name: "Warsaw winter", value: "2026-01-15T12:00", officeCode: "warsaw", wantUTC: "2026-01-15T11:00:00Z"},
+		{name: "Warsaw summer", value: "2026-07-20T12:00", officeCode: "warsaw", wantUTC: "2026-07-20T10:00:00Z"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := parseSourceCreatedAtLocal(test.value, test.officeCode)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.UTC().Format(time.RFC3339) != test.wantUTC {
+				t.Fatalf("got %s, want %s", got.UTC().Format(time.RFC3339), test.wantUTC)
+			}
+		})
+	}
+}
+
+func TestParseSourceCreatedAtLocalRejectsInvalidValues(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		value      string
+		officeCode string
+	}{
+		{name: "empty", officeCode: "kyiv"},
+		{name: "invalid date", value: "2026-02-30T12:00", officeCode: "kyiv"},
+		{name: "missing time", value: "2026-07-20", officeCode: "kyiv"},
+		{name: "DST gap", value: "2026-03-29T02:30", officeCode: "warsaw"},
+		{name: "unknown office", value: "2026-07-20T12:00", officeCode: "london"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := parseSourceCreatedAtLocal(test.value, test.officeCode); err == nil {
+				t.Fatal("expected parsing error")
+			}
+		})
+	}
+}
+
+func TestManualLeadCreationUsesSelectedSourceTimestamp(t *testing.T) {
+	officeID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	leadID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	selectedAt := time.Date(2026, 7, 20, 9, 0, 0, 0, time.UTC)
+	req := createLeadRequest{
+		OfficeID:        officeID,
+		Name:            "  Марина  ",
+		Phone:           "  +380672148819  ",
+		ProductInterest: "Кухня",
+	}
+
+	args := createLeadInsertArgs(req, "manual", "office", "crm:external", selectedAt)
+	storedAt, ok := args[4].(time.Time)
+	if !ok || !storedAt.Equal(selectedAt) {
+		t.Fatalf("source_created_at argument = %#v, want %s", args[4], selectedAt)
+	}
+
+	notification := manualLeadNotification(leadID, req, "manual", "kyiv", selectedAt)
+	if notification.CreatedAt == nil || !notification.CreatedAt.Equal(selectedAt) {
+		t.Fatalf("notification CreatedAt = %#v, want %s", notification.CreatedAt, selectedAt)
+	}
+	if notification.Name == nil || *notification.Name != "Марина" {
+		t.Fatalf("notification Name = %#v", notification.Name)
+	}
+}

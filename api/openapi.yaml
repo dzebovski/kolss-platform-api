@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.2.0
+  version: 2.3.0
   description: >
     CRM API, Google Sheets imports, and text-only public contact forms for PL/UA sites.
     A public submission atomically creates the lead and Telegram outbox rows.
@@ -856,7 +856,7 @@ components:
     CreateLeadRequest:
       type: object
       additionalProperties: false
-      required: [officeId, source, name, phone, cityRegion, productInterest, initialMessage]
+      required: [officeId, source, name, phone, cityRegion, productInterest, initialMessage, sourceCreatedAtLocal]
       properties:
         officeId: { type: string, format: uuid }
         source: { type: string, enum: [website, facebook, office, other] }
@@ -867,6 +867,11 @@ components:
         productInterest: { type: string }
         estimatedBudget: { type: [number, 'null'] }
         initialMessage: { type: string }
+        sourceCreatedAtLocal:
+          type: string
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$'
+          example: '2026-07-20T12:00'
+          description: Lead source date and time in the selected office's local timezone.
     SheetImportRequest:
       type: object
       additionalProperties: false

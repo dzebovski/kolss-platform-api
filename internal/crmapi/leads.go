@@ -351,15 +351,87 @@ func (s *Server) loadLeadRelations(r *http.Request, leadID uuid.UUID) (map[strin
 }
 
 type createLeadRequest struct {
-	OfficeID        uuid.UUID `json:"officeId"`
-	Source          string    `json:"source"`
-	Name            string    `json:"name"`
-	Phone           string    `json:"phone"`
-	Email           *string   `json:"email"`
-	CityRegion      string    `json:"cityRegion"`
-	ProductInterest string    `json:"productInterest"`
-	EstimatedBudget *float64  `json:"estimatedBudget"`
-	InitialMessage  string    `json:"initialMessage"`
+	OfficeID             uuid.UUID `json:"officeId"`
+	Source               string    `json:"source"`
+	Name                 string    `json:"name"`
+	Phone                string    `json:"phone"`
+	Email                *string   `json:"email"`
+	CityRegion           string    `json:"cityRegion"`
+	ProductInterest      string    `json:"productInterest"`
+	EstimatedBudget      *float64  `json:"estimatedBudget"`
+	InitialMessage       string    `json:"initialMessage"`
+	SourceCreatedAtLocal string    `json:"sourceCreatedAtLocal"`
+}
+
+const sourceCreatedAtLocalLayout = "2006-01-02T15:04"
+
+const createLeadInsertQuery = `
+	with inserted as (
+		insert into public.leads (
+			office_id, source_system, source_channel, external_lead_id,
+			source_created_at,
+			name, phone, email, city_region, product_interest, estimated_budget, order_comment
+		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		on conflict (source_system,external_lead_id) do nothing
+		returning *
+	)
+	select id, to_jsonb(inserted) from inserted
+`
+
+func parseSourceCreatedAtLocal(value, officeCode string) (time.Time, error) {
+	locationName := ""
+	switch officeCode {
+	case "kyiv":
+		locationName = "Europe/Kyiv"
+	case "warsaw":
+		locationName = "Europe/Warsaw"
+	default:
+		return time.Time{}, fmt.Errorf("unsupported office timezone: %s", officeCode)
+	}
+
+	location, err := time.LoadLocation(locationName)
+	if err != nil {
+		return time.Time{}, err
+	}
+	value = strings.TrimSpace(value)
+	parsed, err := time.ParseInLocation(sourceCreatedAtLocalLayout, value, location)
+	if err != nil || parsed.Format(sourceCreatedAtLocalLayout) != value {
+		return time.Time{}, errors.New("invalid source local date and time")
+	}
+	return parsed, nil
+}
+
+func createLeadInsertArgs(req createLeadRequest, sourceSystem, sourceChannel, externalID string, sourceCreatedAt time.Time) []any {
+	return []any{
+		req.OfficeID,
+		sourceSystem,
+		sourceChannel,
+		externalID,
+		sourceCreatedAt,
+		strings.TrimSpace(req.Name),
+		strings.TrimSpace(req.Phone),
+		cleanPtr(req.Email),
+		clean(req.CityRegion),
+		clean(req.ProductInterest),
+		req.EstimatedBudget,
+		clean(req.InitialMessage),
+	}
+}
+
+func manualLeadNotification(leadID uuid.UUID, req createLeadRequest, sourceSystem, officeCode string, sourceCreatedAt time.Time) notifications.LeadInfo {
+	name := strings.TrimSpace(req.Name)
+	phone := strings.TrimSpace(req.Phone)
+	return notifications.LeadInfo{
+		ID:              leadID,
+		Name:            &name,
+		Phone:           &phone,
+		Email:           cleanPtr(req.Email),
+		ClientInfo:      clean(req.InitialMessage),
+		ProductInterest: clean(req.ProductInterest),
+		CreatedAt:       &sourceCreatedAt,
+		OfficeCode:      officeCode,
+		SourceSystem:    sourceSystem,
+	}
 }
 
 func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
@@ -384,45 +456,31 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var officeCode string
+	if err := tx.QueryRow(r.Context(), `select code from public.offices where id = $1`, req.OfficeID).Scan(&officeCode); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "lead_create_failed", "Could not load lead office", nil)
+		return
+	}
+	sourceCreatedAt, err := parseSourceCreatedAtLocal(req.SourceCreatedAtLocal, officeCode)
+	if err != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+			"sourceCreatedAtLocal": "Invalid local date and time",
+		})
+		return
+	}
 	var leadID uuid.UUID
 	var raw []byte
 	externalID := "crm:" + uuid.NewSHA1(uuid.NameSpaceURL, []byte(actor.ID.String()+"|"+idempotencyKey)).String()
 	inserted := true
-	err = tx.QueryRow(r.Context(), `
-		with inserted as (
-			insert into public.leads (
-				office_id, source_system, source_channel, external_lead_id,
-				source_created_at,
-				name, phone, email, city_region, product_interest, estimated_budget, order_comment
-			) values ($1,$2,$3,$4,now(),$5,$6,$7,$8,$9,$10,$11)
-			on conflict (source_system,external_lead_id) do nothing
-			returning *
-		)
-		select id, to_jsonb(inserted) from inserted
-	`, req.OfficeID, sourceSystem, sourceChannel, externalID, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, clean(req.InitialMessage)).Scan(&leadID, &raw)
+	err = tx.QueryRow(r.Context(), createLeadInsertQuery, createLeadInsertArgs(req, sourceSystem, sourceChannel, externalID, sourceCreatedAt)...).Scan(&leadID, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		inserted = false
 		err = tx.QueryRow(r.Context(), `select id,to_jsonb(l) from public.leads l where source_system=$1 and external_lead_id=$2`, sourceSystem, externalID).Scan(&leadID, &raw)
 	}
 	if err == nil && inserted {
 		_, err = tx.Exec(r.Context(), `insert into public.lead_events (lead_id, actor_id, event_type, new_value) values ($1,$2,'created',$3)`, leadID, actor.ID, map[string]any{"source": req.Source, "source_system": sourceSystem, "source_channel": sourceChannel})
-		var officeCode string
 		if err == nil {
-			err = tx.QueryRow(r.Context(), `select code from public.offices where id = $1`, req.OfficeID).Scan(&officeCode)
-		}
-		if err == nil {
-			name := strings.TrimSpace(req.Name)
-			phone := strings.TrimSpace(req.Phone)
-			if err := s.outbox.Enqueue(r.Context(), tx, notifications.LeadInfo{
-				ID:              leadID,
-				Name:            &name,
-				Phone:           &phone,
-				Email:           cleanPtr(req.Email),
-				ClientInfo:      clean(req.InitialMessage),
-				ProductInterest: clean(req.ProductInterest),
-				OfficeCode:      officeCode,
-				SourceSystem:    sourceSystem,
-			}); err != nil {
+			if err := s.outbox.Enqueue(r.Context(), tx, manualLeadNotification(leadID, req, sourceSystem, officeCode, sourceCreatedAt)); err != nil {
 				s.writeError(w, r, http.StatusInternalServerError, "notification_enqueue_failed", "Could not enqueue lead notification", nil)
 				return
 			}
