@@ -84,6 +84,35 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		),
+		'callback_due_context', case
+			when l.callback_due_at is null then null
+			else coalesce((
+				select case
+					when jsonb_typeof(e.new_value->'callback_due_at') = 'string' then
+						jsonb_build_object(
+							'event_category', e.event_category,
+							'status_code', e.status_code
+						)
+					when l.call_status = 'callback_requested' then
+						jsonb_build_object(
+							'event_category', 'call_status',
+							'status_code', 'callback_requested'
+						)
+					else null
+				end
+				from public.lead_events e
+				where e.lead_id = l.id
+					and e.new_value ? 'callback_due_at'
+				order by e.created_at desc
+				limit 1
+			), case
+				when l.call_status = 'callback_requested' then
+					jsonb_build_object('event_category', 'call_status', 'status_code', 'callback_requested')
+				when l.client_status = 'thinking' then
+					jsonb_build_object('event_category', 'client_status', 'status_code', 'thinking')
+				else null
+			end)
+		end,
 		'markers', coalesce((
 			select jsonb_agg(jsonb_build_object(
 				'kind', m.kind,

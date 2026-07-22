@@ -147,7 +147,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, "lead_terminal", "Terminal leads must be reopened before another activity", nil)
 		return
 	}
-	if req.Type == activityClientStatus && req.Status == lead.ClientStatus {
+	if clientStatusUnchanged(lead.ClientStatus, req) {
 		s.writeError(w, r, http.StatusConflict, "status_unchanged", "Client status is already selected", nil)
 		return
 	}
@@ -176,6 +176,10 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func clientStatusUnchanged(current string, req leadActivityRequest) bool {
+	return req.Type == activityClientStatus && req.Status == current && req.Status != "showroom_invited"
 }
 
 func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string]string {
@@ -215,7 +219,15 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		}
 	case activityClientStatus:
 		switch req.Status {
-		case "showroom_invited", "calculation_in_progress":
+		case "showroom_invited":
+			reject("reason", req.Reason)
+			reject("comment", req.Comment)
+			reject("contractNumber", req.ContractNumber)
+			reject("currency", req.Currency)
+			if req.Amount != nil {
+				fields["amount"] = "Not allowed for this status"
+			}
+		case "calculation_in_progress":
 			rejectDueAt()
 			reject("reason", req.Reason)
 			reject("comment", req.Comment)
@@ -345,12 +357,15 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		newValue["client_status"] = req.Status
 		clientStatus = req.Status
 		changeClient = true
-		if req.Status == "thinking" {
-			callbackDueAt = req.DueAt
+		if req.Status == "thinking" || req.Status == "showroom_invited" {
 			newValue["callback_due_at"] = req.DueAt
-		} else if lead.CallStatus == nil || *lead.CallStatus != "callback_requested" {
-			callbackDueAt = nil
 		}
+		callbackDueAt = nextClientStatusCallbackDue(
+			lead.CallStatus,
+			callbackDueAt,
+			req.Status,
+			req.DueAt,
+		)
 		if req.Status == "closed_lost" {
 			var exists bool
 			if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.Reason).Scan(&exists); err != nil {
@@ -413,4 +428,22 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		values ($1,$2,$3,$4,$5,$6,$7,$8)
 	`, leadID, actor.ID, eventType, eventCategory, statusCode, comment, oldValue, newValue)
 	return err
+}
+
+func nextClientStatusCallbackDue(
+	callStatus *string,
+	current *time.Time,
+	clientStatus string,
+	requested *time.Time,
+) *time.Time {
+	if clientStatus == "thinking" {
+		return requested
+	}
+	if clientStatus == "showroom_invited" && requested != nil {
+		return requested
+	}
+	if callStatus != nil && *callStatus == "callback_requested" {
+		return current
+	}
+	return nil
 }

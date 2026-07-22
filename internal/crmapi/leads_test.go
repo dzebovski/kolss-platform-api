@@ -51,6 +51,22 @@ func TestLeadJSONExpressionEmbedsSharedMarkers(t *testing.T) {
 	}
 }
 
+func TestLeadJSONExpressionEmbedsCallbackDueContext(t *testing.T) {
+	expr := leadJSONExpression
+	for _, fragment := range []string{
+		"'callback_due_context'",
+		"e.new_value ? 'callback_due_at'",
+		"jsonb_typeof(e.new_value->'callback_due_at') = 'string'",
+		"'event_category', e.event_category",
+		"'status_code', e.status_code",
+		"l.call_status = 'callback_requested'",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+}
+
 func TestFirstContactAttemptListJSONShape(t *testing.T) {
 	managerID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	createdAt := time.Date(2026, 7, 14, 14, 14, 0, 0, time.UTC)

@@ -653,6 +653,10 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LatestTimelineComment'
+        callback_due_context:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/CallbackDueContext'
         markers:
           type: array
           items: { $ref: '#/components/schemas/LeadMarker' }
@@ -685,6 +689,15 @@ components:
         event_category: { type: [string, 'null'] }
         status_code: { type: [string, 'null'] }
         new_value: {}
+    CallbackDueContext:
+      type: object
+      additionalProperties: false
+      required: [event_category, status_code]
+      properties:
+        event_category:
+          type: string
+          enum: [call_status, client_status, comment]
+        status_code: { type: [string, 'null'] }
     LeadEventTranslation:
       type: object
       additionalProperties: false
@@ -728,7 +741,7 @@ components:
         dueAt:
           type: string
           format: date-time
-          description: Required when status is thinking.
+          description: Required when status is thinking; optional when status is showroom_invited.
     CommentActivityRequest:
       type: object
       additionalProperties: false
