@@ -653,6 +653,12 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LatestTimelineComment'
+        comment_reminder_due_at:
+          description: >
+            Reminder date stored on the latest explicit comment event. Null when the latest
+            explicit comment has no reminder, regardless of later call or client status events.
+          type: [string, 'null']
+          format: date-time
         showroom_due_at:
           description: >
             Date selected by the latest showroom_invited event while that client status is active.

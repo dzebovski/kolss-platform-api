@@ -30,6 +30,76 @@ func warsawLoc(t *testing.T) *time.Location {
 	return loc
 }
 
+func TestReminderCandidatesSelectLatestExplicitCommentBeforeItsOptionalDate(t *testing.T) {
+	query := reminderLeadCandidatesQuery
+	commentJoin := strings.LastIndex(query, "left join lateral")
+	if commentJoin < 0 {
+		t.Fatal("latest comment lateral join missing")
+	}
+	commentQuery := query[commentJoin:]
+	for _, fragment := range []string{
+		"latest_comment.due_at as comment_due_at",
+		"e.event_category = 'comment'",
+		"jsonb_typeof(e.new_value->'callback_due_at') = 'string'",
+		"order by e.created_at desc",
+		"limit 1",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("reminder query missing %q\n%s", fragment, query)
+		}
+	}
+	if strings.Contains(commentQuery, "e.new_value ? 'callback_due_at'") {
+		t.Fatal("latest comment must not be filtered by presence of a reminder date")
+	}
+}
+
+func TestReminderCandidatesKeepStatusDatesIndependentFromComments(t *testing.T) {
+	query := reminderLeadCandidatesQuery
+	for _, fragment := range []string{
+		"e.event_category = 'call_status'",
+		"e.status_code = 'callback_requested'",
+		"e.event_category = 'client_status'",
+		"e.status_code = l.client_status",
+		"l.client_status in ('thinking','showroom_invited')",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("reminder query missing %q\n%s", fragment, query)
+		}
+	}
+}
+
+func TestEarliestDueAtDeduplicatesReminderCandidates(t *testing.T) {
+	statusDue := time.Date(2026, time.July, 23, 9, 0, 0, 0, time.UTC)
+	commentDue := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	clientDue := time.Date(2026, time.July, 25, 10, 0, 0, 0, time.UTC)
+
+	got := earliestDueAt(&statusDue, &clientDue, &commentDue)
+	if got == nil || !got.Equal(commentDue) {
+		t.Fatalf("earliestDueAt() = %v, want %v", got, commentDue)
+	}
+	if got := earliestDueAt(nil, nil, nil); got != nil {
+		t.Fatalf("earliestDueAt(nil) = %v, want nil", got)
+	}
+}
+
+func TestIsDueOnOrBeforeLocalDateUsesOfficeTimezone(t *testing.T) {
+	// At this instant it is already 22 July in Kyiv, but still 21 July in Warsaw.
+	now := time.Date(2026, time.July, 21, 21, 15, 0, 0, time.UTC)
+	due := time.Date(2026, time.July, 21, 22, 30, 0, 0, time.UTC)
+
+	if !isDueOnOrBeforeLocalDate(due, now, kyivLoc(t)) {
+		t.Fatal("Kyiv reminder should be due on the office's current calendar date")
+	}
+	if isDueOnOrBeforeLocalDate(due, now, warsawLoc(t)) {
+		t.Fatal("Warsaw reminder should remain scheduled for the next calendar date")
+	}
+
+	overdue := time.Date(2026, time.July, 20, 8, 0, 0, 0, time.UTC)
+	if !isDueOnOrBeforeLocalDate(overdue, now, warsawLoc(t)) {
+		t.Fatal("overdue reminder must be included")
+	}
+}
+
 func TestFormatTelegramMessagesAllStatuses(t *testing.T) {
 	s := &Scheduler{CRMSiteURLPublic: "https://crm.kolss.eu"}
 	loc := kyivLoc(t)

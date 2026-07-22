@@ -84,6 +84,32 @@ func TestLeadJSONExpressionEmbedsIndependentShowroomDueDate(t *testing.T) {
 	}
 }
 
+func TestLeadJSONExpressionEmbedsLatestExplicitCommentReminder(t *testing.T) {
+	expr := leadJSONExpression
+	for _, fragment := range []string{
+		"'comment_reminder_due_at'",
+		"e.event_category = 'comment'",
+		"jsonb_typeof(e.new_value->'callback_due_at') = 'string'",
+		"e.new_value->>'callback_due_at'",
+		"order by e.created_at desc",
+		"limit 1",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+
+	commentReminderStart := strings.Index(expr, "'comment_reminder_due_at'")
+	callbackContextStart := strings.Index(expr, "'callback_due_context'")
+	if commentReminderStart < 0 || callbackContextStart <= commentReminderStart {
+		t.Fatal("comment reminder expression boundaries not found")
+	}
+	commentReminderExpr := expr[commentReminderStart:callbackContextStart]
+	if strings.Contains(commentReminderExpr, "e.new_value ? 'callback_due_at'") {
+		t.Fatal("latest comment must be selected before extracting its optional reminder date")
+	}
+}
+
 func TestFirstContactAttemptListJSONShape(t *testing.T) {
 	managerID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	createdAt := time.Date(2026, 7, 14, 14, 14, 0, 0, time.UTC)

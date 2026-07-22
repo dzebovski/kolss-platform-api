@@ -100,6 +100,18 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		),
+		'comment_reminder_due_at', (
+			select case
+				when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+					then e.new_value->>'callback_due_at'
+				else null
+			end
+			from public.lead_events e
+			where e.lead_id = l.id
+				and e.event_category = 'comment'
+			order by e.created_at desc
+			limit 1
+		),
 		'callback_due_context', case
 			when l.callback_due_at is null then null
 			else coalesce((

@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,13 +20,13 @@ import (
 const (
 	maxMessageLength = 3500
 
-	telegramGreetingLine      = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
-	telegramEmptyMessage      = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
-	telegramSectionReminders  = "<b>Сьогоднішні нагадування:</b>"
-	telegramSectionNew        = "<b>Нові заявки:</b>"
-	telegramSectionNoAnswer   = "<b>Не дозволилися:</b>"
-	telegramSectionCallback   = "<b>Потрібно передзвонити:</b>"
-	telegramOpenLabel         = "відкрити"
+	telegramGreetingLine     = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
+	telegramEmptyMessage     = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
+	telegramSectionReminders = "<b>Сьогоднішні нагадування:</b>"
+	telegramSectionNew       = "<b>Нові заявки:</b>"
+	telegramSectionNoAnswer  = "<b>Не дозволилися:</b>"
+	telegramSectionCallback  = "<b>Потрібно передзвонити:</b>"
+	telegramOpenLabel        = "відкрити"
 
 	slackGreetingLine     = "🌻 Dzień dobry!\nLista leadów, na które warto zwrócić uwagę:"
 	slackEmptyMessage     = "🌻 Dzień dobry!\nObecnie nie ma leadów wymagających uwagi. Miłego dnia!"
@@ -249,22 +250,116 @@ type reportLead struct {
 	CallbackDueAt *time.Time
 }
 
+const attentionLeadsQuery = `
+	select
+	  l.id,
+	  coalesce(l.name,''),
+	  coalesce(l.phone,''),
+	  l.call_status,
+	  case
+	    when l.call_status is distinct from 'callback_requested' then null
+	    when active_call.found then active_call.due_at
+	    else l.callback_due_at
+	  end as callback_due_at
+	from public.leads l
+	join public.offices o on o.id = l.office_id
+	left join lateral (
+	  select
+	    true as found,
+	    case
+	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+	        then (e.new_value->>'callback_due_at')::timestamptz
+	      else null
+	    end as due_at
+	  from public.lead_events e
+	  where e.lead_id = l.id
+	    and e.event_category = 'call_status'
+	    and e.status_code = 'callback_requested'
+	  order by e.created_at desc
+	  limit 1
+	) active_call on l.call_status = 'callback_requested'
+	where l.archived_at is null
+	  and o.code = $1
+	  and (l.call_status is null or l.call_status in ('no_answer','callback_requested'))
+	  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
+	  and (
+	    l.call_status is distinct from 'callback_requested'
+	    or coalesce(active_call.due_at, l.callback_due_at) is null
+	    or (coalesce(active_call.due_at, l.callback_due_at) at time zone $2)::date <=
+	      (now() at time zone $2)::date
+	  )
+	order by (l.call_status is not null), coalesce(l.source_created_at, l.created_at) asc
+`
+
+const reminderLeadCandidatesQuery = `
+	select
+	  l.id,
+	  coalesce(l.name,''),
+	  coalesce(l.phone,''),
+	  l.call_status,
+	  case
+	    when l.call_status is distinct from 'callback_requested' then null
+	    when active_call.found then active_call.due_at
+	    else l.callback_due_at
+	  end as call_due_at,
+	  case
+	    when l.client_status = 'thinking' and active_client.found then active_client.due_at
+	    when l.client_status = 'thinking' then l.callback_due_at
+	    when l.client_status = 'showroom_invited' then active_client.due_at
+	    else null
+	  end as client_due_at,
+	  latest_comment.due_at as comment_due_at
+	from public.leads l
+	join public.offices o on o.id = l.office_id
+	left join lateral (
+	  select
+	    true as found,
+	    case
+	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+	        then (e.new_value->>'callback_due_at')::timestamptz
+	      else null
+	    end as due_at
+	  from public.lead_events e
+	  where e.lead_id = l.id
+	    and e.event_category = 'call_status'
+	    and e.status_code = 'callback_requested'
+	  order by e.created_at desc
+	  limit 1
+	) active_call on l.call_status = 'callback_requested'
+	left join lateral (
+	  select
+	    true as found,
+	    case
+	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+	        then (e.new_value->>'callback_due_at')::timestamptz
+	      else null
+	    end as due_at
+	  from public.lead_events e
+	  where e.lead_id = l.id
+	    and e.event_category = 'client_status'
+	    and e.status_code = l.client_status
+	  order by e.created_at desc
+	  limit 1
+	) active_client on l.client_status in ('thinking','showroom_invited')
+	left join lateral (
+	  select case
+	    when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+	      then (e.new_value->>'callback_due_at')::timestamptz
+	    else null
+	  end as due_at
+	  from public.lead_events e
+	  where e.lead_id = l.id
+	    and e.event_category = 'comment'
+	  order by e.created_at desc
+	  limit 1
+	) latest_comment on true
+	where l.archived_at is null
+	  and o.code = $1
+	  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
+`
+
 func (s *Scheduler) fetchLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
-	rows, err := s.Pool.Query(ctx, `
-		select l.id, coalesce(l.name,''), coalesce(l.phone,''), l.call_status, l.callback_due_at
-		from public.leads l
-		join public.offices o on o.id = l.office_id
-		where l.archived_at is null
-		  and o.code = $1
-		  and (l.call_status is null or l.call_status in ('no_answer','callback_requested'))
-		  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
-		  -- skip callbacks scheduled for a future calendar day in office TZ
-		  and (
-		    l.callback_due_at is null
-		    or (l.callback_due_at at time zone $2)::date <= (now() at time zone $2)::date
-		  )
-		order by (l.call_status is not null), coalesce(l.source_created_at, l.created_at) asc
-	`, officeCode, timezone)
+	rows, err := s.Pool.Query(ctx, attentionLeadsQuery, officeCode, timezone)
 	if err != nil {
 		return nil, err
 	}
@@ -282,31 +377,65 @@ func (s *Scheduler) fetchLeads(ctx context.Context, officeCode, timezone string)
 }
 
 func (s *Scheduler) fetchReminderLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
-	rows, err := s.Pool.Query(ctx, `
-		select l.id, coalesce(l.name,''), coalesce(l.phone,''), l.call_status, l.callback_due_at
-		from public.leads l
-		join public.offices o on o.id = l.office_id
-		where l.archived_at is null
-		  and o.code = $1
-		  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
-		  and l.callback_due_at is not null
-		  and (l.callback_due_at at time zone $2)::date <= (now() at time zone $2)::date
-		order by l.callback_due_at asc
-	`, officeCode, timezone)
+	loc, err := time.LoadLocation(timezone)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.Pool.Query(ctx, reminderLeadCandidatesQuery, officeCode)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	now := time.Now()
 	var leads []reportLead
 	for rows.Next() {
 		var lead reportLead
-		if err := rows.Scan(&lead.ID, &lead.Name, &lead.Phone, &lead.CallStatus, &lead.CallbackDueAt); err != nil {
+		var callDueAt, clientDueAt, commentDueAt *time.Time
+		if err := rows.Scan(
+			&lead.ID,
+			&lead.Name,
+			&lead.Phone,
+			&lead.CallStatus,
+			&callDueAt,
+			&clientDueAt,
+			&commentDueAt,
+		); err != nil {
 			return nil, err
+		}
+		lead.CallbackDueAt = earliestDueAt(callDueAt, clientDueAt, commentDueAt)
+		if lead.CallbackDueAt == nil || !isDueOnOrBeforeLocalDate(*lead.CallbackDueAt, now, loc) {
+			continue
 		}
 		leads = append(leads, lead)
 	}
-	return leads, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(leads, func(i, j int) bool {
+		return leads[i].CallbackDueAt.Before(*leads[j].CallbackDueAt)
+	})
+	return leads, nil
+}
+
+func earliestDueAt(dates ...*time.Time) *time.Time {
+	var earliest *time.Time
+	for _, dueAt := range dates {
+		if dueAt == nil || (earliest != nil && !dueAt.Before(*earliest)) {
+			continue
+		}
+		value := *dueAt
+		earliest = &value
+	}
+	return earliest
+}
+
+func isDueOnOrBeforeLocalDate(dueAt, now time.Time, loc *time.Location) bool {
+	dueYear, dueMonth, dueDay := dueAt.In(loc).Date()
+	nowYear, nowMonth, nowDay := now.In(loc).Date()
+	dueDate := time.Date(dueYear, dueMonth, dueDay, 0, 0, 0, 0, loc)
+	nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, loc)
+	return !dueDate.After(nowDate)
 }
 
 type leadSection struct {
