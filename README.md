@@ -54,7 +54,14 @@ to the **Kolss Kyiv** supergroup. Each destination has independent outbox retry 
 Set `SLACK_BOT_TOKEN_WARSAW` to the installed app's `xoxb-…` Bot User OAuth
 Token and `SLACK_CHANNEL_ID_WARSAW` to the target channel ID. The app needs the
 `chat:write` scope and must be a member of private target channels. Warsaw lead
-notifications are delivered only to Slack; the Warsaw daily report remains disabled.
+notifications and the morning daily report (Mon–Sat at `DAILY_REPORT_HOUR_LOCAL`
+in Europe/Warsaw) are delivered only to Slack.
+
+### Daily report
+
+Kyiv receives the morning report on Telegram; Warsaw receives it on Slack. Both
+use the same local hour (`DAILY_REPORT_HOUR_LOCAL`, default 9) and skip Sundays.
+Leads with a future `callback_due_at` are excluded until that calendar day.
 
 Set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without `/crm/leads/:id`.
 

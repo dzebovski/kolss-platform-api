@@ -736,6 +736,10 @@ components:
       properties:
         type: { type: string, const: comment }
         comment: { type: string }
+        dueAt:
+          type: string
+          format: date-time
+          description: Optional reminder date for the comment.
     ReopenActivityRequest:
       type: object
       additionalProperties: false

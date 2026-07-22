@@ -34,6 +34,12 @@ func TestDeliveryDestinationsRouteKyivToTelegramAndWarsawToSlack(t *testing.T) {
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Warsaw destinations = %#v, want %#v", got, want)
 	}
+	if got, want := outbox.SlackChannelID("warsaw"), "C123WARSAW"; got != want {
+		t.Fatalf("SlackChannelID(warsaw) = %q, want %q", got, want)
+	}
+	if got := outbox.SlackChannelID("kyiv"); got != "" {
+		t.Fatalf("SlackChannelID(kyiv) = %q, want empty", got)
+	}
 }
 
 func TestCRMLeadURLUsesCRMDomainRoot(t *testing.T) {

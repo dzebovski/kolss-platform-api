@@ -269,7 +269,6 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["status"] = "Unknown client status"
 		}
 	case activityComment:
-		rejectDueAt()
 		reject("status", req.Status)
 		reject("reason", req.Reason)
 		reject("contractNumber", req.ContractNumber)
@@ -334,6 +333,10 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	case activityComment:
 		eventType = "comment_added"
 		eventCategory = activityComment
+		if req.DueAt != nil {
+			callbackDueAt = req.DueAt
+			newValue["callback_due_at"] = req.DueAt
+		}
 	case activityClientStatus:
 		eventType = "client_status_changed"
 		eventCategory = activityClientStatus

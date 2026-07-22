@@ -49,6 +49,15 @@ func (o Outbox) TelegramChatIDs(officeCode string) []string {
 	return uniqueChatIDs(primary, additional)
 }
 
+// SlackChannelID returns the Slack channel ID configured for an office.
+func (o Outbox) SlackChannelID(officeCode string) string {
+	switch officeCode {
+	case "warsaw":
+		return strings.TrimSpace(o.SlackChannelIDWarsaw)
+	}
+	return ""
+}
+
 func (o Outbox) telegramChatIDs(officeCode string) []string {
 	return o.TelegramChatIDs(officeCode)
 }

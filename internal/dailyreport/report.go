@@ -17,42 +17,59 @@ import (
 )
 
 const (
-	greetingLine     = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
-	emptyMessage     = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
 	maxMessageLength = 3500
 
-	sectionNewHeader      = "<b>Нові заявки:</b>"
-	sectionNoAnswerHeader = "<b>Не дозвонилися:</b>"
-	sectionCallbackHeader = "<b>Потрібно передзвонити:</b>"
+	telegramGreetingLine      = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
+	telegramEmptyMessage      = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
+	telegramSectionReminders  = "<b>Сьогоднішні нагадування:</b>"
+	telegramSectionNew        = "<b>Нові заявки:</b>"
+	telegramSectionNoAnswer   = "<b>Не дозволилися:</b>"
+	telegramSectionCallback   = "<b>Потрібно передзвонити:</b>"
+	telegramOpenLabel         = "відкрити"
 
+	slackGreetingLine     = "🌻 Dzień dobry!\nLista leadów, na które warto zwrócić uwagę:"
+	slackEmptyMessage     = "🌻 Dzień dobry!\nObecnie nie ma leadów wymagających uwagi. Miłego dnia!"
+	slackSectionReminders = "*Dzisiejsze przypomnienia:*"
+	slackSectionNew       = "*Nowe zgłoszenia:*"
+	slackSectionNoAnswer  = "*Nieodebrane:*"
+	slackSectionCallback  = "*Do oddzwonienia:*"
+	slackOpenLabel        = "otwórz"
+
+	emojiReminder = "⏰"
 	emojiNew      = "🆕"
 	emojiNoAnswer = "📵"
 	emojiCallback = "📞"
+
+	channelTelegram = "telegram"
+	channelSlack    = "slack"
 )
 
-// ChatSource resolves the Telegram chat IDs configured for an office.
+// ChatSource resolves delivery destinations configured for an office.
 type ChatSource interface {
 	TelegramChatIDs(officeCode string) []string
+	SlackChannelID(officeCode string) string
 }
 
 type office struct {
-	code string
-	loc  *time.Location
+	code    string
+	loc     *time.Location
+	channel string
 }
 
 var scheduledOffices = []struct {
 	code    string
 	tz      string
+	channel string
 	enabled bool
 }{
-	{code: "kyiv", tz: "Europe/Kyiv", enabled: true},
-	{code: "warsaw", tz: "Europe/Warsaw", enabled: false}, // на паузі
+	{code: "kyiv", tz: "Europe/Kyiv", channel: channelTelegram, enabled: true},
+	{code: "warsaw", tz: "Europe/Warsaw", channel: channelSlack, enabled: true},
 }
 
 // Scheduler sends a per-office morning report at a fixed local hour.
 type Scheduler struct {
 	Pool             *pgxpool.Pool
-	Credentials      notifications.TelegramCredentials
+	Credentials      notifications.DeliveryCredentials
 	Chats            ChatSource
 	CRMSiteURLPublic string
 	HourLocal        int
@@ -60,7 +77,7 @@ type Scheduler struct {
 	HTTP             *http.Client
 }
 
-func New(pool *pgxpool.Pool, credentials notifications.TelegramCredentials, chats ChatSource, crmSiteURLPublic string, hourLocal int, logger *slog.Logger) *Scheduler {
+func New(pool *pgxpool.Pool, credentials notifications.DeliveryCredentials, chats ChatSource, crmSiteURLPublic string, hourLocal int, logger *slog.Logger) *Scheduler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -123,7 +140,7 @@ func (s *Scheduler) offices() []office {
 			s.log().Error("daily report timezone load failed", "office", def.code, "timezone", def.tz, "error", err)
 			continue
 		}
-		out = append(out, office{code: def.code, loc: loc})
+		out = append(out, office{code: def.code, loc: loc, channel: def.channel})
 	}
 	return out
 }
@@ -145,35 +162,71 @@ func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 		return
 	}
 
-	leads, err := s.fetchLeads(ctx, off.code)
+	timezone := off.loc.String()
+	attention, err := s.fetchLeads(ctx, off.code, timezone)
 	if err != nil {
 		s.log().Error("daily report query failed", "office", off.code, "error", err)
 		return
 	}
-
-	chatIDs := s.Chats.TelegramChatIDs(off.code)
-	if len(chatIDs) == 0 {
-		s.log().Warn("daily report has no chat IDs", "office", off.code)
+	reminders, err := s.fetchReminderLeads(ctx, off.code, timezone)
+	if err != nil {
+		s.log().Error("daily report reminders query failed", "office", off.code, "error", err)
 		return
 	}
-	token := s.Credentials.TelegramBotTokenFor(off.code)
-	messages := s.formatMessages(leads)
+
 	client := s.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 
+	var messages []string
+	var destinations []string
 	sent := 0
-	for _, chatID := range chatIDs {
-		for _, message := range messages {
-			if err := notifications.SendTelegramMessage(ctx, client, token, chatID, message); err != nil {
-				s.log().Warn("daily report send failed", "office", off.code, "chat_id", chatID, "error", err)
-				continue
+
+	switch off.channel {
+	case channelSlack:
+		channelID := strings.TrimSpace(s.Chats.SlackChannelID(off.code))
+		if channelID == "" {
+			s.log().Warn("daily report has no Slack channel", "office", off.code)
+			return
+		}
+		token := strings.TrimSpace(s.Credentials.SlackBotTokenFor(off.code))
+		if token == "" {
+			s.log().Warn("daily report missing Slack token", "office", off.code)
+			return
+		}
+		messages = s.formatSlackMessages(attention, reminders, off.loc)
+		destinations = []string{channelID}
+		for _, destination := range destinations {
+			for _, message := range messages {
+				if err := notifications.SendSlackMessage(ctx, client, token, destination, message); err != nil {
+					s.log().Warn("daily report send failed", "office", off.code, "channel", channelSlack, "destination", destination, "error", err)
+					continue
+				}
+				sent++
 			}
-			sent++
+		}
+	default:
+		chatIDs := s.Chats.TelegramChatIDs(off.code)
+		if len(chatIDs) == 0 {
+			s.log().Warn("daily report has no chat IDs", "office", off.code)
+			return
+		}
+		token := s.Credentials.TelegramBotTokenFor(off.code)
+		messages = s.formatTelegramMessages(attention, reminders, off.loc)
+		destinations = chatIDs
+		for _, chatID := range destinations {
+			for _, message := range messages {
+				if err := notifications.SendTelegramMessage(ctx, client, token, chatID, message); err != nil {
+					s.log().Warn("daily report send failed", "office", off.code, "channel", channelTelegram, "chat_id", chatID, "error", err)
+					continue
+				}
+				sent++
+			}
 		}
 	}
-	s.log().Info("daily report sent", "office", off.code, "date", reportDate, "leads", len(leads), "messages", len(messages), "chats", len(chatIDs), "delivered", sent)
+
+	s.log().Info("daily report sent", "office", off.code, "channel", off.channel, "date", reportDate, "leads", len(attention), "reminders", len(reminders), "messages", len(messages), "destinations", len(destinations), "delivered", sent)
 }
 
 func (s *Scheduler) claim(ctx context.Context, officeCode, reportDate string) (bool, error) {
@@ -189,23 +242,29 @@ func (s *Scheduler) claim(ctx context.Context, officeCode, reportDate string) (b
 }
 
 type reportLead struct {
-	ID         uuid.UUID
-	Name       string
-	Phone      string
-	CallStatus *string
+	ID            uuid.UUID
+	Name          string
+	Phone         string
+	CallStatus    *string
+	CallbackDueAt *time.Time
 }
 
-func (s *Scheduler) fetchLeads(ctx context.Context, officeCode string) ([]reportLead, error) {
+func (s *Scheduler) fetchLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
 	rows, err := s.Pool.Query(ctx, `
-		select l.id, coalesce(l.name,''), coalesce(l.phone,''), l.call_status
+		select l.id, coalesce(l.name,''), coalesce(l.phone,''), l.call_status, l.callback_due_at
 		from public.leads l
 		join public.offices o on o.id = l.office_id
 		where l.archived_at is null
 		  and o.code = $1
 		  and (l.call_status is null or l.call_status in ('no_answer','callback_requested'))
 		  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
+		  -- skip callbacks scheduled for a future calendar day in office TZ
+		  and (
+		    l.callback_due_at is null
+		    or (l.callback_due_at at time zone $2)::date <= (now() at time zone $2)::date
+		  )
 		order by (l.call_status is not null), coalesce(l.source_created_at, l.created_at) asc
-	`, officeCode)
+	`, officeCode, timezone)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +273,35 @@ func (s *Scheduler) fetchLeads(ctx context.Context, officeCode string) ([]report
 	var leads []reportLead
 	for rows.Next() {
 		var lead reportLead
-		if err := rows.Scan(&lead.ID, &lead.Name, &lead.Phone, &lead.CallStatus); err != nil {
+		if err := rows.Scan(&lead.ID, &lead.Name, &lead.Phone, &lead.CallStatus, &lead.CallbackDueAt); err != nil {
+			return nil, err
+		}
+		leads = append(leads, lead)
+	}
+	return leads, rows.Err()
+}
+
+func (s *Scheduler) fetchReminderLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
+	rows, err := s.Pool.Query(ctx, `
+		select l.id, coalesce(l.name,''), coalesce(l.phone,''), l.call_status, l.callback_due_at
+		from public.leads l
+		join public.offices o on o.id = l.office_id
+		where l.archived_at is null
+		  and o.code = $1
+		  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
+		  and l.callback_due_at is not null
+		  and (l.callback_due_at at time zone $2)::date <= (now() at time zone $2)::date
+		order by l.callback_due_at asc
+	`, officeCode, timezone)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leads []reportLead
+	for rows.Next() {
+		var lead reportLead
+		if err := rows.Scan(&lead.ID, &lead.Name, &lead.Phone, &lead.CallStatus, &lead.CallbackDueAt); err != nil {
 			return nil, err
 		}
 		leads = append(leads, lead)
@@ -223,22 +310,27 @@ func (s *Scheduler) fetchLeads(ctx context.Context, officeCode string) ([]report
 }
 
 type leadSection struct {
-	header string
-	emoji  string
-	leads  []reportLead
+	header      string
+	emoji       string
+	leads       []reportLead
+	withDueDate bool
 }
 
-func groupLeadsBySection(leads []reportLead) []leadSection {
+func groupAttentionBySection(leads []reportLead, newHeader, noAnswerHeader, callbackHeader string) []leadSection {
 	sections := []leadSection{
-		{header: sectionNewHeader, emoji: emojiNew},
-		{header: sectionNoAnswerHeader, emoji: emojiNoAnswer},
-		{header: sectionCallbackHeader, emoji: emojiCallback},
+		{header: newHeader, emoji: emojiNew},
+		{header: noAnswerHeader, emoji: emojiNoAnswer},
+		{header: callbackHeader, emoji: emojiCallback},
 	}
 	for _, lead := range leads {
 		switch {
 		case lead.CallStatus != nil && *lead.CallStatus == "no_answer":
 			sections[1].leads = append(sections[1].leads, lead)
 		case lead.CallStatus != nil && *lead.CallStatus == "callback_requested":
+			// Dated callbacks belong only in today's reminders, not this section.
+			if lead.CallbackDueAt != nil {
+				continue
+			}
 			sections[2].leads = append(sections[2].leads, lead)
 		default:
 			sections[0].leads = append(sections[0].leads, lead)
@@ -247,31 +339,93 @@ func groupLeadsBySection(leads []reportLead) []leadSection {
 	return sections
 }
 
-func (s *Scheduler) formatMessages(leads []reportLead) []string {
-	if len(leads) == 0 {
-		return []string{emptyMessage}
+func buildReportSections(
+	attention, reminders []reportLead,
+	remindersHeader, newHeader, noAnswerHeader, callbackHeader string,
+) []leadSection {
+	sections := make([]leadSection, 0, 4)
+	if len(reminders) > 0 {
+		sections = append(sections, leadSection{
+			header:      remindersHeader,
+			emoji:       emojiReminder,
+			leads:       reminders,
+			withDueDate: true,
+		})
+	}
+	sections = append(sections, groupAttentionBySection(attention, newHeader, noAnswerHeader, callbackHeader)...)
+	return sections
+}
+
+func (s *Scheduler) formatTelegramMessages(attention, reminders []reportLead, loc *time.Location) []string {
+	return s.formatMessages(
+		attention,
+		reminders,
+		loc,
+		telegramGreetingLine,
+		telegramEmptyMessage,
+		telegramSectionReminders,
+		telegramSectionNew,
+		telegramSectionNoAnswer,
+		telegramSectionCallback,
+		s.formatTelegramLine,
+	)
+}
+
+func (s *Scheduler) formatSlackMessages(attention, reminders []reportLead, loc *time.Location) []string {
+	return s.formatMessages(
+		attention,
+		reminders,
+		loc,
+		slackGreetingLine,
+		slackEmptyMessage,
+		slackSectionReminders,
+		slackSectionNew,
+		slackSectionNoAnswer,
+		slackSectionCallback,
+		s.formatSlackLine,
+	)
+}
+
+type lineFormatter func(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string
+
+func (s *Scheduler) formatMessages(
+	attention, reminders []reportLead,
+	loc *time.Location,
+	greeting, empty, remindersHeader, newHeader, noAnswerHeader, callbackHeader string,
+	formatLine lineFormatter,
+) []string {
+	sections := buildReportSections(attention, reminders, remindersHeader, newHeader, noAnswerHeader, callbackHeader)
+	hasContent := false
+	for _, section := range sections {
+		if len(section.leads) > 0 {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return []string{empty}
 	}
 
 	var messages []string
 	var builder strings.Builder
-	builder.WriteString(greetingLine)
+	builder.WriteString(greeting)
 	activeHeader := ""
 
 	flush := func() {
 		messages = append(messages, builder.String())
 		builder.Reset()
-		builder.WriteString(greetingLine)
+		builder.WriteString(greeting)
 		activeHeader = ""
 	}
 
-	for _, section := range groupLeadsBySection(leads) {
+	for _, section := range sections {
 		if len(section.leads) == 0 {
 			continue
 		}
 		for _, lead := range section.leads {
-			line := s.formatLine(lead, section.emoji)
+			line := formatLine(lead, section.emoji, loc, section.withDueDate)
 			block := leadBlock(section.header, line, activeHeader != section.header)
-			if builder.Len()+len(block) > maxMessageLength && builder.Len() > len(greetingLine) {
+			if builder.Len()+len(block) > maxMessageLength && builder.Len() > len(greeting) {
 				flush()
 				block = leadBlock(section.header, line, true)
 			}
@@ -296,20 +450,58 @@ func leadBlock(header, line string, withHeader bool) string {
 	return b.String()
 }
 
-func (s *Scheduler) formatLine(lead reportLead, emoji string) string {
-	name := strings.TrimSpace(lead.Name)
+func (s *Scheduler) formatTelegramLine(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string {
+	name, phone := leadDisplay(lead)
+	line := emoji + " " + html.EscapeString(name) + ", " + html.EscapeString(phone)
+	if withDueDate {
+		if due := formatDueDate(lead.CallbackDueAt, loc); due != "" {
+			line += ", " + html.EscapeString(due)
+		}
+	}
+	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
+		line += ", <a href=\"" + html.EscapeString(link) + "\">" + telegramOpenLabel + "</a>"
+	}
+	return line
+}
+
+func (s *Scheduler) formatSlackLine(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string {
+	name, phone := leadDisplay(lead)
+	line := emoji + " " + escapeSlackText(name) + ", " + escapeSlackText(phone)
+	if withDueDate {
+		if due := formatDueDate(lead.CallbackDueAt, loc); due != "" {
+			line += ", " + escapeSlackText(due)
+		}
+	}
+	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
+		line += ", <" + escapeSlackText(link) + "|" + slackOpenLabel + ">"
+	}
+	return line
+}
+
+func formatDueDate(dueAt *time.Time, loc *time.Location) string {
+	if dueAt == nil {
+		return ""
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+	return dueAt.In(loc).Format("02.01.2006")
+}
+
+func leadDisplay(lead reportLead) (name, phone string) {
+	name = strings.TrimSpace(lead.Name)
 	if name == "" {
 		name = "—"
 	}
-	phone := strings.TrimSpace(lead.Phone)
+	phone = strings.TrimSpace(lead.Phone)
 	if phone == "" {
 		phone = "—"
 	}
-	line := emoji + " " + html.EscapeString(name) + ", " + html.EscapeString(phone)
-	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
-		line += ", <a href=\"" + html.EscapeString(link) + "\">відкрити</a>"
-	}
-	return line
+	return name, phone
+}
+
+func escapeSlackText(value string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
 func crmLeadURL(base string, leadID uuid.UUID) string {
