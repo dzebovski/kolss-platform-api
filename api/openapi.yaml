@@ -653,6 +653,12 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LatestTimelineComment'
+        showroom_due_at:
+          description: >
+            Date selected by the latest showroom_invited event while that client status is active.
+            Independent from callback and comment reminder dates.
+          type: [string, 'null']
+          format: date-time
         callback_due_context:
           oneOf:
             - type: 'null'

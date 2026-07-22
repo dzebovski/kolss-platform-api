@@ -68,6 +68,22 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		)),
+		'showroom_due_at', case
+			when l.client_status <> 'showroom_invited' then null
+			else (
+				select case
+					when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+						then e.new_value->>'callback_due_at'
+					else null
+				end
+				from public.lead_events e
+				where e.lead_id = l.id
+					and e.event_category = 'client_status'
+					and e.status_code = 'showroom_invited'
+				order by e.created_at desc
+				limit 1
+			)
+		end,
 		'latest_timeline_comment', (
 			select jsonb_build_object(
 				'comment', e.comment,
