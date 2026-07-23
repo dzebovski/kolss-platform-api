@@ -81,8 +81,34 @@ func setBaseEnvironment(t *testing.T) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgresql://example")
 	t.Setenv("SUPABASE_URL", "https://example.supabase.co")
+	t.Setenv("SUPABASE_SECRET_KEY", "test-supabase-secret")
 	t.Setenv("PUBLIC_SITE_FORMS_ENABLED", "false")
 	t.Setenv("SUPABASE_S3_ENDPOINT", "")
 	t.Setenv("SUPABASE_S3_ACCESS_KEY_ID", "")
 	t.Setenv("SUPABASE_S3_SECRET_ACCESS_KEY", "")
+}
+
+func TestSupabaseSecretKeyRequired(t *testing.T) {
+	setBaseEnvironment(t)
+	t.Setenv("SUPABASE_SECRET_KEY", "")
+	t.Setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "SUPABASE_SECRET_KEY") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestSupabaseServiceRoleKeyFallback(t *testing.T) {
+	setBaseEnvironment(t)
+	t.Setenv("SUPABASE_SECRET_KEY", "")
+	t.Setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-secret")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SupabaseSecretKey != "service-role-secret" {
+		t.Fatalf("SupabaseSecretKey=%q", cfg.SupabaseSecretKey)
+	}
 }

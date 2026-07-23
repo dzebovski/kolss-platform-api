@@ -94,7 +94,10 @@ func Load() (Config, error) {
 		SupabaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("SUPABASE_URL")), "/"),
 		SupabaseJWKSURL:   strings.TrimSpace(os.Getenv("SUPABASE_JWKS_URL")),
 		SupabaseJWTIssuer: strings.TrimSpace(os.Getenv("SUPABASE_JWT_ISSUER")),
-		SupabaseSecretKey: strings.TrimSpace(os.Getenv("SUPABASE_SECRET_KEY")),
+		SupabaseSecretKey: strings.TrimSpace(firstNonEmpty(
+			os.Getenv("SUPABASE_SECRET_KEY"),
+			os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
+		)),
 
 		BotcheckDisabled:          getenvBool("BOTCHECK_DISABLED", false),
 		TurnstileSecretKey:        strings.TrimSpace(os.Getenv("TURNSTILE_SECRET_KEY")),
@@ -179,6 +182,9 @@ func Load() (Config, error) {
 	}
 	if cfg.SupabaseURL == "" {
 		return Config{}, fmt.Errorf("SUPABASE_URL is required")
+	}
+	if cfg.SupabaseSecretKey == "" {
+		return Config{}, fmt.Errorf("SUPABASE_SECRET_KEY is required (or SUPABASE_SERVICE_ROLE_KEY)")
 	}
 	if cfg.SupabaseJWKSURL == "" {
 		cfg.SupabaseJWKSURL = cfg.SupabaseURL + "/auth/v1/.well-known/jwks.json"

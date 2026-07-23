@@ -525,7 +525,7 @@ func (s *Server) updateAppointment(
 	if currentVersion != version {
 		return appointment{}, errAppointmentVersion
 	}
-	if currentStatus != appointmentStatusScheduled {
+	if !canUpdateAppointment(currentStatus, req) {
 		return appointment{}, errAppointmentTerminal
 	}
 
@@ -587,7 +587,8 @@ func (s *Server) updateAppointment(
 	eventType := "appointment_updated"
 	if nextStatus != currentStatus {
 		eventType = "appointment_status_changed"
-	} else if !nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd) || !sameUUID(nextManager, currentManager) {
+	} else if currentStatus == appointmentStatusScheduled &&
+		(!nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd) || !sameUUID(nextManager, currentManager)) {
 		eventType = "appointment_rescheduled"
 	}
 	if _, err := tx.Exec(r.Context(), appointmentChangedEventInsert,
@@ -618,7 +619,7 @@ func (s *Server) writeAppointmentMutationError(
 	case errors.Is(err, errAppointmentAlreadyActive):
 		s.writeError(w, r, http.StatusConflict, "active_appointment_exists", "Lead already has a scheduled appointment", nil)
 	case errors.Is(err, errAppointmentTerminal):
-		s.writeError(w, r, http.StatusConflict, "appointment_terminal", "Completed appointment cannot be edited", nil)
+		s.writeError(w, r, http.StatusConflict, "appointment_terminal", "Completed appointment status cannot be changed", nil)
 	case errors.Is(err, errAppointmentVersion):
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Appointment was changed by another user", nil)
 	case strings.HasPrefix(err.Error(), "starts_at_local:"):
@@ -679,6 +680,17 @@ func validateUpdateAppointment(req appointmentMutationRequest) map[string]string
 
 func validAppointmentDuration(minutes int) bool {
 	return minutes >= 15 && minutes <= 480 && minutes%15 == 0
+}
+
+func canUpdateAppointment(currentStatus string, req appointmentMutationRequest) bool {
+	switch currentStatus {
+	case appointmentStatusScheduled:
+		return true
+	case "visited", "no_show", "canceled":
+		return req.Status == nil
+	default:
+		return false
+	}
 }
 
 func isAppointmentStatus(status string) bool {

@@ -389,7 +389,7 @@ paths:
     patch:
       tags: [Appointments]
       operationId: updateAppointment
-      summary: Reschedule, reassign, comment on, or complete a scheduled appointment
+      summary: Edit appointment details or complete a scheduled appointment
       security: [{ bearerAuth: [] }]
       parameters:
         - name: appointmentId

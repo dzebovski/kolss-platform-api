@@ -278,9 +278,14 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.logger.Info("user update step", attrs...)
 	}
 
-	var existingRole string
+	var existingRole, existingEmail string
 	started := time.Now()
-	err = s.pool.QueryRow(ctx, `select role::text from public.profiles where id=$1`, userID).Scan(&existingRole)
+	err = s.pool.QueryRow(ctx, `
+		select p.role::text, coalesce(u.email, '')
+		from public.profiles p
+		left join auth.users u on u.id = p.id
+		where p.id=$1
+	`, userID).Scan(&existingRole, &existingEmail)
 	logStep("precheck_select", started, err)
 	if isTimeout(err) {
 		writeUpdateTimeout("precheck_select", err)
@@ -294,21 +299,15 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "super_admin_immutable", "Super admin cannot be edited here", nil)
 		return
 	}
-	authPayload := map[string]any{"email": strings.ToLower(strings.TrimSpace(req.Email)), "user_metadata": map[string]string{"display_name": strings.TrimSpace(req.DisplayName)}}
-	if req.Password != "" {
-		authPayload["password"] = req.Password
-	}
-	started = time.Now()
-	err = s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), authPayload, nil)
-	logStep("auth_admin_put", started, err)
-	if isTimeout(err) {
-		writeUpdateTimeout("auth_admin_put", err)
-		return
-	}
-	if err != nil {
-		s.writeError(w, r, http.StatusBadGateway, "auth_user_update_failed", "Could not update auth user", nil)
-		return
-	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	displayName := strings.TrimSpace(req.DisplayName)
+	emailChanged := !strings.EqualFold(email, strings.TrimSpace(existingEmail))
+	authRequired := emailChanged || req.Password != ""
+
+	// Profile role / displayName / offices live in Postgres. Do that first
+	// (same order as deactivate/reactivate) so a missing Auth Admin secret
+	// cannot block role or name edits — the failure mode seen in prod logs.
 	started = time.Now()
 	tx, err := s.pool.Begin(ctx)
 	logStep("begin", started, err)
@@ -349,7 +348,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started = time.Now()
-	_, err = tx.Exec(ctx, `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, strings.TrimSpace(req.DisplayName))
+	_, err = tx.Exec(ctx, `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, displayName)
 	logStep("update_profile", started, err)
 	if isTimeout(err) {
 		writeUpdateTimeout("update_profile", err)
@@ -383,6 +382,42 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
 		return
 	}
+
+	if authRequired {
+		authPayload := map[string]any{
+			"email":         email,
+			"user_metadata": map[string]string{"display_name": displayName},
+		}
+		if req.Password != "" {
+			authPayload["password"] = req.Password
+		}
+		started = time.Now()
+		err = s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), authPayload, nil)
+		logStep("auth_admin_put", started, err)
+		if isTimeout(err) {
+			writeUpdateTimeout("auth_admin_put", err)
+			return
+		}
+		if err != nil {
+			s.writeError(w, r, http.StatusBadGateway, "auth_user_update_failed", "Could not update auth user", nil)
+			return
+		}
+	} else if s.supabaseURL != "" && s.supabaseSecretKey != "" {
+		// Best-effort sync of display_name into Auth metadata; CRM reads profiles.
+		started = time.Now()
+		err = s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), map[string]any{
+			"user_metadata": map[string]string{"display_name": displayName},
+		}, nil)
+		logStep("auth_admin_metadata", started, err)
+		if err != nil && !isTimeout(err) {
+			s.logger.Warn("auth metadata sync skipped after profile update",
+				"error", err, "user_id", userID, "request_id", requestID(r.Context()))
+		}
+	} else {
+		s.logger.Info("auth admin skipped; profile updated in database only",
+			"user_id", userID, "request_id", requestID(r.Context()))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 

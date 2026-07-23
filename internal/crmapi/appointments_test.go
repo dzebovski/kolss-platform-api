@@ -81,6 +81,23 @@ func TestAppointmentWarnings(t *testing.T) {
 	}
 }
 
+func TestCompletedAppointmentDetailsRemainEditable(t *testing.T) {
+	comment := "Updated visit note"
+	visited := "visited"
+	if !canUpdateAppointment("visited", appointmentMutationRequest{Comment: &comment}) {
+		t.Fatal("visited appointment details should remain editable")
+	}
+	if canUpdateAppointment("visited", appointmentMutationRequest{Status: &visited}) {
+		t.Fatal("visited appointment status must remain terminal")
+	}
+	if !canUpdateAppointment("scheduled", appointmentMutationRequest{Status: &visited}) {
+		t.Fatal("scheduled appointment should allow a terminal status transition")
+	}
+	if canUpdateAppointment("rescheduled", appointmentMutationRequest{Comment: &comment}) {
+		t.Fatal("historical rescheduled appointment must remain immutable")
+	}
+}
+
 func TestAppointmentAuditQueriesCastPolymorphicJSONParameters(t *testing.T) {
 	requiredCreateCasts := []string{
 		"$4::uuid",
