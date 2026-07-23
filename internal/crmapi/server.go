@@ -110,6 +110,9 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/leads/{leadId}/delete", s.handleDeleteLead)
 			r.Post("/v1/leads/{leadId}/activities", s.handleLeadActivity)
 			r.Post("/v1/leads/{leadId}/actions/{action}", s.handleDeprecatedLeadAction)
+			r.Get("/v1/appointments", s.handleListAppointments)
+			r.Post("/v1/appointments", s.handleCreateAppointment)
+			r.Patch("/v1/appointments/{appointmentId}", s.handleUpdateAppointment)
 			r.Get("/v1/users", s.handleListUsers)
 			r.Get("/v1/managers", s.handleListManagers)
 			r.Post("/v1/users", s.handleCreateUser)
@@ -170,6 +173,8 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}/delete",
 	"/v1/leads/{leadId}/activities",
 	"/v1/leads/{leadId}/actions/{action}",
+	"/v1/appointments",
+	"/v1/appointments/{appointmentId}",
 	"/v1/users",
 	"/v1/managers",
 	"/v1/users/{userId}",

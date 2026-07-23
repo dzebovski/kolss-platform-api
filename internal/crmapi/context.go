@@ -64,7 +64,7 @@ func (s *Server) handleOffices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listActorOffices(r *http.Request, actor Actor, all bool) ([]Office, error) {
 	query := `
-		select o.id, o.code, o.name_uk, o.name_pl, o.is_active
+		select o.id, o.code, o.name_uk, o.name_pl, o.timezone_name, o.is_active
 		from public.offices o
 		where o.is_active = true
 	`
@@ -86,7 +86,14 @@ func (s *Server) listActorOffices(r *http.Request, actor Actor, all bool) ([]Off
 	offices := []Office{}
 	for rows.Next() {
 		var office Office
-		if err := rows.Scan(&office.ID, &office.Code, &office.NameUK, &office.NamePL, &office.IsActive); err != nil {
+		if err := rows.Scan(
+			&office.ID,
+			&office.Code,
+			&office.NameUK,
+			&office.NamePL,
+			&office.TimezoneName,
+			&office.IsActive,
+		); err != nil {
 			return nil, err
 		}
 		offices = append(offices, office)

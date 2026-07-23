@@ -20,7 +20,7 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "no answer", request: leadActivityRequest{Type: activityCallStatus, Status: "no_answer"}},
 		{name: "callback", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested", DueAt: &dueAt}},
 		{name: "callback requires date", request: leadActivityRequest{Type: activityCallStatus, Status: "callback_requested"}, field: "dueAt"},
-		{name: "showroom without date", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}},
+		{name: "showroom requires date", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}, field: "dueAt"},
 		{name: "showroom with date", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited", DueAt: &dueAt}},
 		{name: "calculation rejects date", request: leadActivityRequest{Type: activityClientStatus, Status: "calculation_in_progress", DueAt: &dueAt}, field: "dueAt"},
 		{name: "thinking", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking", DueAt: &dueAt}},
@@ -79,8 +79,8 @@ func TestNextClientStatusCallbackDue(t *testing.T) {
 	current := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
 	replacement := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
 
-	if got := nextClientStatusCallbackDue(&reached, &current, "showroom_invited", &replacement); got == nil || !got.Equal(replacement) {
-		t.Fatalf("dated showroom: got %v, want %v", got, replacement)
+	if got := nextClientStatusCallbackDue(&reached, &current, "showroom_invited", &replacement); got != nil {
+		t.Fatalf("showroom date must not use callback_due_at: got %v, want nil", got)
 	}
 	if got := nextClientStatusCallbackDue(&reached, &current, "showroom_invited", nil); got != nil {
 		t.Fatalf("cleared showroom: got %v, want nil", got)

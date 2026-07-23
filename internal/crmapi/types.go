@@ -38,11 +38,12 @@ func actorFromContext(ctx context.Context) (Actor, bool) {
 }
 
 type Office struct {
-	ID       uuid.UUID `json:"id"`
-	Code     string    `json:"code"`
-	NameUK   string    `json:"name_uk"`
-	NamePL   string    `json:"name_pl"`
-	IsActive bool      `json:"is_active"`
+	ID           uuid.UUID `json:"id"`
+	Code         string    `json:"code"`
+	NameUK       string    `json:"name_uk"`
+	NamePL       string    `json:"name_pl"`
+	TimezoneName string    `json:"timezone_name"`
+	IsActive     bool      `json:"is_active"`
 }
 
 type Profile struct {

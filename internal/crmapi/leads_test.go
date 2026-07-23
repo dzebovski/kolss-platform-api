@@ -151,12 +151,10 @@ func TestLeadJSONExpressionEmbedsIndependentShowroomDueDate(t *testing.T) {
 	expr := leadJSONExpression
 	for _, fragment := range []string{
 		"'showroom_due_at'",
-		"l.client_status <> 'showroom_invited'",
-		"e.event_category = 'client_status'",
-		"e.status_code = 'showroom_invited'",
-		"jsonb_typeof(e.new_value->'callback_due_at') = 'string'",
-		"e.new_value->>'callback_due_at'",
-		"order by e.created_at desc",
+		"from public.lead_showroom_visits v",
+		"v.lead_id = l.id",
+		"v.status = 'scheduled'",
+		"order by v.scheduled_at desc",
 	} {
 		if !strings.Contains(expr, fragment) {
 			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)

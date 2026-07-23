@@ -103,22 +103,14 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		)),
-		'showroom_due_at', case
-			when l.client_status <> 'showroom_invited' then null
-			else (
-				select case
-					when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-						then e.new_value->>'callback_due_at'
-					else null
-				end
-				from public.lead_events e
-				where e.lead_id = l.id
-					and e.event_category = 'client_status'
-					and e.status_code = 'showroom_invited'
-				order by e.created_at desc
-				limit 1
-			)
-		end,
+		'showroom_due_at', (
+			select v.scheduled_at
+			from public.lead_showroom_visits v
+			where v.lead_id = l.id
+				and v.status = 'scheduled'
+			order by v.scheduled_at desc, v.created_at desc
+			limit 1
+		),
 		'latest_timeline_comment', (
 			select jsonb_build_object(
 				'comment', e.comment,
@@ -759,6 +751,21 @@ func (s *Server) handleArchiveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var activeAppointmentExists bool
+	if err := tx.QueryRow(r.Context(), `
+		select exists(
+		  select 1
+		  from public.lead_showroom_visits
+		  where lead_id=$1 and status='scheduled'
+		)
+	`, leadID).Scan(&activeAppointmentExists); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "archive_failed", "Could not archive lead", nil)
+		return
+	}
+	if activeAppointmentExists {
+		s.writeError(w, r, http.StatusConflict, "active_appointment_exists", "Cancel the scheduled appointment before archiving this lead", nil)
+		return
+	}
 	var changed bool
 	err = tx.QueryRow(r.Context(), `with changed as (update public.leads set archived_at=now(),archived_by=$2,version=version+1,updated_at=now() where id=$1 and archived_at is null returning 1) select exists(select 1 from changed)`, leadID, actor.ID).Scan(&changed)
 	if err == nil && changed {

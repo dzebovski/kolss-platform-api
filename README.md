@@ -25,7 +25,7 @@ Health endpoints are `GET /health/live` and `GET /health/ready`.
 
 ## Contract, migrations, and Meta setup
 
-- OpenAPI 2.4: [`api/openapi.yaml`](./api/openapi.yaml)
+- OpenAPI 2.6: [`api/openapi.yaml`](./api/openapi.yaml)
 - Canonical Supabase migrations: [`supabase/migrations`](./supabase/migrations)
 - Meta App setup and cutover: [`docs/META-LEAD-ADS-SETUP.md`](./docs/META-LEAD-ADS-SETUP.md)
 - Manual browser grant revocation: [`deploy/post-cutover-revoke-browser-data.sql`](./deploy/post-cutover-revoke-browser-data.sql)

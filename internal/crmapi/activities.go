@@ -220,6 +220,9 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 	case activityClientStatus:
 		switch req.Status {
 		case "showroom_invited":
+			if req.DueAt == nil {
+				fields["dueAt"] = "Required for showroom appointment"
+			}
 			reject("reason", req.Reason)
 			reject("comment", req.Comment)
 			reject("contractNumber", req.ContractNumber)
@@ -357,8 +360,31 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		newValue["client_status"] = req.Status
 		clientStatus = req.Status
 		changeClient = true
-		if req.Status == "thinking" || req.Status == "showroom_invited" {
+		if req.Status == "thinking" {
 			newValue["callback_due_at"] = req.DueAt
+		}
+		if req.Status == "showroom_invited" {
+			managerID := actor.ID
+			if assignedTo != nil {
+				managerID = *assignedTo
+			}
+			appointmentID, actualManagerID, err := scheduleLegacyAppointment(
+				r,
+				tx,
+				leadID,
+				lead.OfficeID,
+				actor.ID,
+				managerID,
+				*req.DueAt,
+			)
+			if err != nil {
+				return err
+			}
+			assignedTo = &actualManagerID
+			newValue["appointment_id"] = appointmentID
+			newValue["starts_at"] = req.DueAt.UTC()
+			newValue["ends_at"] = req.DueAt.UTC().Add(time.Hour)
+			newValue["responsible_manager_id"] = actualManagerID
 		}
 		callbackDueAt = nextClientStatusCallbackDue(
 			lead.CallStatus,
@@ -437,9 +463,6 @@ func nextClientStatusCallbackDue(
 	requested *time.Time,
 ) *time.Time {
 	if clientStatus == "thinking" {
-		return requested
-	}
-	if clientStatus == "showroom_invited" && requested != nil {
 		return requested
 	}
 	if callStatus != nil && *callStatus == "callback_requested" {
