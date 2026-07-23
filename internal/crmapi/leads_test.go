@@ -11,6 +11,12 @@ import (
 
 func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) {
 	expr := leadJSONExpression
+	firstAttemptStart := strings.Index(expr, "'first_contact_attempt'")
+	callStatusActorStart := strings.Index(expr, "'call_status_actor'")
+	if firstAttemptStart < 0 || callStatusActorStart <= firstAttemptStart {
+		t.Fatal("first_contact_attempt expression boundaries not found")
+	}
+	firstAttemptExpr := expr[firstAttemptStart:callStatusActorStart]
 
 	for _, fragment := range []string{
 		"'first_contact_attempt'",
@@ -23,13 +29,87 @@ func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) 
 		"'created_at', a.created_at",
 		"'manager_id', a.manager_id",
 	} {
+		if !strings.Contains(firstAttemptExpr, fragment) {
+			t.Fatalf("first_contact_attempt expression missing %q\n%s", fragment, firstAttemptExpr)
+		}
+	}
+
+	if strings.Contains(firstAttemptExpr, "order by a.created_at desc") {
+		t.Fatal("first_contact_attempt must use chronological first attempt (asc), not latest (desc)")
+	}
+}
+
+func TestLeadJSONExpressionEmbedsCurrentCallStatusActor(t *testing.T) {
+	expr := leadJSONExpression
+	for _, fragment := range []string{
+		"'call_status_actor'",
+		"when l.call_status is null then null",
+		"from public.lead_events e",
+		"join public.profiles p on p.id = e.actor_id",
+		"e.event_category = 'call_status'",
+		"e.status_code = l.call_status",
+		"'actor_id', e.actor_id",
+		"'actor_name', p.display_name",
+		"order by e.created_at desc",
+		"from public.lead_contact_attempts a",
+		"join public.profiles p on p.id = a.manager_id",
+		"'actor_id', a.manager_id",
+		"'actor_name', p.display_name",
+		"when 'cannot_talk' then 'callback_requested'",
+		"end = l.call_status",
+		"order by a.created_at desc",
+	} {
 		if !strings.Contains(expr, fragment) {
 			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
 		}
 	}
+}
 
-	if strings.Contains(expr, "order by a.created_at desc") {
-		t.Fatal("first_contact_attempt must use chronological first attempt (asc), not latest (desc)")
+func TestCallStatusActorListJSONShape(t *testing.T) {
+	actorID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	raw, err := json.Marshal(map[string]any{
+		"items": []any{
+			map[string]any{
+				"id": "22222222-2222-2222-2222-222222222222",
+				"call_status_actor": map[string]any{
+					"actor_id":   actorID.String(),
+					"actor_name": "Kyiv Manager",
+				},
+			},
+			map[string]any{
+				"id":                "33333333-3333-3333-3333-333333333333",
+				"call_status_actor": nil,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded struct {
+		Items []struct {
+			ID              string `json:"id"`
+			CallStatusActor *struct {
+				ActorID   uuid.UUID `json:"actor_id"`
+				ActorName string    `json:"actor_name"`
+			} `json:"call_status_actor"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Items) != 2 {
+		t.Fatalf("items=%d", len(decoded.Items))
+	}
+	if decoded.Items[0].CallStatusActor == nil {
+		t.Fatal("lead with call status actor decoded as nil")
+	}
+	if decoded.Items[0].CallStatusActor.ActorID != actorID ||
+		decoded.Items[0].CallStatusActor.ActorName != "Kyiv Manager" {
+		t.Fatalf("unexpected call status actor: %#v", decoded.Items[0].CallStatusActor)
+	}
+	if decoded.Items[1].CallStatusActor != nil {
+		t.Fatalf("lead without call status actor: want nil, got %#v", decoded.Items[1].CallStatusActor)
 	}
 }
 

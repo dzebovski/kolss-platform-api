@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.4.0
+  version: 2.5.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -634,6 +634,13 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/CallStatus'
         call_status_changed_at: { type: [string, 'null'], format: date-time }
+        call_status_actor:
+          description: >
+            Manager who recorded the current call status. Null when no call status is recorded
+            or the author cannot be determined.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadCallStatusActor'
         client_status: { $ref: '#/components/schemas/ClientStatus' }
         client_status_changed_at: { type: string, format: date-time }
         version: { type: integer, minimum: 1 }
@@ -675,6 +682,13 @@ components:
     CallStatus:
       type: string
       enum: [reached, no_answer, callback_requested]
+    LeadCallStatusActor:
+      type: object
+      additionalProperties: false
+      required: [actor_id, actor_name]
+      properties:
+        actor_id: { type: string, format: uuid }
+        actor_name: { type: string, minLength: 1 }
     ClientStatus:
       type: string
       enum: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]

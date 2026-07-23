@@ -82,3 +82,31 @@ go build -o /tmp/kolss-platform-api ./cmd/api
 ```
 
 The explicit output path avoids colliding with the repository's `api/` OpenAPI directory.
+
+## One-off Biuro Leads Status import
+
+Build the importer separately from the API:
+
+```bash
+go build -o /tmp/import-biuro-leads ./cmd/import-biuro-leads
+```
+
+Export `Sheet1` as CSV and stream it directly to stdin. Run a read-only dry-run
+first and retain its `sourceSha256`:
+
+```bash
+export DATABASE_URL='postgresql://...'
+drive-export-command | /tmp/import-biuro-leads --mode dry-run --input -
+```
+
+Apply only the unchanged snapshot by passing the dry-run hash:
+
+```bash
+drive-export-command | /tmp/import-biuro-leads \
+  --mode apply \
+  --input - \
+  --expected-sha256 '<dry-run sourceSha256>'
+```
+
+The apply runs in one database transaction. The CSV must not be committed or
+written to repository files.

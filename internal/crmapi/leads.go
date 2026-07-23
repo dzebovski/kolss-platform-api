@@ -32,6 +32,41 @@ const leadJSONExpression = `
 			order by a.created_at asc
 			limit 1
 		),
+		'call_status_actor', case
+			when l.call_status is null then null
+			else coalesce((
+				select jsonb_build_object(
+					'actor_id', e.actor_id,
+					'actor_name', p.display_name
+				)
+				from public.lead_events e
+				join public.profiles p on p.id = e.actor_id
+				where e.lead_id = l.id
+					and e.event_category = 'call_status'
+					and e.status_code = l.call_status
+					and btrim(coalesce(p.display_name, '')) <> ''
+				order by e.created_at desc
+				limit 1
+			), (
+				select jsonb_build_object(
+					'actor_id', a.manager_id,
+					'actor_name', p.display_name
+				)
+				from public.lead_contact_attempts a
+				join public.profiles p on p.id = a.manager_id
+				where a.lead_id = l.id
+					and case a.result
+						when 'reached' then 'reached'
+						when 'no_answer' then 'no_answer'
+						when 'cannot_talk' then 'callback_requested'
+						when 'bad_lead' then 'reached'
+						else null
+					end = l.call_status
+					and btrim(coalesce(p.display_name, '')) <> ''
+				order by a.created_at desc
+				limit 1
+			))
+		end,
 		'reactivated_at', (
 			select e.created_at
 			from public.lead_events e
