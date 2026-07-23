@@ -102,6 +102,59 @@ const appointmentSelect = `
 	left join public.profiles p on p.id = v.responsible_manager_id
 `
 
+const appointmentScheduledEventInsert = `
+	insert into public.lead_events (
+	  lead_id,
+	  actor_id,
+	  event_type,
+	  event_category,
+	  status_code,
+	  comment,
+	  new_value
+	)
+	values (
+	  $1,$2,'appointment_scheduled','client_status','showroom_invited',$3,
+	  jsonb_build_object(
+	    'appointment_id',$4::uuid,
+	    'starts_at',$5::timestamptz,
+	    'ends_at',$6::timestamptz,
+	    'responsible_manager_id',$7::uuid
+	  )
+	)
+`
+
+const appointmentChangedEventInsert = `
+	insert into public.lead_events (
+	  lead_id,
+	  actor_id,
+	  event_type,
+	  event_category,
+	  status_code,
+	  comment,
+	  old_value,
+	  new_value
+	)
+	values (
+	  $1,$2,$3,'system',$4,$5,
+	  jsonb_build_object(
+	    'appointment_id',$6::uuid,
+	    'starts_at',$7::timestamptz,
+	    'ends_at',$8::timestamptz,
+	    'responsible_manager_id',$9::uuid,
+	    'status',$10::text,
+	    'comment',$11::text
+	  ),
+	  jsonb_build_object(
+	    'appointment_id',$6::uuid,
+	    'starts_at',$12::timestamptz,
+	    'ends_at',$13::timestamptz,
+	    'responsible_manager_id',$14::uuid,
+	    'status',$4::text,
+	    'comment',$5::text
+	  )
+	)
+`
+
 func (s *Server) handleListAppointments(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
 	officeID, err := uuid.Parse(strings.TrimSpace(r.URL.Query().Get("officeId")))
@@ -406,26 +459,17 @@ func (s *Server) createAppointment(
 	`, req.LeadID, nextAssignee); err != nil {
 		return appointment{}, err
 	}
-	if _, err := tx.Exec(r.Context(), `
-		insert into public.lead_events (
-		  lead_id,
-		  actor_id,
-		  event_type,
-		  event_category,
-		  status_code,
-		  comment,
-		  new_value
-		)
-		values (
-		  $1,$2,'appointment_scheduled','client_status','showroom_invited',$3,
-		  jsonb_build_object(
-		    'appointment_id',$4,
-		    'starts_at',$5,
-		    'ends_at',$6,
-		    'responsible_manager_id',$7
-		  )
-		)
-	`, req.LeadID, actor.ID, cleanOptional(req.Comment), appointmentID, startsAt, endsAt, *req.ResponsibleManagerID); err != nil {
+	if _, err := tx.Exec(
+		r.Context(),
+		appointmentScheduledEventInsert,
+		req.LeadID,
+		actor.ID,
+		cleanOptional(req.Comment),
+		appointmentID,
+		startsAt,
+		endsAt,
+		*req.ResponsibleManagerID,
+	); err != nil {
 		return appointment{}, err
 	}
 	return loadAppointmentTx(r, tx, appointmentID)
@@ -546,37 +590,8 @@ func (s *Server) updateAppointment(
 	} else if !nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd) || !sameUUID(nextManager, currentManager) {
 		eventType = "appointment_rescheduled"
 	}
-	if _, err := tx.Exec(r.Context(), `
-		insert into public.lead_events (
-		  lead_id,
-		  actor_id,
-		  event_type,
-		  event_category,
-		  status_code,
-		  comment,
-		  old_value,
-		  new_value
-		)
-		values (
-		  $1,$2,$3,'system',$4,$5,
-		  jsonb_build_object(
-		    'appointment_id',$6,
-		    'starts_at',$7,
-		    'ends_at',$8,
-		    'responsible_manager_id',$9,
-		    'status',$10,
-		    'comment',$11
-		  ),
-		  jsonb_build_object(
-		    'appointment_id',$6,
-		    'starts_at',$12,
-		    'ends_at',$13,
-		    'responsible_manager_id',$14,
-		    'status',$4,
-		    'comment',$5
-		  )
-		)
-	`, leadID, actor.ID, eventType, nextStatus, nextComment, appointmentID,
+	if _, err := tx.Exec(r.Context(), appointmentChangedEventInsert,
+		leadID, actor.ID, eventType, nextStatus, nextComment, appointmentID,
 		currentStart, currentEnd, currentManager, currentStatus, currentComment,
 		nextStart, nextEnd, nextManager,
 	); err != nil {
@@ -609,6 +624,12 @@ func (s *Server) writeAppointmentMutationError(
 	case strings.HasPrefix(err.Error(), "starts_at_local:"):
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid local appointment time", map[string]string{"startsAtLocal": "Time does not exist in the office timezone"})
 	default:
+		s.logger.Error(
+			"appointment mutation failed",
+			"error", err,
+			"code", fallbackCode,
+			"request_id", requestID(r.Context()),
+		)
 		s.writeError(w, r, http.StatusInternalServerError, fallbackCode, "Could not save appointment", nil)
 	}
 }

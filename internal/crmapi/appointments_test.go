@@ -1,6 +1,7 @@
 package crmapi
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,36 @@ func TestAppointmentWarnings(t *testing.T) {
 	got := appointmentWarnings(true, true)
 	if len(got) != 2 || got[0] != "manager_overlap" || got[1] != "outside_working_hours" {
 		t.Fatalf("unexpected warnings: %#v", got)
+	}
+}
+
+func TestAppointmentAuditQueriesCastPolymorphicJSONParameters(t *testing.T) {
+	requiredCreateCasts := []string{
+		"$4::uuid",
+		"$5::timestamptz",
+		"$6::timestamptz",
+		"$7::uuid",
+	}
+	for _, cast := range requiredCreateCasts {
+		if !strings.Contains(appointmentScheduledEventInsert, cast) {
+			t.Fatalf("scheduled event query must contain %s", cast)
+		}
+	}
+
+	requiredUpdateCasts := []string{
+		"$6::uuid",
+		"$7::timestamptz",
+		"$8::timestamptz",
+		"$9::uuid",
+		"$10::text",
+		"$11::text",
+		"$12::timestamptz",
+		"$13::timestamptz",
+		"$14::uuid",
+	}
+	for _, cast := range requiredUpdateCasts {
+		if !strings.Contains(appointmentChangedEventInsert, cast) {
+			t.Fatalf("changed event query must contain %s", cast)
+		}
 	}
 }

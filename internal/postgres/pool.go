@@ -36,7 +36,16 @@ func poolConfig(databaseURL string) (*pgxpool.Config, error) {
 	// Supabase transaction poolers may reuse a server connection across clients.
 	// Cache query descriptions locally, but do not create server-side prepared statements.
 	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeCacheDescribe
-	cfg.MaxConns = 5
+	// Fail fast on row locks / slow statements instead of hanging until the
+	// ingress gateway returns an opaque 504 (seen on PATCH /v1/users/{id}).
+	if cfg.ConnConfig.RuntimeParams == nil {
+		cfg.ConnConfig.RuntimeParams = map[string]string{}
+	}
+	cfg.ConnConfig.RuntimeParams["lock_timeout"] = "5s"
+	cfg.ConnConfig.RuntimeParams["statement_timeout"] = "20s"
+	// Background workers (notifications, Meta reconciliation) share this pool
+	// with request handlers; keep a small headroom beyond the previous MaxConns=5.
+	cfg.MaxConns = 10
 	cfg.MinConns = 1
 	cfg.MaxConnLifetime = time.Hour
 	cfg.HealthCheckPeriod = 30 * time.Second

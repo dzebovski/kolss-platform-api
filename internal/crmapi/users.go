@@ -204,7 +204,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.Exec(r.Context(), `insert into public.profiles (id,role,display_name,is_active,deactivated_at) values ($1,$2,$3,true,null) on conflict (id) do update set role=excluded.role,display_name=excluded.display_name,is_active=true,deactivated_at=null`, created.ID, req.Role, strings.TrimSpace(req.DisplayName))
 	}
 	if err == nil {
-		err = replaceMemberships(r, tx, created.ID, req.OfficeIDs)
+		err = replaceMemberships(r.Context(), tx, created.ID, req.OfficeIDs)
 	}
 	if err == nil {
 		err = tx.Commit(r.Context())
@@ -223,6 +223,11 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSuperAdmin(w, r) {
 		return
 	}
+	// Bound the whole update so a stuck Auth Admin call or DB lock cannot
+	// hang until the ingress gateway returns an opaque 504.
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	r = r.WithContext(ctx)
 	actor, _ := actorFromContext(r.Context())
 	userID, err := uuid.Parse(r.PathValue("userId"))
 	var req userMutationRequest
@@ -234,8 +239,54 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid user data", fields)
 		return
 	}
+
+	writeUpdateTimeout := func(step string, stepErr error) {
+		s.logger.Error("user update timed out",
+			"step", step,
+			"error", stepErr,
+			"user_id", userID,
+			"request_id", requestID(r.Context()),
+		)
+		s.writeError(w, r, http.StatusGatewayTimeout, "user_update_timeout", "User update timed out", nil)
+	}
+	isTimeout := func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			return true
+		}
+		// Postgres lock_timeout / statement_timeout surface as SQLSTATE errors
+		// rather than context cancellation when RuntimeParams are set on the pool.
+		var msg = strings.ToLower(err.Error())
+		return strings.Contains(msg, "lock timeout") ||
+			strings.Contains(msg, "statement timeout") ||
+			strings.Contains(msg, "canceling statement due to")
+	}
+	logStep := func(step string, started time.Time, stepErr error) {
+		attrs := []any{
+			"step", step,
+			"duration_ms", time.Since(started).Milliseconds(),
+			"user_id", userID,
+			"request_id", requestID(r.Context()),
+		}
+		if stepErr != nil {
+			attrs = append(attrs, "error", stepErr)
+			s.logger.Error("user update step failed", attrs...)
+			return
+		}
+		s.logger.Info("user update step", attrs...)
+	}
+
 	var existingRole string
-	if err := s.pool.QueryRow(r.Context(), `select role::text from public.profiles where id=$1`, userID).Scan(&existingRole); err != nil {
+	started := time.Now()
+	err = s.pool.QueryRow(ctx, `select role::text from public.profiles where id=$1`, userID).Scan(&existingRole)
+	logStep("precheck_select", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("precheck_select", err)
+		return
+	}
+	if err != nil {
 		s.writeError(w, r, http.StatusNotFound, "user_not_found", "User not found", nil)
 		return
 	}
@@ -247,25 +298,86 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	if req.Password != "" {
 		authPayload["password"] = req.Password
 	}
-	if err := s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), authPayload, nil); err != nil {
+	started = time.Now()
+	err = s.authAdmin(r, http.MethodPut, "/auth/v1/admin/users/"+userID.String(), authPayload, nil)
+	logStep("auth_admin_put", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("auth_admin_put", err)
+		return
+	}
+	if err != nil {
 		s.writeError(w, r, http.StatusBadGateway, "auth_user_update_failed", "Could not update auth user", nil)
 		return
 	}
-	tx, err := s.pool.Begin(r.Context())
-	if err == nil {
-		defer tx.Rollback(r.Context())
+	started = time.Now()
+	tx, err := s.pool.Begin(ctx)
+	logStep("begin", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("begin", err)
+		return
 	}
-	if err == nil {
-		err = setLocalActor(r.Context(), tx, actor.ID)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
 	}
-	if err == nil {
-		_, err = tx.Exec(r.Context(), `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, strings.TrimSpace(req.DisplayName))
+	defer tx.Rollback(ctx)
+
+	// Transaction-pooler (Supabase) may ignore connection RuntimeParams; pin
+	// timeouts on this transaction so a lock cannot hang until gateway 504.
+	started = time.Now()
+	_, err = tx.Exec(ctx, `select set_config('lock_timeout', '5s', true), set_config('statement_timeout', '20s', true)`)
+	logStep("set_tx_timeouts", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("set_tx_timeouts", err)
+		return
 	}
-	if err == nil {
-		err = replaceMemberships(r, tx, userID, req.OfficeIDs)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
 	}
-	if err == nil {
-		err = tx.Commit(r.Context())
+
+	started = time.Now()
+	err = setLocalActor(ctx, tx, actor.ID)
+	logStep("set_local_actor", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("set_local_actor", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
+	}
+
+	started = time.Now()
+	_, err = tx.Exec(ctx, `update public.profiles set role=$2,display_name=$3,updated_at=now() where id=$1`, userID, req.Role, strings.TrimSpace(req.DisplayName))
+	logStep("update_profile", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("update_profile", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
+	}
+
+	started = time.Now()
+	err = replaceMemberships(ctx, tx, userID, req.OfficeIDs)
+	logStep("replace_memberships", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("replace_memberships", err)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
+		return
+	}
+
+	started = time.Now()
+	err = tx.Commit(ctx)
+	logStep("commit", started, err)
+	if isTimeout(err) {
+		writeUpdateTimeout("commit", err)
+		return
 	}
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "user_update_failed", "Could not update user profile", nil)
@@ -430,12 +542,12 @@ func validateUserMutation(req userMutationRequest, requirePassword bool) map[str
 	return fields
 }
 
-func replaceMemberships(r *http.Request, tx pgx.Tx, userID uuid.UUID, officeIDs []uuid.UUID) error {
-	if _, err := tx.Exec(r.Context(), `delete from public.user_office_memberships where user_id=$1`, userID); err != nil {
+func replaceMemberships(ctx context.Context, tx pgx.Tx, userID uuid.UUID, officeIDs []uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `delete from public.user_office_memberships where user_id=$1`, userID); err != nil {
 		return err
 	}
 	for _, officeID := range officeIDs {
-		if _, err := tx.Exec(r.Context(), `insert into public.user_office_memberships (user_id,office_id) values ($1,$2)`, userID, officeID); err != nil {
+		if _, err := tx.Exec(ctx, `insert into public.user_office_memberships (user_id,office_id) values ($1,$2)`, userID, officeID); err != nil {
 			return err
 		}
 	}
@@ -463,7 +575,11 @@ func (s *Server) authAdmin(r *http.Request, method, path string, payload any, ou
 		}
 		body = bytes.NewReader(raw)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), method, s.supabaseURL+path, body)
+	// Honor the caller's context deadline (e.g. handleUpdateUser's 25s budget)
+	// and keep a hard ceiling so Auth Admin cannot hang unbounded.
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, s.supabaseURL+path, body)
 	if err != nil {
 		return err
 	}
