@@ -2,12 +2,79 @@ package crmapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+func TestClientStatusFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	tests := []struct {
+		name    string
+		raw     string
+		wantOK  bool
+		wantSQL []string
+	}{
+		{
+			name:   "new lead only without call",
+			raw:    "new_lead",
+			wantOK: true,
+			wantSQL: []string{
+				`l.client_status = "new_lead"`,
+				"l.call_status is null",
+			},
+		},
+		{
+			name:   "in progress new lead with call",
+			raw:    "in_work",
+			wantOK: true,
+			wantSQL: []string{
+				`l.client_status = "new_lead"`,
+				"l.call_status is not null",
+			},
+		},
+		{
+			name:    "exact client status",
+			raw:     "thinking",
+			wantOK:  true,
+			wantSQL: []string{`l.client_status = "thinking"`},
+		},
+		{
+			name:   "unknown status",
+			raw:    "taken",
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := clientStatusFilterWhere(test.raw, addArg)
+			if ok != test.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
+			}
+			if !test.wantOK {
+				if got != nil {
+					t.Fatalf("clauses=%v, want nil", got)
+				}
+				return
+			}
+			if len(got) != len(test.wantSQL) {
+				t.Fatalf("clauses=%v, want %v", got, test.wantSQL)
+			}
+			for i := range got {
+				if got[i] != test.wantSQL[i] {
+					t.Fatalf("clause[%d]=%q, want %q", i, got[i], test.wantSQL[i])
+				}
+			}
+		})
+	}
+}
 
 func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) {
 	expr := leadJSONExpression

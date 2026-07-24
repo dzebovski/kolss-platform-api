@@ -223,6 +223,27 @@ func decodeLeadCursor(raw string) (leadCursor, error) {
 	return leadCursor{CreatedAt: createdAt, ID: id}, nil
 }
 
+// clientStatusFilterWhere maps list filter values to SQL clauses.
+// new_lead means truly new (no call yet); in_work is new_lead with a recorded call.
+func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
+	switch raw {
+	case "new_lead":
+		return []string{
+			"l.client_status = " + addArg("new_lead"),
+			"l.call_status is null",
+		}, true
+	case "in_work":
+		return []string{
+			"l.client_status = " + addArg("new_lead"),
+			"l.call_status is not null",
+		}, true
+	case "showroom_invited", "calculation_in_progress", "thinking", "closed_lost", "contract_signed":
+		return []string{"l.client_status = " + addArg(raw)}, true
+	default:
+		return nil, false
+	}
+}
+
 func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
 	limit := 50
@@ -275,22 +296,21 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 			where = append(where, filter.column+" = "+addArg(raw))
 		}
 	}
-	statusFilters := []struct {
-		query   string
-		column  string
-		allowed map[string]bool
-	}{
-		{"callStatus", "l.call_status", map[string]bool{"reached": true, "no_answer": true, "callback_requested": true}},
-		{"clientStatus", "l.client_status", map[string]bool{"new_lead": true, "showroom_invited": true, "calculation_in_progress": true, "thinking": true, "closed_lost": true, "contract_signed": true}},
-	}
-	for _, filter := range statusFilters {
-		if raw := strings.TrimSpace(r.URL.Query().Get(filter.query)); raw != "" {
-			if !filter.allowed[raw] {
-				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{filter.query: "Unknown status"})
-				return
-			}
-			where = append(where, filter.column+" = "+addArg(raw))
+	if raw := strings.TrimSpace(r.URL.Query().Get("callStatus")); raw != "" {
+		allowed := map[string]bool{"reached": true, "no_answer": true, "callback_requested": true}
+		if !allowed[raw] {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
+			return
 		}
+		where = append(where, "l.call_status = "+addArg(raw))
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("clientStatus")); raw != "" {
+		clauses, ok := clientStatusFilterWhere(raw, addArg)
+		if !ok {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"clientStatus": "Unknown status"})
+			return
+		}
+		where = append(where, clauses...)
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		value := "%" + search + "%"

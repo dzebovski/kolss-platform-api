@@ -258,14 +258,12 @@ const attentionLeadsQuery = `
 	  l.call_status,
 	  case
 	    when l.call_status is distinct from 'callback_requested' then null
-	    when active_call.found then active_call.due_at
-	    else l.callback_due_at
+	    else coalesce(active_call.due_at, l.callback_due_at)
 	  end as callback_due_at
 	from public.leads l
 	join public.offices o on o.id = l.office_id
 	left join lateral (
 	  select
-	    true as found,
 	    case
 	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
 	        then (e.new_value->>'callback_due_at')::timestamptz
@@ -299,12 +297,10 @@ const reminderLeadCandidatesQuery = `
 	  l.call_status,
 	  case
 	    when l.call_status is distinct from 'callback_requested' then null
-	    when active_call.found then active_call.due_at
-	    else l.callback_due_at
+	    else coalesce(active_call.due_at, l.callback_due_at)
 	  end as call_due_at,
 	  case
-	    when l.client_status = 'thinking' and active_client.found then active_client.due_at
-	    when l.client_status = 'thinking' then l.callback_due_at
+	    when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)
 	    when l.client_status = 'showroom_invited' then active_client.due_at
 	    else null
 	  end as client_due_at,
@@ -313,7 +309,6 @@ const reminderLeadCandidatesQuery = `
 	join public.offices o on o.id = l.office_id
 	left join lateral (
 	  select
-	    true as found,
 	    case
 	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
 	        then (e.new_value->>'callback_due_at')::timestamptz
@@ -328,7 +323,6 @@ const reminderLeadCandidatesQuery = `
 	) active_call on l.call_status = 'callback_requested'
 	left join lateral (
 	  select
-	    true as found,
 	    case
 	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
 	        then (e.new_value->>'callback_due_at')::timestamptz

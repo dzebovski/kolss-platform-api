@@ -61,7 +61,17 @@ in Europe/Warsaw) are delivered only to Slack.
 
 Kyiv receives the morning report on Telegram; Warsaw receives it on Slack. Both
 use the same local hour (`DAILY_REPORT_HOUR_LOCAL`, default 9) and skip Sundays.
-Leads with a future `callback_due_at` are excluded until that calendar day.
+
+Lead selection (non-archived, not `closed_lost` / `contract_signed`):
+
+1. **Reminders** — any due date today or overdue in the office timezone
+   (`callback_requested`, `thinking`, `showroom_invited`, or latest comment).
+2. **New** — `call_status` is null.
+3. **No answer** — `call_status = no_answer`.
+4. **Callback** — `callback_requested` **without** a due date.
+
+Dated `callback_requested` leads appear only under reminders (not the callback
+section). Future due dates are excluded until that local calendar day.
 
 Set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without `/crm/leads/:id`.
 

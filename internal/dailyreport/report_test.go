@@ -30,6 +30,119 @@ func warsawLoc(t *testing.T) *time.Location {
 	return loc
 }
 
+func TestAttentionLeadsQuerySelectionContract(t *testing.T) {
+	query := attentionLeadsQuery
+	for _, fragment := range []string{
+		"l.call_status is null or l.call_status in ('no_answer','callback_requested')",
+		"l.client_status not in ('closed_lost','contract_signed')",
+		"else coalesce(active_call.due_at, l.callback_due_at)",
+		"coalesce(active_call.due_at, l.callback_due_at) is null",
+		"(coalesce(active_call.due_at, l.callback_due_at) at time zone $2)::date <=",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("attention query missing %q\n%s", fragment, query)
+		}
+	}
+	if strings.Contains(query, "when active_call.found then") {
+		t.Fatal("attention callback due must coalesce event+column, not gate on found")
+	}
+}
+
+func TestReminderCandidatesQueryFallsBackToColumnDueAt(t *testing.T) {
+	query := reminderLeadCandidatesQuery
+	for _, fragment := range []string{
+		"else coalesce(active_call.due_at, l.callback_due_at)",
+		"when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)",
+		"when l.client_status = 'showroom_invited' then active_client.due_at",
+		"latest_comment.due_at as comment_due_at",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("reminder query missing %q\n%s", fragment, query)
+		}
+	}
+	if strings.Contains(query, "when active_call.found then") || strings.Contains(query, "and active_client.found then") {
+		t.Fatal("reminder dues must coalesce event+column, not gate on found")
+	}
+}
+
+func TestGroupAttentionBySectionSelectionContract(t *testing.T) {
+	due := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	leads := []reportLead{
+		{ID: uuid.MustParse("11111111-1111-1111-1111-111111111111"), Name: "New", CallStatus: nil},
+		{ID: uuid.MustParse("22222222-2222-2222-2222-222222222222"), Name: "NoAnswer", CallStatus: strptr("no_answer")},
+		{ID: uuid.MustParse("33333333-3333-3333-3333-333333333333"), Name: "Undated", CallStatus: strptr("callback_requested")},
+		{ID: uuid.MustParse("44444444-4444-4444-4444-444444444444"), Name: "Dated", CallStatus: strptr("callback_requested"), CallbackDueAt: timeptr(due)},
+	}
+
+	sections := groupAttentionBySection(leads, "new", "no_answer", "callback")
+	if len(sections) != 3 {
+		t.Fatalf("expected 3 sections, got %d", len(sections))
+	}
+	if got := names(sections[0].leads); len(got) != 1 || got[0] != "New" {
+		t.Fatalf("new section = %v, want [New]", got)
+	}
+	if got := names(sections[1].leads); len(got) != 1 || got[0] != "NoAnswer" {
+		t.Fatalf("no_answer section = %v, want [NoAnswer]", got)
+	}
+	if got := names(sections[2].leads); len(got) != 1 || got[0] != "Undated" {
+		t.Fatalf("callback section = %v, want [Undated] (dated callbacks belong in reminders)", got)
+	}
+}
+
+func TestBuildReportSectionsPutsDatedCallbackOnlyInReminders(t *testing.T) {
+	due := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	dated := reportLead{
+		ID:            uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+		Name:          "Dated",
+		CallStatus:    strptr("callback_requested"),
+		CallbackDueAt: timeptr(due),
+	}
+	undated := reportLead{
+		ID:         uuid.MustParse("bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"),
+		Name:       "Undated",
+		CallStatus: strptr("callback_requested"),
+	}
+	sections := buildReportSections(
+		[]reportLead{dated, undated},
+		[]reportLead{dated},
+		"reminders", "new", "no_answer", "callback",
+	)
+	if len(sections) != 4 {
+		t.Fatalf("expected 4 sections, got %d", len(sections))
+	}
+	if sections[0].header != "reminders" || !sections[0].withDueDate {
+		t.Fatalf("first section must be dated reminders, got %+v", sections[0])
+	}
+	if got := names(sections[0].leads); len(got) != 1 || got[0] != "Dated" {
+		t.Fatalf("reminders = %v, want [Dated]", got)
+	}
+	if got := names(sections[3].leads); len(got) != 1 || got[0] != "Undated" {
+		t.Fatalf("callback section = %v, want [Undated]", got)
+	}
+	for _, section := range sections[1:] {
+		if namesContain(section.leads, "Dated") {
+			t.Fatalf("dated callback must not appear outside reminders, found in %q", section.header)
+		}
+	}
+}
+
+func names(leads []reportLead) []string {
+	out := make([]string, 0, len(leads))
+	for _, lead := range leads {
+		out = append(out, lead.Name)
+	}
+	return out
+}
+
+func namesContain(leads []reportLead, name string) bool {
+	for _, lead := range leads {
+		if lead.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestReminderCandidatesSelectLatestExplicitCommentBeforeItsOptionalDate(t *testing.T) {
 	query := reminderLeadCandidatesQuery
 	commentJoin := strings.LastIndex(query, "left join lateral")
