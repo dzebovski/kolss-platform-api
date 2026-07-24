@@ -29,6 +29,10 @@ func (a Actor) CanAccessOffice(id uuid.UUID) bool {
 }
 
 func (a Actor) CanEditLead(id uuid.UUID) bool {
+	return a.CanAccessOffice(id)
+}
+
+func (a Actor) CanArchiveLead(id uuid.UUID) bool {
 	return a.IsSuperAdmin() || (a.Role == "office_admin" && a.CanAccessOffice(id))
 }
 

@@ -613,7 +613,8 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var officeID uuid.UUID
-	if err := s.pool.QueryRow(r.Context(), `select office_id from public.leads where id=$1 and archived_at is null`, leadID).Scan(&officeID); err != nil {
+	var currentAssignedTo *uuid.UUID
+	if err := s.pool.QueryRow(r.Context(), `select office_id, assigned_to from public.leads where id=$1 and archived_at is null`, leadID).Scan(&officeID, &currentAssignedTo); err != nil {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
 	}
@@ -622,13 +623,23 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var assignedTo *uuid.UUID
-	if req.AssignedToID != nil && strings.TrimSpace(*req.AssignedToID) != "" {
-		id, parseErr := uuid.Parse(*req.AssignedToID)
-		if parseErr != nil {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil)
-			return
+	if actor.IsSuperAdmin() {
+		if req.AssignedToID != nil && strings.TrimSpace(*req.AssignedToID) != "" {
+			id, parseErr := uuid.Parse(*req.AssignedToID)
+			if parseErr != nil {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil)
+				return
+			}
+			assignedTo = &id
 		}
-		assignedTo = &id
+	} else {
+		for _, field := range req.EditedFields {
+			if field == "manager" {
+				s.writeError(w, r, http.StatusForbidden, "lead_assign_forbidden", "Manager assignment is not allowed", nil)
+				return
+			}
+		}
+		assignedTo = currentAssignedTo
 	}
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -741,7 +752,7 @@ func (s *Server) handleArchiveLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
 	}
-	if !actor.CanEditLead(officeID) {
+	if !actor.CanArchiveLead(officeID) {
 		s.writeError(w, r, http.StatusForbidden, "archive_forbidden", "Lead archiving is not allowed", nil)
 		return
 	}
