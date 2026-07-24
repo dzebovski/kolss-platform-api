@@ -26,10 +26,49 @@ type leadActivityRequest struct {
 	Status         string     `json:"status"`
 	Comment        string     `json:"comment"`
 	DueAt          *time.Time `json:"dueAt"`
+	AssignedTo     *uuid.UUID `json:"assignedTo"`
 	Reason         string     `json:"reason"`
 	ContractNumber string     `json:"contractNumber"`
 	Amount         *float64   `json:"amount"`
 	Currency       string     `json:"currency"`
+}
+
+// commentAssigneeExistsQuery verifies a comment task assignee is an active,
+// non–super_admin profile that belongs to the lead's office.
+const commentAssigneeExistsQuery = `
+	select exists(
+	  select 1
+	  from public.profiles p
+	  join public.user_office_memberships m on m.user_id = p.id
+	  where p.id = $1
+	    and p.is_active = true
+	    and p.role <> 'super_admin'
+	    and m.office_id = $2
+	)
+`
+
+var errCommentAssigneeInvalid = errors.New("comment assignee invalid")
+
+func validateCommentAssignee(r *http.Request, tx pgx.Tx, assigneeID, officeID uuid.UUID) error {
+	var valid bool
+	if err := tx.QueryRow(r.Context(), commentAssigneeExistsQuery, assigneeID, officeID).Scan(&valid); err != nil {
+		return err
+	}
+	if !valid {
+		return errCommentAssigneeInvalid
+	}
+	return nil
+}
+
+// applyCommentActivityValues sets the comment-specific keys on the lead_events
+// new_value payload: an optional reminder date and an optional task assignee.
+func applyCommentActivityValues(req leadActivityRequest, newValue map[string]any) {
+	if req.DueAt != nil {
+		newValue["callback_due_at"] = req.DueAt
+	}
+	if req.AssignedTo != nil {
+		newValue["assigned_to"] = req.AssignedTo
+	}
 }
 
 type activityLead struct {
@@ -136,6 +175,16 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	if !actor.CanAccessOffice(lead.OfficeID) {
 		s.writeError(w, r, http.StatusForbidden, "office_forbidden", "Office access denied", nil)
 		return
+	}
+	if req.Type == activityComment && req.AssignedTo != nil {
+		if err := validateCommentAssignee(r, tx, *req.AssignedTo, lead.OfficeID); err != nil {
+			if errors.Is(err, errCommentAssigneeInvalid) {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", map[string]string{"assignedTo": "Manager must be an active member of the lead's office"})
+				return
+			}
+			s.writeError(w, r, http.StatusInternalServerError, "activity_failed", "Could not update lead", nil)
+			return
+		}
 	}
 	terminal := lead.ClientStatus == "closed_lost" || lead.ClientStatus == "contract_signed"
 	if req.Type == activityReopen {
@@ -294,6 +343,9 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		if req.Comment == "" {
 			fields["comment"] = "Required"
 		}
+		if req.AssignedTo != nil && req.DueAt == nil {
+			fields["dueAt"] = "Required when a manager is assigned"
+		}
 	case activityReopen:
 		rejectDueAt()
 		reject("status", req.Status)
@@ -306,6 +358,9 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		}
 	default:
 		fields["type"] = "Unknown activity type"
+	}
+	if req.Type != activityComment && req.AssignedTo != nil {
+		fields["assignedTo"] = "Not allowed for this activity type"
 	}
 	return fields
 }
@@ -350,8 +405,8 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		eventCategory = activityComment
 		if req.DueAt != nil {
 			callbackDueAt = req.DueAt
-			newValue["callback_due_at"] = req.DueAt
 		}
+		applyCommentActivityValues(req, newValue)
 	case activityClientStatus:
 		eventType = "client_status_changed"
 		eventCategory = activityClientStatus
@@ -453,7 +508,13 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		  (lead_id,actor_id,event_type,event_category,status_code,comment,old_value,new_value)
 		values ($1,$2,$3,$4,$5,$6,$7,$8)
 	`, leadID, actor.ID, eventType, eventCategory, statusCode, comment, oldValue, newValue)
-	return err
+	if err != nil {
+		return err
+	}
+	if req.Type == activityClientStatus && req.Status == "closed_lost" {
+		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
+	}
+	return nil
 }
 
 func nextClientStatusCallbackDue(

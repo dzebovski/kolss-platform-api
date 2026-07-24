@@ -1,13 +1,17 @@
 package crmapi
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestValidateLeadActivity(t *testing.T) {
 	amount := 1250.0
 	dueAt := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
+	assignee := uuid.MustParse("44444444-4444-4444-4444-444444444444")
 	tests := []struct {
 		name         string
 		request      leadActivityRequest
@@ -30,7 +34,10 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "contract", request: leadActivityRequest{Type: activityClientStatus, Status: "contract_signed", ContractNumber: "K-42", Amount: &amount, Currency: "EUR"}},
 		{name: "comment", request: leadActivityRequest{Type: activityComment, Comment: "Customer sent measurements"}},
 		{name: "comment with due date", request: leadActivityRequest{Type: activityComment, Comment: "Call back tomorrow", DueAt: &dueAt}},
+		{name: "comment with assignee and date", request: leadActivityRequest{Type: activityComment, Comment: "Task for manager", DueAt: &dueAt, AssignedTo: &assignee}},
+		{name: "comment assignee requires date", request: leadActivityRequest{Type: activityComment, Comment: "Task for manager", AssignedTo: &assignee}, field: "dueAt"},
 		{name: "comment rejects status", request: leadActivityRequest{Type: activityComment, Comment: "Note", Status: "reached"}, field: "status"},
+		{name: "call rejects assignee", request: leadActivityRequest{Type: activityCallStatus, Status: "reached", Comment: "Discussed quote", AssignedTo: &assignee}, field: "assignedTo"},
 		{name: "reopen", request: leadActivityRequest{Type: activityReopen}},
 		{name: "reopen rejects comment", request: leadActivityRequest{Type: activityReopen, Comment: "unexpected"}, field: "comment"},
 		{name: "unknown type", request: leadActivityRequest{Type: "workflow"}, field: "type"},
@@ -90,5 +97,41 @@ func TestNextClientStatusCallbackDue(t *testing.T) {
 	}
 	if got := nextClientStatusCallbackDue(&reached, &current, "thinking", &replacement); got == nil || !got.Equal(replacement) {
 		t.Fatalf("thinking date: got %v, want %v", got, replacement)
+	}
+}
+
+func TestApplyCommentActivityValuesStoresAssignee(t *testing.T) {
+	dueAt := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
+	assignee := uuid.MustParse("44444444-4444-4444-4444-444444444444")
+
+	withAssignee := map[string]any{}
+	applyCommentActivityValues(leadActivityRequest{Type: activityComment, Comment: "Task", DueAt: &dueAt, AssignedTo: &assignee}, withAssignee)
+	stored, ok := withAssignee["assigned_to"].(*uuid.UUID)
+	if !ok || stored == nil || *stored != assignee {
+		t.Fatalf("assigned_to not stored: %#v", withAssignee["assigned_to"])
+	}
+	if withAssignee["callback_due_at"] == nil {
+		t.Fatalf("callback_due_at must remain stored alongside the assignee: %#v", withAssignee)
+	}
+
+	withoutAssignee := map[string]any{}
+	applyCommentActivityValues(leadActivityRequest{Type: activityComment, Comment: "Plain note"}, withoutAssignee)
+	if _, present := withoutAssignee["assigned_to"]; present {
+		t.Fatalf("assigned_to must be absent when no manager is assigned: %#v", withoutAssignee)
+	}
+}
+
+func TestCommentAssigneeExistsQueryRestrictsToOfficeStaff(t *testing.T) {
+	for _, fragment := range []string{
+		"from public.profiles p",
+		"join public.user_office_memberships m on m.user_id = p.id",
+		"p.id = $1",
+		"p.is_active = true",
+		"p.role <> 'super_admin'",
+		"m.office_id = $2",
+	} {
+		if !strings.Contains(commentAssigneeExistsQuery, fragment) {
+			t.Fatalf("commentAssigneeExistsQuery missing %q\n%s", fragment, commentAssigneeExistsQuery)
+		}
 	}
 }

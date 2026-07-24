@@ -188,6 +188,36 @@ func TestLeadJSONExpressionEmbedsLatestExplicitCommentReminder(t *testing.T) {
 	}
 }
 
+func TestLeadJSONExpressionEmbedsLatestCommentAssignee(t *testing.T) {
+	expr := leadJSONExpression
+	for _, fragment := range []string{
+		"'comment_reminder_assigned_to'",
+		"jsonb_typeof(e.new_value->'assigned_to') = 'string'",
+		"e.new_value->>'assigned_to'",
+		"e.event_category = 'comment'",
+		"order by e.created_at desc",
+		"limit 1",
+	} {
+		if !strings.Contains(expr, fragment) {
+			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+
+	assigneeStart := strings.Index(expr, "'comment_reminder_assigned_to'")
+	callbackContextStart := strings.Index(expr, "'callback_due_context'")
+	if assigneeStart < 0 || callbackContextStart <= assigneeStart {
+		t.Fatal("comment assignee expression boundaries not found")
+	}
+	assigneeExpr := expr[assigneeStart:callbackContextStart]
+	dueStart := strings.Index(expr, "'comment_reminder_due_at'")
+	if dueStart < 0 || assigneeStart <= dueStart {
+		t.Fatal("comment_reminder_assigned_to must follow comment_reminder_due_at")
+	}
+	if !strings.Contains(assigneeExpr, "e.event_category = 'comment'") {
+		t.Fatalf("comment assignee must filter on the latest comment event\n%s", assigneeExpr)
+	}
+}
+
 func TestFirstContactAttemptListJSONShape(t *testing.T) {
 	managerID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	createdAt := time.Date(2026, 7, 14, 14, 14, 0, 0, time.UTC)

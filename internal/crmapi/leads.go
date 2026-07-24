@@ -139,6 +139,18 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		),
+		'comment_reminder_assigned_to', (
+			select case
+				when jsonb_typeof(e.new_value->'assigned_to') = 'string'
+					then e.new_value->>'assigned_to'
+				else null
+			end
+			from public.lead_events e
+			where e.lead_id = l.id
+				and e.event_category = 'comment'
+			order by e.created_at desc
+			limit 1
+		),
 		'callback_due_context', case
 			when l.callback_due_at is null then null
 			else coalesce((
@@ -762,19 +774,8 @@ func (s *Server) handleArchiveLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var activeAppointmentExists bool
-	if err := tx.QueryRow(r.Context(), `
-		select exists(
-		  select 1
-		  from public.lead_showroom_visits
-		  where lead_id=$1 and status='scheduled'
-		)
-	`, leadID).Scan(&activeAppointmentExists); err != nil {
+	if err := cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "archive_failed", "Could not archive lead", nil)
-		return
-	}
-	if activeAppointmentExists {
-		s.writeError(w, r, http.StatusConflict, "active_appointment_exists", "Cancel the scheduled appointment before archiving this lead", nil)
 		return
 	}
 	var changed bool

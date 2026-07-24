@@ -876,6 +876,12 @@ components:
             explicit comment has no reminder, regardless of later call or client status events.
           type: [string, 'null']
           format: date-time
+        comment_reminder_assigned_to:
+          description: >
+            Task assignee stored on the latest explicit comment event. Null when the latest
+            explicit comment has no assignee, regardless of later call or client status events.
+          type: [string, 'null']
+          format: uuid
         showroom_due_at:
           description: >
             Start of the lead's current scheduled appointment. Derived from
@@ -988,7 +994,14 @@ components:
         dueAt:
           type: string
           format: date-time
-          description: Optional reminder date for the comment.
+          description: Optional reminder date for the comment. Required when assignedTo is set.
+        assignedTo:
+          type: string
+          format: uuid
+          description: >
+            Optional task assignee. Must be an active, non–super_admin member of the
+            lead's office. When set, dueAt is required and the comment becomes the
+            lead's active task.
     ReopenActivityRequest:
       type: object
       additionalProperties: false

@@ -1,6 +1,9 @@
 package crmapi
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -126,5 +129,62 @@ func TestAppointmentAuditQueriesCastPolymorphicJSONParameters(t *testing.T) {
 		if !strings.Contains(appointmentChangedEventInsert, cast) {
 			t.Fatalf("changed event query must contain %s", cast)
 		}
+	}
+}
+
+func TestCancelScheduledAppointmentsUpdateCancelsOnlyScheduled(t *testing.T) {
+	for _, fragment := range []string{
+		"update public.lead_showroom_visits",
+		"status='canceled'",
+		"where lead_id=$1 and status='scheduled'",
+		"returning id, scheduled_at, ends_at, responsible_manager_id, comment",
+	} {
+		if !strings.Contains(cancelScheduledAppointmentsUpdate, fragment) {
+			t.Fatalf("cancelScheduledAppointmentsUpdate missing %q", fragment)
+		}
+	}
+}
+
+func TestCloseAndArchiveCancelScheduledAppointments(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Dir(file)
+
+	activitiesSrc, err := os.ReadFile(filepath.Join(dir, "activities.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activities := string(activitiesSrc)
+	if !strings.Contains(activities, `req.Status == "closed_lost"`) {
+		t.Fatal("close path must detect closed_lost")
+	}
+	if !strings.Contains(activities, "cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)") {
+		t.Fatal("close must cancel scheduled appointments")
+	}
+
+	leadsSrc, err := os.ReadFile(filepath.Join(dir, "leads.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leads := string(leadsSrc)
+	archiveStart := strings.Index(leads, "func (s *Server) handleArchiveLead")
+	if archiveStart < 0 {
+		t.Fatal("handleArchiveLead not found")
+	}
+	archiveEnd := strings.Index(leads[archiveStart+1:], "\nfunc (s *Server)")
+	if archiveEnd < 0 {
+		t.Fatal("handleArchiveLead end not found")
+	}
+	archive := leads[archiveStart : archiveStart+1+archiveEnd]
+	if !strings.Contains(archive, "cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)") {
+		t.Fatal("archive must cancel scheduled appointments")
+	}
+	if strings.Contains(archive, "active_appointment_exists") {
+		t.Fatal("archive must not block on active appointments")
+	}
+	if strings.Contains(archive, "Cancel the scheduled appointment before archiving this lead") {
+		t.Fatal("archive must not ask callers to cancel appointments first")
 	}
 }

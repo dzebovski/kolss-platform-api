@@ -1,6 +1,7 @@
 package crmapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,9 +18,21 @@ import (
 
 const (
 	appointmentStatusScheduled = "scheduled"
+	appointmentStatusCanceled  = "canceled"
 	appointmentLocalLayout     = "2006-01-02T15:04"
 	appointmentDateLayout      = "2006-01-02"
 )
+
+const cancelScheduledAppointmentsUpdate = `
+	update public.lead_showroom_visits
+	set
+	  status='canceled',
+	  updated_by=$2,
+	  updated_at=now(),
+	  version=version+1
+	where lead_id=$1 and status='scheduled'
+	returning id, scheduled_at, ends_at, responsible_manager_id, comment
+`
 
 type appointmentMutationRequest struct {
 	LeadID               uuid.UUID  `json:"leadId"`
@@ -804,6 +817,51 @@ func validateAppointmentManager(
 	}
 	if !valid {
 		return errAppointmentManagerInvalid
+	}
+	return nil
+}
+
+func cancelScheduledAppointmentsForLead(
+	ctx context.Context,
+	tx pgx.Tx,
+	actorID uuid.UUID,
+	leadID uuid.UUID,
+) error {
+	rows, err := tx.Query(ctx, cancelScheduledAppointmentsUpdate, leadID, actorID)
+	if err != nil {
+		return err
+	}
+
+	type canceledVisit struct {
+		id        uuid.UUID
+		startsAt  time.Time
+		endsAt    time.Time
+		managerID *uuid.UUID
+		comment   *string
+	}
+	var visits []canceledVisit
+	for rows.Next() {
+		var visit canceledVisit
+		if err := rows.Scan(&visit.id, &visit.startsAt, &visit.endsAt, &visit.managerID, &visit.comment); err != nil {
+			rows.Close()
+			return err
+		}
+		visits = append(visits, visit)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	for _, visit := range visits {
+		if _, err := tx.Exec(ctx, appointmentChangedEventInsert,
+			leadID, actorID, "appointment_status_changed", appointmentStatusCanceled, visit.comment, visit.id,
+			visit.startsAt, visit.endsAt, visit.managerID, appointmentStatusScheduled, visit.comment,
+			visit.startsAt, visit.endsAt, visit.managerID,
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }
