@@ -953,6 +953,7 @@ components:
         - $ref: '#/components/schemas/CallStatusActivityRequest'
         - $ref: '#/components/schemas/ClientStatusActivityRequest'
         - $ref: '#/components/schemas/CommentActivityRequest'
+        - $ref: '#/components/schemas/ClearReminderActivityRequest'
         - $ref: '#/components/schemas/ReopenActivityRequest'
       discriminator:
         propertyName: type
@@ -1004,6 +1005,20 @@ components:
             Optional task assignee. Must be an active, non–super_admin member of the
             lead's office. When set, dueAt is required and the comment becomes the
             lead's active task.
+    ClearReminderActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, kind]
+      properties:
+        type: { type: string, const: clear_reminder }
+        kind:
+          type: string
+          enum: [callback, thinking, comment]
+          description: >
+            Clears only the reminder due date for the given kind. Call and client
+            statuses are unchanged. Callback and thinking share leads.callback_due_at;
+            comment clears the derived comment reminder (and leads.callback_due_at when
+            it matches that comment reminder).
     ReopenActivityRequest:
       type: object
       additionalProperties: false

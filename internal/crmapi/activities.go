@@ -15,15 +15,21 @@ import (
 )
 
 const (
-	activityCallStatus   = "call_status"
-	activityClientStatus = "client_status"
-	activityComment      = "comment"
-	activityReopen       = "reopen"
+	activityCallStatus    = "call_status"
+	activityClientStatus  = "client_status"
+	activityComment       = "comment"
+	activityClearReminder = "clear_reminder"
+	activityReopen        = "reopen"
+
+	reminderKindCallback = "callback"
+	reminderKindThinking = "thinking"
+	reminderKindComment  = "comment"
 )
 
 type leadActivityRequest struct {
 	Type           string     `json:"type"`
 	Status         string     `json:"status"`
+	Kind           string     `json:"kind"`
 	Comment        string     `json:"comment"`
 	DueAt          *time.Time `json:"dueAt"`
 	AssignedTo     *uuid.UUID `json:"assignedTo"`
@@ -119,6 +125,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Type = strings.TrimSpace(req.Type)
 	req.Status = strings.TrimSpace(req.Status)
+	req.Kind = strings.TrimSpace(req.Kind)
 	req.Comment = strings.TrimSpace(req.Comment)
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.ContractNumber = strings.TrimSpace(req.ContractNumber)
@@ -245,6 +252,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 	}
 	switch req.Type {
 	case activityCallStatus:
+		reject("kind", req.Kind)
 		reject("reason", req.Reason)
 		reject("contractNumber", req.ContractNumber)
 		reject("currency", req.Currency)
@@ -267,6 +275,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["status"] = "Unknown call status"
 		}
 	case activityClientStatus:
+		reject("kind", req.Kind)
 		switch req.Status {
 		case "showroom_invited":
 			if req.DueAt == nil {
@@ -331,6 +340,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		}
 	case activityComment:
 		reject("status", req.Status)
+		reject("kind", req.Kind)
 		reject("reason", req.Reason)
 		reject("contractNumber", req.ContractNumber)
 		reject("currency", req.Currency)
@@ -343,9 +353,25 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		if req.AssignedTo != nil && req.DueAt == nil {
 			fields["dueAt"] = "Required when a manager is assigned"
 		}
+	case activityClearReminder:
+		rejectDueAt()
+		reject("status", req.Status)
+		reject("comment", req.Comment)
+		reject("reason", req.Reason)
+		reject("contractNumber", req.ContractNumber)
+		reject("currency", req.Currency)
+		if req.Amount != nil {
+			fields["amount"] = "Not allowed for this activity type"
+		}
+		switch req.Kind {
+		case reminderKindCallback, reminderKindThinking, reminderKindComment:
+		default:
+			fields["kind"] = "Must be callback, thinking, or comment"
+		}
 	case activityReopen:
 		rejectDueAt()
 		reject("status", req.Status)
+		reject("kind", req.Kind)
 		reject("comment", req.Comment)
 		reject("reason", req.Reason)
 		reject("contractNumber", req.ContractNumber)
@@ -365,7 +391,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, leadID uuid.UUID, lead activityLead, req leadActivityRequest) error {
 	now := time.Now().UTC()
 	assignedTo := lead.AssignedTo
-	if req.Type != activityReopen && assignedTo == nil {
+	if req.Type != activityReopen && req.Type != activityClearReminder && assignedTo == nil {
 		assignedTo = &actor.ID
 	}
 
@@ -404,6 +430,34 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			callbackDueAt = req.DueAt
 		}
 		applyCommentActivityValues(req, newValue)
+	case activityClearReminder:
+		eventType = "reminder_cleared"
+		newValue["kind"] = req.Kind
+		oldValue["kind"] = req.Kind
+		if lead.CallbackDueAt != nil {
+			oldValue["callback_due_at"] = lead.CallbackDueAt
+		}
+		switch req.Kind {
+		case reminderKindCallback, reminderKindThinking:
+			eventCategory = "system"
+			callbackDueAt = nil
+			newValue["callback_due_at"] = nil
+		case reminderKindComment:
+			// Latest comment-category event drives comment_reminder_*; a clear
+			// event without callback_due_at / assigned_to hides the reminder.
+			eventCategory = activityComment
+			commentDueAt, err := latestCommentReminderDueAt(r, tx, leadID)
+			if err != nil {
+				return err
+			}
+			if commentDueAt != nil {
+				oldValue["comment_reminder_due_at"] = commentDueAt
+			}
+			if shouldClearLeadDueForCommentReminder(lead.CallbackDueAt, commentDueAt) {
+				callbackDueAt = nil
+				newValue["callback_due_at"] = nil
+			}
+		}
 	case activityClientStatus:
 		eventType = "client_status_changed"
 		eventCategory = activityClientStatus
@@ -512,6 +566,48 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
 	}
 	return nil
+}
+
+// latestCommentReminderDueAt returns the due date on the latest comment-category
+// event, if that event stored an explicit callback_due_at string.
+func latestCommentReminderDueAt(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (*time.Time, error) {
+	var raw *string
+	err := tx.QueryRow(r.Context(), `
+		select case
+			when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+				then e.new_value->>'callback_due_at'
+			else null
+		end
+		from public.lead_events e
+		where e.lead_id = $1
+			and e.event_category = 'comment'
+		order by e.created_at desc
+		limit 1
+	`, leadID).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil || strings.TrimSpace(*raw) == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, *raw)
+	if err != nil {
+		parsed, err = time.Parse(time.RFC3339, *raw)
+		if err != nil {
+			return nil, nil
+		}
+	}
+	utc := parsed.UTC()
+	return &utc, nil
+}
+
+// shouldClearLeadDueForCommentReminder is true when the lead's shared due date
+// came from the active comment reminder (same instant).
+func shouldClearLeadDueForCommentReminder(leadDue, commentDue *time.Time) bool {
+	return leadDue != nil && commentDue != nil && leadDue.Equal(*commentDue)
 }
 
 func nextClientStatusCallbackDue(

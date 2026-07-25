@@ -39,6 +39,13 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "comment assignee requires date", request: leadActivityRequest{Type: activityComment, Comment: "Task for manager", AssignedTo: &assignee}, field: "dueAt"},
 		{name: "comment rejects status", request: leadActivityRequest{Type: activityComment, Comment: "Note", Status: "reached"}, field: "status"},
 		{name: "call rejects assignee", request: leadActivityRequest{Type: activityCallStatus, Status: "reached", Comment: "Discussed quote", AssignedTo: &assignee}, field: "assignedTo"},
+		{name: "clear callback reminder", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindCallback}},
+		{name: "clear thinking reminder", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindThinking}},
+		{name: "clear comment reminder", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindComment}},
+		{name: "clear reminder requires kind", request: leadActivityRequest{Type: activityClearReminder}, field: "kind"},
+		{name: "clear reminder rejects unknown kind", request: leadActivityRequest{Type: activityClearReminder, Kind: "showroom"}, field: "kind"},
+		{name: "clear reminder rejects dueAt", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindCallback, DueAt: &dueAt}, field: "dueAt"},
+		{name: "clear reminder rejects comment", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindCallback, Comment: "nope"}, field: "comment"},
 		{name: "reopen", request: leadActivityRequest{Type: activityReopen}},
 		{name: "reopen rejects comment", request: leadActivityRequest{Type: activityReopen, Comment: "unexpected"}, field: "comment"},
 		{name: "unknown type", request: leadActivityRequest{Type: "workflow"}, field: "type"},
@@ -119,6 +126,24 @@ func TestApplyCommentActivityValuesStoresAssignee(t *testing.T) {
 	applyCommentActivityValues(leadActivityRequest{Type: activityComment, Comment: "Plain note"}, withoutAssignee)
 	if _, present := withoutAssignee["assigned_to"]; present {
 		t.Fatalf("assigned_to must be absent when no manager is assigned: %#v", withoutAssignee)
+	}
+}
+
+func TestShouldClearLeadDueForCommentReminder(t *testing.T) {
+	dueAt := time.Date(2026, time.July, 25, 12, 0, 0, 0, time.UTC)
+	other := time.Date(2026, time.August, 3, 12, 0, 0, 0, time.UTC)
+
+	if !shouldClearLeadDueForCommentReminder(&dueAt, &dueAt) {
+		t.Fatal("matching dues must clear the lead date")
+	}
+	if shouldClearLeadDueForCommentReminder(&dueAt, &other) {
+		t.Fatal("mismatched dues must keep the lead date")
+	}
+	if shouldClearLeadDueForCommentReminder(&dueAt, nil) {
+		t.Fatal("missing comment due must keep the lead date")
+	}
+	if shouldClearLeadDueForCommentReminder(nil, &dueAt) {
+		t.Fatal("missing lead due is a no-op")
 	}
 }
 
