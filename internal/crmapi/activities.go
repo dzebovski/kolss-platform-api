@@ -24,6 +24,7 @@ const (
 	reminderKindCallback = "callback"
 	reminderKindThinking = "thinking"
 	reminderKindComment  = "comment"
+	reminderKindShowroom = "showroom"
 )
 
 type leadActivityRequest struct {
@@ -364,9 +365,9 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["amount"] = "Not allowed for this activity type"
 		}
 		switch req.Kind {
-		case reminderKindCallback, reminderKindThinking, reminderKindComment:
+		case reminderKindCallback, reminderKindThinking, reminderKindComment, reminderKindShowroom:
 		default:
-			fields["kind"] = "Must be callback, thinking, or comment"
+			fields["kind"] = "Must be callback, thinking, comment, or showroom"
 		}
 	case activityReopen:
 		rejectDueAt()
@@ -457,6 +458,17 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 				callbackDueAt = nil
 				newValue["callback_due_at"] = nil
 			}
+		case reminderKindShowroom:
+			// Cancels scheduled showroom visits; client_status stays unchanged.
+			eventCategory = "system"
+			showroomDueAt, err := latestScheduledShowroomDueAt(r, tx, leadID)
+			if err != nil {
+				return err
+			}
+			if showroomDueAt != nil {
+				oldValue["showroom_due_at"] = showroomDueAt
+			}
+			newValue["showroom_due_at"] = nil
 		}
 	case activityClientStatus:
 		eventType = "client_status_changed"
@@ -565,6 +577,9 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	if req.Type == activityClientStatus && req.Status == "closed_lost" {
 		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
 	}
+	if req.Type == activityClearReminder && req.Kind == reminderKindShowroom {
+		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
+	}
 	return nil
 }
 
@@ -602,6 +617,27 @@ func latestCommentReminderDueAt(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (*
 	}
 	utc := parsed.UTC()
 	return &utc, nil
+}
+
+// latestScheduledShowroomDueAt returns the soonest/latest scheduled showroom visit
+// start time for the lead, matching the lead list showroom_due_at derivation.
+func latestScheduledShowroomDueAt(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (*time.Time, error) {
+	var due *time.Time
+	err := tx.QueryRow(r.Context(), `
+		select v.scheduled_at
+		from public.lead_showroom_visits v
+		where v.lead_id = $1
+			and v.status = 'scheduled'
+		order by v.scheduled_at desc, v.created_at desc
+		limit 1
+	`, leadID).Scan(&due)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return due, nil
 }
 
 // shouldClearLeadDueForCommentReminder is true when the lead's shared due date

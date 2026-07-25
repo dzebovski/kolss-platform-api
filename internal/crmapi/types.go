@@ -36,6 +36,18 @@ func (a Actor) CanArchiveLead(id uuid.UUID) bool {
 	return a.IsSuperAdmin() || (a.Role == "office_admin" && a.CanAccessOffice(id))
 }
 
+// CanMutateLeadEvent allows super_admin for any event, or the event author when they
+// still have access to the lead's office. Events with a missing actor are super_admin-only.
+func (a Actor) CanMutateLeadEvent(officeID uuid.UUID, eventActorID uuid.UUID) bool {
+	if a.IsSuperAdmin() {
+		return true
+	}
+	if eventActorID == uuid.Nil {
+		return false
+	}
+	return a.CanAccessOffice(officeID) && a.ID == eventActorID
+}
+
 func actorFromContext(ctx context.Context) (Actor, bool) {
 	actor, ok := ctx.Value(contextKey{}).(Actor)
 	return actor, ok

@@ -205,6 +205,11 @@ paths:
     patch:
       tags: [Leads]
       operationId: updateLeadEvent
+      summary: Update a lead history event comment
+      description: >
+        Super admins may update any event. Other roles may update only events they authored,
+        and only while they still have access to the lead's office. Updates the comment text only;
+        does not change call/client status on the lead.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/LeadId' }
@@ -219,9 +224,16 @@ paths:
               properties: { comment: { type: string } }
       responses:
         '200': { description: Event updated }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
     delete:
       tags: [Leads]
       operationId: deleteLeadEvent
+      summary: Delete a lead history event
+      description: >
+        Super admins may delete any event. Other roles may delete only events they authored,
+        and only while they still have access to the lead's office. Deletes the history row only;
+        does not roll back call/client status on the lead.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/LeadId' }
@@ -1013,12 +1025,13 @@ components:
         type: { type: string, const: clear_reminder }
         kind:
           type: string
-          enum: [callback, thinking, comment]
+          enum: [callback, thinking, comment, showroom]
           description: >
             Clears only the reminder due date for the given kind. Call and client
             statuses are unchanged. Callback and thinking share leads.callback_due_at;
             comment clears the derived comment reminder (and leads.callback_due_at when
-            it matches that comment reminder).
+            it matches that comment reminder); showroom cancels scheduled showroom
+            appointments so showroom_due_at becomes null.
     ReopenActivityRequest:
       type: object
       additionalProperties: false

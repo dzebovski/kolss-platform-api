@@ -708,11 +708,36 @@ type eventUpdateRequest struct {
 	Comment string `json:"comment"`
 }
 
-func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
-	actor, _ := actorFromContext(r.Context())
-	if !s.requireSuperAdmin(w, r) {
-		return
+func (s *Server) authorizeLeadEventMutation(w http.ResponseWriter, r *http.Request, leadID, eventID uuid.UUID) (Actor, bool) {
+	actor, ok := actorFromContext(r.Context())
+	if !ok {
+		s.writeError(w, r, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
+		return Actor{}, false
 	}
+	var officeID uuid.UUID
+	var eventActorID *uuid.UUID
+	err := s.pool.QueryRow(r.Context(), `
+		select l.office_id, e.actor_id
+		from public.lead_events e
+		join public.leads l on l.id = e.lead_id
+		where e.id=$1 and e.lead_id=$2 and l.archived_at is null
+	`, eventID, leadID).Scan(&officeID, &eventActorID)
+	if err != nil {
+		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
+		return Actor{}, false
+	}
+	authorID := uuid.Nil
+	if eventActorID != nil {
+		authorID = *eventActorID
+	}
+	if !actor.CanMutateLeadEvent(officeID, authorID) {
+		s.writeError(w, r, http.StatusForbidden, "event_mutate_forbidden", "History event mutation is not allowed", nil)
+		return Actor{}, false
+	}
+	return actor, true
+}
+
+func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	leadID, leadErr := uuid.Parse(r.PathValue("leadId"))
 	eventID, eventErr := uuid.Parse(r.PathValue("eventId"))
 	var req eventUpdateRequest
@@ -720,9 +745,8 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid history event", nil)
 		return
 	}
-	var exists bool
-	if err := s.pool.QueryRow(r.Context(), `select exists(select 1 from public.leads where id=$1 and archived_at is null)`, leadID).Scan(&exists); err != nil || !exists {
-		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
+	actor, ok := s.authorizeLeadEventMutation(w, r, leadID, eventID)
+	if !ok {
 		return
 	}
 	editedByName := ""
@@ -751,13 +775,13 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSuperAdmin(w, r) {
-		return
-	}
 	leadID, leadErr := uuid.Parse(r.PathValue("leadId"))
 	eventID, eventErr := uuid.Parse(r.PathValue("eventId"))
 	if leadErr != nil || eventErr != nil {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid history event", nil)
+		return
+	}
+	if _, ok := s.authorizeLeadEventMutation(w, r, leadID, eventID); !ok {
 		return
 	}
 	command, err := s.pool.Exec(r.Context(), `
