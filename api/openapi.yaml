@@ -983,7 +983,9 @@ components:
         dueAt:
           type: string
           format: date-time
-          description: Required when status is thinking; optional when status is showroom_invited.
+          description: >
+            Optional reminder date when status is thinking. Required when status is
+            showroom_invited.
     CommentActivityRequest:
       type: object
       additionalProperties: false

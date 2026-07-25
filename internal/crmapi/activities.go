@@ -289,11 +289,8 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 				fields["amount"] = "Not allowed for this status"
 			}
 		case "thinking":
-			if req.DueAt == nil {
-				fields["dueAt"] = "Required for waiting client"
-			}
+			// comment and dueAt are both optional (indefinite pause is allowed).
 			reject("reason", req.Reason)
-			reject("comment", req.Comment)
 			reject("contractNumber", req.ContractNumber)
 			reject("currency", req.Currency)
 			if req.Amount != nil {
