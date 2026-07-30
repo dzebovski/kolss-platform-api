@@ -223,6 +223,18 @@ func decodeLeadCursor(raw string) (leadCursor, error) {
 	return leadCursor{CreatedAt: createdAt, ID: id}, nil
 }
 
+// splitQueryValues splits a comma-separated query param into trimmed, non-empty values.
+func splitQueryValues(raw string) []string {
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if v := strings.TrimSpace(part); v != "" {
+			values = append(values, v)
+		}
+	}
+	return values
+}
+
 // clientStatusFilterWhere maps list filter values to SQL clauses.
 // new_lead means truly new (no call yet); in_work is new_lead with a recorded call.
 func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
@@ -241,6 +253,32 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 		return []string{"l.client_status = " + addArg(raw)}, true
 	default:
 		return nil, false
+	}
+}
+
+// clientStatusFilterWhereMulti OR's together the clause group for each selected
+// value (each group's own clauses stay AND'd), e.g. ["new_lead", "thinking"] ->
+// "((l.client_status = $1 and l.call_status is null) or l.client_status = $2)".
+func clientStatusFilterWhereMulti(values []string, addArg func(any) string) (string, bool) {
+	groups := make([]string, 0, len(values))
+	for _, v := range values {
+		clauses, ok := clientStatusFilterWhere(v, addArg)
+		if !ok {
+			return "", false
+		}
+		if len(clauses) == 1 {
+			groups = append(groups, clauses[0])
+		} else {
+			groups = append(groups, "("+strings.Join(clauses, " and ")+")")
+		}
+	}
+	switch len(groups) {
+	case 0:
+		return "", true
+	case 1:
+		return groups[0], true
+	default:
+		return "(" + strings.Join(groups, " or ") + ")", true
 	}
 }
 
@@ -297,20 +335,27 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("callStatus")); raw != "" {
+		values := splitQueryValues(raw)
 		allowed := map[string]bool{"reached": true, "no_answer": true, "callback_requested": true}
-		if !allowed[raw] {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
-			return
+		for _, v := range values {
+			if !allowed[v] {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
+				return
+			}
 		}
-		where = append(where, "l.call_status = "+addArg(raw))
+		if len(values) > 0 {
+			where = append(where, "l.call_status = any("+addArg(values)+"::text[])")
+		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("clientStatus")); raw != "" {
-		clauses, ok := clientStatusFilterWhere(raw, addArg)
+		group, ok := clientStatusFilterWhereMulti(splitQueryValues(raw), addArg)
 		if !ok {
 			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"clientStatus": "Unknown status"})
 			return
 		}
-		where = append(where, clauses...)
+		if group != "" {
+			where = append(where, group)
+		}
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		value := "%" + search + "%"

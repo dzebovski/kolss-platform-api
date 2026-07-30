@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.6.0
+  version: 2.7.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -108,8 +108,8 @@ paths:
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
         - { name: source, in: query, schema: { type: string } }
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
-        - { name: callStatus, in: query, schema: { $ref: '#/components/schemas/CallStatus' } }
-        - { name: clientStatus, in: query, schema: { $ref: '#/components/schemas/ClientStatus' } }
+        - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatus' } } }
+        - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatus' } } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 }, description: When set, only leads created within the last N days }

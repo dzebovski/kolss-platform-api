@@ -76,6 +76,76 @@ func TestClientStatusFilterWhere(t *testing.T) {
 	}
 }
 
+func TestSplitQueryValues(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "normal split", raw: "reached,no_answer", want: []string{"reached", "no_answer"}},
+		{name: "empty string", raw: "", want: []string{}},
+		{name: "trims and drops empty elements", raw: " reached , ,no_answer ", want: []string{"reached", "no_answer"}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := splitQueryValues(test.raw)
+			if len(got) != len(test.want) {
+				t.Fatalf("values=%v, want %v", got, test.want)
+			}
+			for i := range got {
+				if got[i] != test.want[i] {
+					t.Fatalf("values=%v, want %v", got, test.want)
+				}
+			}
+		})
+	}
+}
+
+func TestClientStatusFilterWhereMulti(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	tests := []struct {
+		name    string
+		values  []string
+		wantOK  bool
+		wantSQL string
+	}{
+		{name: "no values", values: nil, wantOK: true, wantSQL: ""},
+		{
+			name:    "single value",
+			values:  []string{"thinking"},
+			wantOK:  true,
+			wantSQL: `l.client_status = "thinking"`,
+		},
+		{
+			name:    "ORs multi-clause and single-clause groups together",
+			values:  []string{"new_lead", "thinking"},
+			wantOK:  true,
+			wantSQL: `((l.client_status = "new_lead" and l.call_status is null) or l.client_status = "thinking")`,
+		},
+		{
+			name:   "unknown value fails the whole set",
+			values: []string{"thinking", "taken"},
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := clientStatusFilterWhereMulti(test.values, addArg)
+			if ok != test.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
+			}
+			if test.wantOK && got != test.wantSQL {
+				t.Fatalf("sql=%q, want %q", got, test.wantSQL)
+			}
+		})
+	}
+}
+
 func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) {
 	expr := leadJSONExpression
 	firstAttemptStart := strings.Index(expr, "'first_contact_attempt'")
