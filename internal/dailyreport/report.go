@@ -301,7 +301,7 @@ const reminderLeadCandidatesQuery = `
 	  end as call_due_at,
 	  case
 	    when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)
-	    when l.client_status = 'showroom_invited' then active_client.due_at
+	    when l.client_status = 'showroom_invited' then active_showroom.due_at
 	    else null
 	  end as client_due_at,
 	  latest_comment.due_at as comment_due_at
@@ -334,7 +334,15 @@ const reminderLeadCandidatesQuery = `
 	    and e.status_code = l.client_status
 	  order by e.created_at desc
 	  limit 1
-	) active_client on l.client_status in ('thinking','showroom_invited')
+	) active_client on l.client_status = 'thinking'
+	left join lateral (
+	  select v.scheduled_at as due_at
+	  from public.lead_showroom_visits v
+	  where v.lead_id = l.id
+	    and v.status = 'scheduled'
+	  order by v.scheduled_at desc, v.created_at desc
+	  limit 1
+	) active_showroom on l.client_status = 'showroom_invited'
 	left join lateral (
 	  select case
 	    when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
@@ -397,7 +405,7 @@ func (s *Scheduler) fetchReminderLeads(ctx context.Context, officeCode, timezone
 		); err != nil {
 			return nil, err
 		}
-		lead.CallbackDueAt = earliestDueAt(callDueAt, clientDueAt, commentDueAt)
+		lead.CallbackDueAt = latestDueAt(callDueAt, clientDueAt, commentDueAt)
 		if lead.CallbackDueAt == nil || !isDueOnOrBeforeLocalDate(*lead.CallbackDueAt, now, loc) {
 			continue
 		}
@@ -412,16 +420,19 @@ func (s *Scheduler) fetchReminderLeads(ctx context.Context, officeCode, timezone
 	return leads, nil
 }
 
-func earliestDueAt(dates ...*time.Time) *time.Time {
-	var earliest *time.Time
+// latestDueAt picks the furthest-out non-nil candidate: a later status change
+// or comment is assumed to supersede an earlier one that a manager never
+// went back to edit or clear.
+func latestDueAt(dates ...*time.Time) *time.Time {
+	var latest *time.Time
 	for _, dueAt := range dates {
-		if dueAt == nil || (earliest != nil && !dueAt.Before(*earliest)) {
+		if dueAt == nil || (latest != nil && !dueAt.After(*latest)) {
 			continue
 		}
 		value := *dueAt
-		earliest = &value
+		latest = &value
 	}
-	return earliest
+	return latest
 }
 
 func isDueOnOrBeforeLocalDate(dueAt, now time.Time, loc *time.Location) bool {

@@ -53,7 +53,7 @@ func TestReminderCandidatesQueryFallsBackToColumnDueAt(t *testing.T) {
 	for _, fragment := range []string{
 		"else coalesce(active_call.due_at, l.callback_due_at)",
 		"when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)",
-		"when l.client_status = 'showroom_invited' then active_client.due_at",
+		"when l.client_status = 'showroom_invited' then active_showroom.due_at",
 		"latest_comment.due_at as comment_due_at",
 	} {
 		if !strings.Contains(query, fragment) {
@@ -62,6 +62,29 @@ func TestReminderCandidatesQueryFallsBackToColumnDueAt(t *testing.T) {
 	}
 	if strings.Contains(query, "when active_call.found then") || strings.Contains(query, "and active_client.found then") {
 		t.Fatal("reminder dues must coalesce event+column, not gate on found")
+	}
+}
+
+func TestReminderCandidatesShowroomDueUsesScheduledVisitTable(t *testing.T) {
+	query := reminderLeadCandidatesQuery
+	for _, fragment := range []string{
+		"from public.lead_showroom_visits v",
+		"v.status = 'scheduled'",
+		"order by v.scheduled_at desc, v.created_at desc",
+		"active_showroom on l.client_status = 'showroom_invited'",
+	} {
+		if !strings.Contains(query, fragment) {
+			t.Fatalf("reminder query missing %q\n%s", fragment, query)
+		}
+	}
+	// The showroom_invited status-change event carries starts_at/ends_at, not
+	// callback_due_at, so the event-derived active_client lateral must stay
+	// scoped to 'thinking' only, not shared with showroom_invited.
+	if !strings.Contains(query, "active_client on l.client_status = 'thinking'") {
+		t.Fatal("active_client lateral must be scoped to 'thinking' only")
+	}
+	if strings.Contains(query, "active_client on l.client_status in ('thinking','showroom_invited')") {
+		t.Fatal("active_client lateral must no longer be shared with showroom_invited")
 	}
 }
 
@@ -173,7 +196,7 @@ func TestReminderCandidatesKeepStatusDatesIndependentFromComments(t *testing.T) 
 		"e.status_code = 'callback_requested'",
 		"e.event_category = 'client_status'",
 		"e.status_code = l.client_status",
-		"l.client_status in ('thinking','showroom_invited')",
+		"active_client on l.client_status = 'thinking'",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("reminder query missing %q\n%s", fragment, query)
@@ -181,17 +204,33 @@ func TestReminderCandidatesKeepStatusDatesIndependentFromComments(t *testing.T) 
 	}
 }
 
-func TestEarliestDueAtDeduplicatesReminderCandidates(t *testing.T) {
+func TestLatestDueAtSelectsFurthestReminderCandidate(t *testing.T) {
 	statusDue := time.Date(2026, time.July, 23, 9, 0, 0, 0, time.UTC)
 	commentDue := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
 	clientDue := time.Date(2026, time.July, 25, 10, 0, 0, 0, time.UTC)
 
-	got := earliestDueAt(&statusDue, &clientDue, &commentDue)
-	if got == nil || !got.Equal(commentDue) {
-		t.Fatalf("earliestDueAt() = %v, want %v", got, commentDue)
+	got := latestDueAt(&statusDue, &clientDue, &commentDue)
+	if got == nil || !got.Equal(clientDue) {
+		t.Fatalf("latestDueAt() = %v, want %v", got, clientDue)
 	}
-	if got := earliestDueAt(nil, nil, nil); got != nil {
-		t.Fatalf("earliestDueAt(nil) = %v, want nil", got)
+	if got := latestDueAt(nil, nil, nil); got != nil {
+		t.Fatalf("latestDueAt(nil) = %v, want nil", got)
+	}
+}
+
+// TestLatestDueAtIgnoresStaleCommentAfterLaterStatusChange reproduces the
+// case that surfaced the bug: a lead gets a comment reminder, then the
+// manager moves the lead through client_status changes (e.g. into
+// showroom_invited with a future visit date) without editing or clearing
+// the old comment. The furthest date must win so the stale comment stops
+// resurfacing as an overdue reminder.
+func TestLatestDueAtIgnoresStaleCommentAfterLaterStatusChange(t *testing.T) {
+	staleComment := time.Date(2026, time.July, 27, 12, 0, 0, 0, time.UTC)
+	futureShowroom := time.Date(2026, time.August, 15, 7, 0, 0, 0, time.UTC)
+
+	got := latestDueAt(nil, &futureShowroom, &staleComment)
+	if got == nil || !got.Equal(futureShowroom) {
+		t.Fatalf("latestDueAt() = %v, want %v (future showroom visit, not the stale comment)", got, futureShowroom)
 	}
 }
 
