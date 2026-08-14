@@ -19,10 +19,19 @@ import (
 const (
 	appointmentStatusScheduled = "scheduled"
 	appointmentStatusCanceled  = "canceled"
+	appointmentKindShowroom    = "showroom"
+	appointmentKindMeasurement = "measurement"
 	appointmentLocalLayout     = "2006-01-02T15:04"
 	appointmentDateLayout      = "2006-01-02"
 )
 
+// appointmentQuerier is satisfied by both the pool and a transaction so the
+// manager-overlap probe can run on either.
+type appointmentQuerier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// $3 is an optional kind filter: null cancels every scheduled kind.
 const cancelScheduledAppointmentsUpdate = `
 	update public.lead_showroom_visits
 	set
@@ -30,12 +39,15 @@ const cancelScheduledAppointmentsUpdate = `
 	  updated_by=$2,
 	  updated_at=now(),
 	  version=version+1
-	where lead_id=$1 and status='scheduled'
+	where lead_id=$1
+	  and status='scheduled'
+	  and ($3::text is null or kind=$3)
 	returning id, scheduled_at, ends_at, responsible_manager_id, comment
 `
 
 type appointmentMutationRequest struct {
 	LeadID               uuid.UUID  `json:"leadId"`
+	Kind                 *string    `json:"kind"`
 	StartsAtLocal        *string    `json:"startsAtLocal"`
 	DurationMinutes      *int       `json:"durationMinutes"`
 	ResponsibleManagerID *uuid.UUID `json:"responsibleManagerId"`
@@ -66,6 +78,7 @@ type appointment struct {
 	Lead                  appointmentLeadSummary     `json:"lead"`
 	Office                appointmentOfficeSummary   `json:"office"`
 	ResponsibleManager    *appointmentManagerSummary `json:"responsibleManager"`
+	Kind                  string                     `json:"kind"`
 	StartsAt              time.Time                  `json:"startsAt"`
 	EndsAt                time.Time                  `json:"endsAt"`
 	Status                string                     `json:"status"`
@@ -102,6 +115,7 @@ const appointmentSelect = `
 	  o.timezone_name,
 	  v.responsible_manager_id,
 	  coalesce(p.display_name, ''),
+	  v.kind,
 	  v.scheduled_at,
 	  v.ends_at,
 	  v.status,
@@ -126,12 +140,13 @@ const appointmentScheduledEventInsert = `
 	  new_value
 	)
 	values (
-	  $1,$2,'appointment_scheduled','client_status','showroom_invited',$3,
+	  $1,$2,'appointment_scheduled','client_status',$3,$4,
 	  jsonb_build_object(
-	    'appointment_id',$4::uuid,
-	    'starts_at',$5::timestamptz,
-	    'ends_at',$6::timestamptz,
-	    'responsible_manager_id',$7::uuid
+	    'appointment_id',$5::uuid,
+	    'starts_at',$6::timestamptz,
+	    'ends_at',$7::timestamptz,
+	    'responsible_manager_id',$8::uuid,
+	    'kind',$9::text
 	  )
 	)
 `
@@ -213,6 +228,11 @@ func (s *Server) handleListAppointments(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid appointment status", map[string]string{"status": "Unknown status"})
 		return
 	}
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	if kind != "" && !isAppointmentKind(kind) {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid appointment kind", map[string]string{"kind": "Unknown kind"})
+		return
+	}
 
 	rows, err := s.pool.Query(r.Context(), appointmentSelect+`
 		where l.office_id = $1
@@ -220,8 +240,9 @@ func (s *Server) handleListAppointments(w http.ResponseWriter, r *http.Request) 
 		  and v.ends_at > $2
 		  and ($4::uuid is null or v.responsible_manager_id = $4)
 		  and ($5::text = '' or v.status = $5)
+		  and ($6::text = '' or v.kind = $6)
 		order by v.scheduled_at, v.created_at, v.id
-	`, officeID, fromLocal.UTC(), toLocal.UTC(), managerID, status)
+	`, officeID, fromLocal.UTC(), toLocal.UTC(), managerID, status, kind)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "appointments_load_failed", "Could not load appointments", nil)
 		return
@@ -377,9 +398,74 @@ var (
 	errAppointmentOfficeDenied   = errors.New("appointment office denied")
 	errAppointmentManagerInvalid = errors.New("appointment manager invalid")
 	errAppointmentAlreadyActive  = errors.New("appointment already active")
+	errAppointmentManagerBusy    = errors.New("appointment manager busy")
 	errAppointmentTerminal       = errors.New("appointment terminal")
 	errAppointmentVersion        = errors.New("appointment version conflict")
 )
+
+// clientStatusForAppointmentKind maps an appointment kind onto the lead client
+// status it puts the lead into.
+func clientStatusForAppointmentKind(kind string) string {
+	if kind == appointmentKindMeasurement {
+		return "measurement_scheduled"
+	}
+	return "showroom_invited"
+}
+
+// lockManagerSchedule serializes concurrent bookings for one manager so the
+// overlap probe below cannot be raced by a parallel insert.
+func lockManagerSchedule(ctx context.Context, tx pgx.Tx, managerID uuid.UUID) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1::text, 0))`, managerID.String())
+	return err
+}
+
+// managerOverlapExists reports whether the manager already has a scheduled
+// appointment of any kind overlapping the given range. excludeID skips the row
+// being updated; pass uuid.Nil when creating.
+func managerOverlapExists(
+	ctx context.Context,
+	q appointmentQuerier,
+	excludeID uuid.UUID,
+	managerID uuid.UUID,
+	startsAt time.Time,
+	endsAt time.Time,
+) (bool, error) {
+	var overlap bool
+	err := q.QueryRow(ctx, `
+		select exists(
+		  select 1
+		  from public.lead_showroom_visits other
+		  where other.id <> $1
+		    and other.status='scheduled'
+		    and other.responsible_manager_id=$2
+		    and other.scheduled_at < $4
+		    and other.ends_at > $3
+		)
+	`, excludeID, managerID, startsAt, endsAt).Scan(&overlap)
+	return overlap, err
+}
+
+// ensureManagerFree takes the per-manager lock and rejects a double booking.
+func ensureManagerFree(
+	ctx context.Context,
+	tx pgx.Tx,
+	excludeID uuid.UUID,
+	managerID uuid.UUID,
+	startsAt time.Time,
+	endsAt time.Time,
+) error {
+	if err := lockManagerSchedule(ctx, tx, managerID); err != nil {
+		return err
+	}
+	busy, err := managerOverlapExists(ctx, tx, excludeID, managerID, startsAt, endsAt)
+	if err != nil {
+		return err
+	}
+	if busy {
+		return errAppointmentManagerBusy
+	}
+	return nil
+}
 
 func (s *Server) createAppointment(
 	r *http.Request,
@@ -421,23 +507,38 @@ func (s *Server) createAppointment(
 	if err := validateAppointmentManager(r, tx, *req.ResponsibleManagerID, officeID); err != nil {
 		return appointment{}, err
 	}
+	kind := appointmentKindShowroom
+	if req.Kind != nil {
+		kind = *req.Kind
+	}
 	var activeExists bool
 	if err := tx.QueryRow(r.Context(), `
 		select exists(
 		  select 1 from public.lead_showroom_visits
-		  where lead_id=$1 and status='scheduled'
+		  where lead_id=$1 and kind=$2 and status='scheduled'
 		)
-	`, req.LeadID).Scan(&activeExists); err != nil {
+	`, req.LeadID, kind).Scan(&activeExists); err != nil {
 		return appointment{}, err
 	}
 	if activeExists {
 		return appointment{}, errAppointmentAlreadyActive
+	}
+	if err := ensureManagerFree(
+		r.Context(),
+		tx,
+		uuid.Nil,
+		*req.ResponsibleManagerID,
+		startsAt,
+		endsAt,
+	); err != nil {
+		return appointment{}, err
 	}
 
 	var appointmentID uuid.UUID
 	err = tx.QueryRow(r.Context(), `
 		insert into public.lead_showroom_visits (
 		  lead_id,
+		  kind,
 		  scheduled_at,
 		  ends_at,
 		  status,
@@ -446,9 +547,9 @@ func (s *Server) createAppointment(
 		  created_by,
 		  updated_by
 		)
-		values ($1,$2,$3,'scheduled',$4,$5,$6,$6)
+		values ($1,$2,$3,$4,'scheduled',$5,$6,$7,$7)
 		returning id
-	`, req.LeadID, startsAt, endsAt, cleanOptional(req.Comment), *req.ResponsibleManagerID, actor.ID).Scan(&appointmentID)
+	`, req.LeadID, kind, startsAt, endsAt, cleanOptional(req.Comment), *req.ResponsibleManagerID, actor.ID).Scan(&appointmentID)
 	if err != nil {
 		return appointment{}, err
 	}
@@ -456,10 +557,11 @@ func (s *Server) createAppointment(
 	if nextAssignee == nil {
 		nextAssignee = req.ResponsibleManagerID
 	}
+	nextClientStatus := clientStatusForAppointmentKind(kind)
 	if _, err := tx.Exec(r.Context(), `
 		update public.leads
 		set
-		  client_status='showroom_invited',
+		  client_status=$3,
 		  client_status_changed_at=now(),
 		  assigned_to=$2,
 		  callback_due_at=case
@@ -469,7 +571,7 @@ func (s *Server) createAppointment(
 		  updated_at=now(),
 		  version=version+1
 		where id=$1
-	`, req.LeadID, nextAssignee); err != nil {
+	`, req.LeadID, nextAssignee, nextClientStatus); err != nil {
 		return appointment{}, err
 	}
 	if _, err := tx.Exec(
@@ -477,11 +579,13 @@ func (s *Server) createAppointment(
 		appointmentScheduledEventInsert,
 		req.LeadID,
 		actor.ID,
+		nextClientStatus,
 		cleanOptional(req.Comment),
 		appointmentID,
 		startsAt,
 		endsAt,
 		*req.ResponsibleManagerID,
+		kind,
 	); err != nil {
 		return appointment{}, err
 	}
@@ -577,6 +681,23 @@ func (s *Server) updateAppointment(
 		nextStatus = *req.Status
 	}
 
+	// Only re-check availability when the booking actually moves; a comment-only
+	// edit must stay possible on rows that already overlapped before this rule.
+	movedInTime := !nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd)
+	if nextStatus == appointmentStatusScheduled && nextManager != nil &&
+		(movedInTime || !sameUUID(nextManager, currentManager)) {
+		if err := ensureManagerFree(
+			r.Context(),
+			tx,
+			appointmentID,
+			*nextManager,
+			nextStart,
+			nextEnd,
+		); err != nil {
+			return appointment{}, err
+		}
+	}
+
 	result, err := tx.Exec(r.Context(), `
 		update public.lead_showroom_visits
 		set
@@ -630,7 +751,9 @@ func (s *Server) writeAppointmentMutationError(
 	case errors.Is(err, errAppointmentManagerInvalid):
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid responsible manager", map[string]string{"responsibleManagerId": "Manager must be active in this office"})
 	case errors.Is(err, errAppointmentAlreadyActive):
-		s.writeError(w, r, http.StatusConflict, "active_appointment_exists", "Lead already has a scheduled appointment", nil)
+		s.writeError(w, r, http.StatusConflict, "active_appointment_exists", "Lead already has a scheduled appointment of this kind", nil)
+	case errors.Is(err, errAppointmentManagerBusy):
+		s.writeError(w, r, http.StatusConflict, "manager_busy", "Manager already has an appointment in this time range", nil)
 	case errors.Is(err, errAppointmentTerminal):
 		s.writeError(w, r, http.StatusConflict, "appointment_terminal", "Completed appointment status cannot be changed", nil)
 	case errors.Is(err, errAppointmentVersion):
@@ -662,6 +785,9 @@ func validateCreateAppointment(req appointmentMutationRequest) map[string]string
 	if req.ResponsibleManagerID == nil || *req.ResponsibleManagerID == uuid.Nil {
 		fields["responsibleManagerId"] = "Required"
 	}
+	if req.Kind != nil && !isAppointmentKind(*req.Kind) {
+		fields["kind"] = "Use showroom or measurement"
+	}
 	if req.Status != nil {
 		fields["status"] = "Status is assigned automatically"
 	}
@@ -672,6 +798,9 @@ func validateUpdateAppointment(req appointmentMutationRequest) map[string]string
 	fields := map[string]string{}
 	if req.LeadID != uuid.Nil {
 		fields["leadId"] = "Lead cannot be changed"
+	}
+	if req.Kind != nil {
+		fields["kind"] = "Kind cannot be changed"
 	}
 	if req.StartsAtLocal != nil && strings.TrimSpace(*req.StartsAtLocal) == "" {
 		fields["startsAtLocal"] = "Cannot be blank"
@@ -717,6 +846,10 @@ func isAppointmentStatus(status string) bool {
 
 func isAppointmentTerminalStatus(status string) bool {
 	return status == "visited" || status == "no_show" || status == "canceled"
+}
+
+func isAppointmentKind(kind string) bool {
+	return kind == appointmentKindShowroom || kind == appointmentKindMeasurement
 }
 
 func parseAppointmentLocal(value string, location *time.Location) (time.Time, error) {
@@ -821,13 +954,20 @@ func validateAppointmentManager(
 	return nil
 }
 
+// cancelScheduledAppointmentsForLead cancels the lead's scheduled appointments.
+// Pass a kind to cancel only that kind; omit it to cancel every kind.
 func cancelScheduledAppointmentsForLead(
 	ctx context.Context,
 	tx pgx.Tx,
 	actorID uuid.UUID,
 	leadID uuid.UUID,
+	kinds ...string,
 ) error {
-	rows, err := tx.Query(ctx, cancelScheduledAppointmentsUpdate, leadID, actorID)
+	var kind *string
+	if len(kinds) == 1 {
+		kind = &kinds[0]
+	}
+	rows, err := tx.Query(ctx, cancelScheduledAppointmentsUpdate, leadID, actorID, kind)
 	if err != nil {
 		return err
 	}
@@ -891,13 +1031,14 @@ func scheduleLegacyAppointment(
 	err := tx.QueryRow(r.Context(), `
 		select id
 		from public.lead_showroom_visits
-		where lead_id=$1 and status='scheduled'
+		where lead_id=$1 and kind='showroom' and status='scheduled'
 		for update
 	`, leadID).Scan(&appointmentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = tx.QueryRow(r.Context(), `
 			insert into public.lead_showroom_visits (
 			  lead_id,
+			  kind,
 			  scheduled_at,
 			  ends_at,
 			  status,
@@ -905,7 +1046,7 @@ func scheduleLegacyAppointment(
 			  created_by,
 			  updated_by
 			)
-			values ($1,$2,$3,'scheduled',$4,$5,$5)
+			values ($1,'showroom',$2,$3,'scheduled',$4,$5,$5)
 			returning id
 		`, leadID, startsAt, endsAt, managerID, actorID).Scan(&appointmentID)
 		return appointmentID, managerID, err
@@ -942,6 +1083,7 @@ func scanAppointment(row appointmentRowScanner) (appointment, error) {
 		&item.Office.TimezoneName,
 		&managerID,
 		&managerName,
+		&item.Kind,
 		&item.StartsAt,
 		&item.EndsAt,
 		&item.Status,
@@ -970,17 +1112,14 @@ func loadAppointmentTx(r *http.Request, tx pgx.Tx, appointmentID uuid.UUID) (app
 	}
 	item.IsOutsideWorkingHours = appointmentOutsideWorkingHours(item.StartsAt, item.EndsAt, location)
 	if item.ResponsibleManager != nil {
-		err = tx.QueryRow(r.Context(), `
-			select exists(
-			  select 1
-			  from public.lead_showroom_visits other
-			  where other.id <> $1
-			    and other.status='scheduled'
-			    and other.responsible_manager_id=$2
-			    and other.scheduled_at < $4
-			    and other.ends_at > $3
-			)
-		`, item.ID, item.ResponsibleManager.ID, item.StartsAt, item.EndsAt).Scan(&item.HasConflict)
+		item.HasConflict, err = managerOverlapExists(
+			r.Context(),
+			tx,
+			item.ID,
+			item.ResponsibleManager.ID,
+			item.StartsAt,
+			item.EndsAt,
+		)
 		if err != nil {
 			return appointment{}, err
 		}
@@ -999,17 +1138,5 @@ func (s *Server) appointmentHasConflict(
 	if manager == nil {
 		return false, nil
 	}
-	var conflict bool
-	err := s.pool.QueryRow(r.Context(), `
-		select exists(
-		  select 1
-		  from public.lead_showroom_visits other
-		  where other.id <> $1
-		    and other.status='scheduled'
-		    and other.responsible_manager_id=$2
-		    and other.scheduled_at < $4
-		    and other.ends_at > $3
-		)
-	`, appointmentID, manager.ID, startsAt, endsAt).Scan(&conflict)
-	return conflict, err
+	return managerOverlapExists(r.Context(), s.pool, appointmentID, manager.ID, startsAt, endsAt)
 }

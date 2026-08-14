@@ -53,7 +53,7 @@ func TestReminderCandidatesQueryFallsBackToColumnDueAt(t *testing.T) {
 	for _, fragment := range []string{
 		"else coalesce(active_call.due_at, l.callback_due_at)",
 		"when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)",
-		"when l.client_status = 'showroom_invited' then active_showroom.due_at",
+		"when l.client_status in ('showroom_invited', 'measurement_scheduled') then active_visit.due_at",
 		"latest_comment.due_at as comment_due_at",
 	} {
 		if !strings.Contains(query, fragment) {
@@ -71,7 +71,7 @@ func TestReminderCandidatesShowroomDueUsesScheduledVisitTable(t *testing.T) {
 		"from public.lead_showroom_visits v",
 		"v.status = 'scheduled'",
 		"order by v.scheduled_at desc, v.created_at desc",
-		"active_showroom on l.client_status = 'showroom_invited'",
+		"active_visit on l.client_status in ('showroom_invited', 'measurement_scheduled')",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("reminder query missing %q\n%s", fragment, query)

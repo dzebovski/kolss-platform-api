@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestParseAppointmentLocalUsesOfficeTimezone(t *testing.T) {
@@ -103,10 +105,11 @@ func TestCompletedAppointmentDetailsRemainEditable(t *testing.T) {
 
 func TestAppointmentAuditQueriesCastPolymorphicJSONParameters(t *testing.T) {
 	requiredCreateCasts := []string{
-		"$4::uuid",
-		"$5::timestamptz",
+		"$5::uuid",
 		"$6::timestamptz",
-		"$7::uuid",
+		"$7::timestamptz",
+		"$8::uuid",
+		"$9::text",
 	}
 	for _, cast := range requiredCreateCasts {
 		if !strings.Contains(appointmentScheduledEventInsert, cast) {
@@ -136,7 +139,9 @@ func TestCancelScheduledAppointmentsUpdateCancelsOnlyScheduled(t *testing.T) {
 	for _, fragment := range []string{
 		"update public.lead_showroom_visits",
 		"status='canceled'",
-		"where lead_id=$1 and status='scheduled'",
+		"where lead_id=$1",
+		"and status='scheduled'",
+		"and ($3::text is null or kind=$3)",
 		"returning id, scheduled_at, ends_at, responsible_manager_id, comment",
 	} {
 		if !strings.Contains(cancelScheduledAppointmentsUpdate, fragment) {
@@ -186,5 +191,123 @@ func TestCloseAndArchiveCancelScheduledAppointments(t *testing.T) {
 	}
 	if strings.Contains(archive, "Cancel the scheduled appointment before archiving this lead") {
 		t.Fatal("archive must not ask callers to cancel appointments first")
+	}
+}
+
+func TestAppointmentKindValidation(t *testing.T) {
+	showroom := appointmentKindShowroom
+	measurement := appointmentKindMeasurement
+	unknown := "delivery"
+	manager := uuid.New()
+	starts := "2026-08-11T10:00"
+	duration := 120
+
+	base := func(kind *string) appointmentMutationRequest {
+		return appointmentMutationRequest{
+			LeadID:               uuid.New(),
+			Kind:                 kind,
+			StartsAtLocal:        &starts,
+			DurationMinutes:      &duration,
+			ResponsibleManagerID: &manager,
+		}
+	}
+
+	for name, kind := range map[string]*string{
+		"omitted":     nil,
+		"showroom":    &showroom,
+		"measurement": &measurement,
+	} {
+		if fields := validateCreateAppointment(base(kind)); len(fields) != 0 {
+			t.Fatalf("%s kind should be accepted, got %#v", name, fields)
+		}
+	}
+	if fields := validateCreateAppointment(base(&unknown)); fields["kind"] == "" {
+		t.Fatal("unknown kind must be rejected")
+	}
+
+	// Kind is immutable: rebooking as another kind means a new appointment.
+	if fields := validateUpdateAppointment(appointmentMutationRequest{Kind: &measurement}); fields["kind"] == "" {
+		t.Fatal("update must reject a kind change")
+	}
+}
+
+func TestClientStatusForAppointmentKind(t *testing.T) {
+	if got := clientStatusForAppointmentKind(appointmentKindMeasurement); got != "measurement_scheduled" {
+		t.Fatalf("got %q, want measurement_scheduled", got)
+	}
+	for _, kind := range []string{appointmentKindShowroom, ""} {
+		if got := clientStatusForAppointmentKind(kind); got != "showroom_invited" {
+			t.Fatalf("kind %q: got %q, want showroom_invited", kind, got)
+		}
+	}
+}
+
+// The active-appointment probe is scoped by kind so a lead can hold a showroom
+// meeting and a measurement at the same time, while the manager-overlap probe is
+// deliberately not, so a measurement blocks a showroom slot and vice versa.
+func TestAppointmentScopingIsPerKindExceptManagerAvailability(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(file), "appointments.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appointments := string(source)
+
+	if !strings.Contains(appointments, "where lead_id=$1 and kind=$2 and status='scheduled'") {
+		t.Fatal("the active-appointment probe must be scoped by kind")
+	}
+	if !strings.Contains(appointments, "where lead_id=$1 and kind='showroom' and status='scheduled'") {
+		t.Fatal("the legacy showroom_invited path must stay on the showroom kind")
+	}
+
+	overlapStart := strings.Index(appointments, "func managerOverlapExists")
+	if overlapStart < 0 {
+		t.Fatal("managerOverlapExists not found")
+	}
+	overlapEnd := strings.Index(appointments[overlapStart+1:], "\nfunc ")
+	if overlapEnd < 0 {
+		t.Fatal("managerOverlapExists end not found")
+	}
+	overlap := appointments[overlapStart : overlapStart+1+overlapEnd]
+	if strings.Contains(overlap, "kind") {
+		t.Fatal("manager availability must span every kind")
+	}
+	for _, fragment := range []string{
+		"other.status='scheduled'",
+		"other.responsible_manager_id=$2",
+		"other.scheduled_at < $4",
+		"other.ends_at > $3",
+	} {
+		if !strings.Contains(overlap, fragment) {
+			t.Fatalf("manager overlap query missing %q", fragment)
+		}
+	}
+}
+
+// A double booking is rejected outright, so both mutation paths must take the
+// per-manager lock before probing, and the error must map to 409 manager_busy.
+func TestManagerDoubleBookingIsBlocked(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(file), "appointments.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appointments := string(source)
+
+	if !strings.Contains(appointments, "pg_advisory_xact_lock(hashtextextended($1::text, 0))") {
+		t.Fatal("the availability check must be serialized per manager")
+	}
+	if strings.Count(appointments, "ensureManagerFree(") != 3 {
+		t.Fatal("create and update must both check manager availability")
+	}
+	if !strings.Contains(appointments, `"manager_busy"`) ||
+		!strings.Contains(appointments, "http.StatusConflict, \"manager_busy\"") {
+		t.Fatal("a busy manager must surface as 409 manager_busy")
 	}
 }

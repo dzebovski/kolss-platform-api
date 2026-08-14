@@ -120,3 +120,29 @@ func TestInactiveBoundaryIsMoreThanSevenCalendarDays(t *testing.T) {
 		}
 	}
 }
+
+func TestReportClientStatusesCoverEveryStoredStatus(t *testing.T) {
+	// The report must count every status the leads CHECK constraint allows,
+	// because ReportStatusCounts requires all of them in the contract.
+	want := map[string]bool{
+		"new_lead":                true,
+		"showroom_invited":        true,
+		"measurement_scheduled":   true,
+		"calculation_in_progress": true,
+		"thinking":                true,
+		"contract_signed":         true,
+		"closed_lost":             true,
+	}
+	if len(reportClientStatuses) != len(want) {
+		t.Fatalf("got %d statuses, want %d: %#v", len(reportClientStatuses), len(want), reportClientStatuses)
+	}
+	for _, status := range reportClientStatuses {
+		if !want[status] {
+			t.Fatalf("unexpected report status %q", status)
+		}
+		delete(want, status)
+	}
+	for status := range want {
+		t.Fatalf("report is missing client status %q", status)
+	}
+}

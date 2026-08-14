@@ -103,14 +103,25 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		)),
-		'showroom_due_at', (
+		'callback_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else l.callback_due_at end,
+		'showroom_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else (
 			select v.scheduled_at
 			from public.lead_showroom_visits v
 			where v.lead_id = l.id
+				and v.kind = 'showroom'
 				and v.status = 'scheduled'
 			order by v.scheduled_at desc, v.created_at desc
 			limit 1
-		),
+		) end,
+		'measurement_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else (
+			select v.scheduled_at
+			from public.lead_showroom_visits v
+			where v.lead_id = l.id
+				and v.kind = 'measurement'
+				and v.status = 'scheduled'
+			order by v.scheduled_at desc, v.created_at desc
+			limit 1
+		) end,
 		'latest_timeline_comment', (
 			select jsonb_build_object(
 				'comment', e.comment,
@@ -127,7 +138,7 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		),
-		'comment_reminder_due_at', (
+		'comment_reminder_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else (
 			select case
 				when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
 					then e.new_value->>'callback_due_at'
@@ -138,8 +149,8 @@ const leadJSONExpression = `
 				and e.event_category = 'comment'
 			order by e.created_at desc
 			limit 1
-		),
-		'comment_reminder_assigned_to', (
+		) end,
+		'comment_reminder_assigned_to', case when l.client_status in ('closed_lost','contract_signed') then null else (
 			select case
 				when jsonb_typeof(e.new_value->'assigned_to') = 'string'
 					then e.new_value->>'assigned_to'
@@ -150,8 +161,9 @@ const leadJSONExpression = `
 				and e.event_category = 'comment'
 			order by e.created_at desc
 			limit 1
-		),
+		) end,
 		'callback_due_context', case
+			when l.client_status in ('closed_lost','contract_signed') then null
 			when l.callback_due_at is null then null
 			else coalesce((
 				select case
@@ -249,7 +261,12 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 			"l.client_status = " + addArg("new_lead"),
 			"l.call_status is not null",
 		}, true
-	case "showroom_invited", "calculation_in_progress", "thinking", "closed_lost", "contract_signed":
+	case "showroom_invited",
+		"measurement_scheduled",
+		"calculation_in_progress",
+		"thinking",
+		"closed_lost",
+		"contract_signed":
 		return []string{"l.client_status = " + addArg(raw)}, true
 	default:
 		return nil, false

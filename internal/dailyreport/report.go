@@ -301,7 +301,7 @@ const reminderLeadCandidatesQuery = `
 	  end as call_due_at,
 	  case
 	    when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)
-	    when l.client_status = 'showroom_invited' then active_showroom.due_at
+	    when l.client_status in ('showroom_invited', 'measurement_scheduled') then active_visit.due_at
 	    else null
 	  end as client_due_at,
 	  latest_comment.due_at as comment_due_at
@@ -340,9 +340,13 @@ const reminderLeadCandidatesQuery = `
 	  from public.lead_showroom_visits v
 	  where v.lead_id = l.id
 	    and v.status = 'scheduled'
+	    and v.kind = case l.client_status
+	      when 'measurement_scheduled' then 'measurement'
+	      else 'showroom'
+	    end
 	  order by v.scheduled_at desc, v.created_at desc
 	  limit 1
-	) active_showroom on l.client_status = 'showroom_invited'
+	) active_visit on l.client_status in ('showroom_invited', 'measurement_scheduled')
 	left join lateral (
 	  select case
 	    when jsonb_typeof(e.new_value->'callback_due_at') = 'string'

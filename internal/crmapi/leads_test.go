@@ -46,6 +46,12 @@ func TestClientStatusFilterWhere(t *testing.T) {
 			wantSQL: []string{`l.client_status = "thinking"`},
 		},
 		{
+			name:    "measurement scheduled",
+			raw:     "measurement_scheduled",
+			wantOK:  true,
+			wantSQL: []string{`l.client_status = "measurement_scheduled"`},
+		},
+		{
 			name:   "unknown status",
 			raw:    "taken",
 			wantOK: false,
@@ -295,6 +301,33 @@ func TestLeadJSONExpressionEmbedsIndependentShowroomDueDate(t *testing.T) {
 	} {
 		if !strings.Contains(expr, fragment) {
 			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
+		}
+	}
+}
+
+// A closed lead has no reminders: every reminder-bearing field is suppressed at
+// serialization, which also covers leads closed before the write path started
+// clearing them.
+func TestLeadJSONExpressionSuppressesRemindersForTerminalLeads(t *testing.T) {
+	expr := leadJSONExpression
+	const guard = "l.client_status in ('closed_lost','contract_signed') then null"
+
+	fields := []struct{ field, until string }{
+		{"'callback_due_at'", "'showroom_due_at'"},
+		{"'showroom_due_at'", "'measurement_due_at'"},
+		{"'measurement_due_at'", "'latest_timeline_comment'"},
+		{"'comment_reminder_due_at'", "'comment_reminder_assigned_to'"},
+		{"'comment_reminder_assigned_to'", "'callback_due_context'"},
+		{"'callback_due_context'", "'markers'"},
+	}
+	for _, f := range fields {
+		start := strings.Index(expr, f.field)
+		end := strings.Index(expr, f.until)
+		if start < 0 || end <= start {
+			t.Fatalf("could not slice %s..%s out of leadJSONExpression", f.field, f.until)
+		}
+		if !strings.Contains(expr[start:end], guard) {
+			t.Errorf("%s is not suppressed for terminal leads\n%s", f.field, expr[start:end])
 		}
 	}
 }

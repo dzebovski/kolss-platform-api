@@ -21,10 +21,11 @@ const (
 	activityClearReminder = "clear_reminder"
 	activityReopen        = "reopen"
 
-	reminderKindCallback = "callback"
-	reminderKindThinking = "thinking"
-	reminderKindComment  = "comment"
-	reminderKindShowroom = "showroom"
+	reminderKindCallback    = "callback"
+	reminderKindThinking    = "thinking"
+	reminderKindComment     = "comment"
+	reminderKindShowroom    = "showroom"
+	reminderKindMeasurement = "measurement"
 )
 
 type leadActivityRequest struct {
@@ -194,7 +195,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	terminal := lead.ClientStatus == "closed_lost" || lead.ClientStatus == "contract_signed"
+	terminal := isTerminalClientStatus(lead.ClientStatus)
 	if req.Type == activityReopen {
 		if !terminal {
 			s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only terminal leads can be reopened", nil)
@@ -365,9 +366,13 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			fields["amount"] = "Not allowed for this activity type"
 		}
 		switch req.Kind {
-		case reminderKindCallback, reminderKindThinking, reminderKindComment, reminderKindShowroom:
+		case reminderKindCallback,
+			reminderKindThinking,
+			reminderKindComment,
+			reminderKindShowroom,
+			reminderKindMeasurement:
 		default:
-			fields["kind"] = "Must be callback, thinking, comment, or showroom"
+			fields["kind"] = "Must be callback, thinking, comment, showroom, or measurement"
 		}
 	case activityReopen:
 		rejectDueAt()
@@ -458,17 +463,23 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 				callbackDueAt = nil
 				newValue["callback_due_at"] = nil
 			}
-		case reminderKindShowroom:
-			// Cancels scheduled showroom visits; client_status stays unchanged.
+		case reminderKindShowroom, reminderKindMeasurement:
+			// Cancels the scheduled visit of that kind; client_status stays unchanged.
 			eventCategory = "system"
-			showroomDueAt, err := latestScheduledShowroomDueAt(r, tx, leadID)
+			visitKind := appointmentKindShowroom
+			valueKey := "showroom_due_at"
+			if req.Kind == reminderKindMeasurement {
+				visitKind = appointmentKindMeasurement
+				valueKey = "measurement_due_at"
+			}
+			dueAt, err := latestScheduledVisitDueAt(r, tx, leadID, visitKind)
 			if err != nil {
 				return err
 			}
-			if showroomDueAt != nil {
-				oldValue["showroom_due_at"] = showroomDueAt
+			if dueAt != nil {
+				oldValue[valueKey] = dueAt
 			}
-			newValue["showroom_due_at"] = nil
+			newValue[valueKey] = nil
 		}
 	case activityClientStatus:
 		eventType = "client_status_changed"
@@ -574,11 +585,14 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	if err != nil {
 		return err
 	}
-	if req.Type == activityClientStatus && req.Status == "closed_lost" {
+	if req.Type == activityClientStatus && isTerminalClientStatus(req.Status) {
 		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
 	}
 	if req.Type == activityClearReminder && req.Kind == reminderKindShowroom {
-		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
+		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID, appointmentKindShowroom)
+	}
+	if req.Type == activityClearReminder && req.Kind == reminderKindMeasurement {
+		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID, appointmentKindMeasurement)
 	}
 	return nil
 }
@@ -619,18 +633,25 @@ func latestCommentReminderDueAt(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (*
 	return &utc, nil
 }
 
-// latestScheduledShowroomDueAt returns the soonest/latest scheduled showroom visit
-// start time for the lead, matching the lead list showroom_due_at derivation.
-func latestScheduledShowroomDueAt(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (*time.Time, error) {
+// latestScheduledVisitDueAt returns the latest scheduled visit start time of the
+// given kind for the lead, matching the lead list showroom_due_at /
+// measurement_due_at derivation.
+func latestScheduledVisitDueAt(
+	r *http.Request,
+	tx pgx.Tx,
+	leadID uuid.UUID,
+	kind string,
+) (*time.Time, error) {
 	var due *time.Time
 	err := tx.QueryRow(r.Context(), `
 		select v.scheduled_at
 		from public.lead_showroom_visits v
 		where v.lead_id = $1
+			and v.kind = $2
 			and v.status = 'scheduled'
 		order by v.scheduled_at desc, v.created_at desc
 		limit 1
-	`, leadID).Scan(&due)
+	`, leadID, kind).Scan(&due)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -646,12 +667,21 @@ func shouldClearLeadDueForCommentReminder(leadDue, commentDue *time.Time) bool {
 	return leadDue != nil && commentDue != nil && leadDue.Equal(*commentDue)
 }
 
+// isTerminalClientStatus reports whether the lead is closed — no further work,
+// and therefore no reminders, belong to it.
+func isTerminalClientStatus(status string) bool {
+	return status == "closed_lost" || status == "contract_signed"
+}
+
 func nextClientStatusCallbackDue(
 	callStatus *string,
 	current *time.Time,
 	clientStatus string,
 	requested *time.Time,
 ) *time.Time {
+	if isTerminalClientStatus(clientStatus) {
+		return nil
+	}
 	if clientStatus == "thinking" {
 		return requested
 	}

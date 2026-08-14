@@ -107,6 +107,34 @@ func TestNextClientStatusCallbackDue(t *testing.T) {
 	if got := nextClientStatusCallbackDue(&reached, &current, "thinking", &replacement); got == nil || !got.Equal(replacement) {
 		t.Fatalf("thinking date: got %v, want %v", got, replacement)
 	}
+
+	// A closed lead keeps no reminder, not even a pending callback.
+	for _, status := range []string{"closed_lost", "contract_signed"} {
+		if got := nextClientStatusCallbackDue(&callback, &current, status, nil); got != nil {
+			t.Errorf("%s must drop the pending callback: got %v, want nil", status, got)
+		}
+		if got := nextClientStatusCallbackDue(&callback, &current, status, &replacement); got != nil {
+			t.Errorf("%s must ignore a requested date: got %v, want nil", status, got)
+		}
+	}
+}
+
+func TestIsTerminalClientStatus(t *testing.T) {
+	terminal := map[string]bool{
+		"closed_lost":             true,
+		"contract_signed":         true,
+		"new_lead":                false,
+		"showroom_invited":        false,
+		"measurement_scheduled":   false,
+		"calculation_in_progress": false,
+		"thinking":                false,
+		"":                        false,
+	}
+	for status, want := range terminal {
+		if got := isTerminalClientStatus(status); got != want {
+			t.Errorf("isTerminalClientStatus(%q) = %v, want %v", status, got, want)
+		}
+	}
 }
 
 func TestApplyCommentActivityValuesStoresAssignee(t *testing.T) {

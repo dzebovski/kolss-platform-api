@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.7.0
+  version: 2.8.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -369,6 +369,9 @@ paths:
         - name: status
           in: query
           schema: { $ref: '#/components/schemas/AppointmentStatus' }
+        - name: kind
+          in: query
+          schema: { $ref: '#/components/schemas/AppointmentKind' }
       responses:
         '200':
           description: Appointments formatted against the canonical office timezone
@@ -396,7 +399,14 @@ paths:
               schema: { $ref: '#/components/schemas/AppointmentMutationResponse' }
         '400': { $ref: '#/components/responses/CRMError' }
         '403': { $ref: '#/components/responses/CRMError' }
-        '409': { $ref: '#/components/responses/CRMError' }
+        '409':
+          description: >
+            active_appointment_exists when the lead already has a scheduled appointment of
+            that kind, or manager_busy when the responsible manager already has an
+            appointment overlapping the requested range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CRMErrorResponse' }
   /v1/appointments/{appointmentId}:
     patch:
       tags: [Appointments]
@@ -423,7 +433,13 @@ paths:
         '400': { $ref: '#/components/responses/CRMError' }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
-        '409': { $ref: '#/components/responses/CRMError' }
+        '409':
+          description: >
+            version_conflict, appointment_terminal, or manager_busy when the responsible
+            manager already has an appointment overlapping the requested range.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CRMErrorResponse' }
         '428': { $ref: '#/components/responses/CRMError' }
   /v1/users:
     get:
@@ -689,6 +705,12 @@ components:
     AppointmentWarning:
       type: string
       enum: [manager_overlap, outside_working_hours]
+    AppointmentKind:
+      type: string
+      description: >
+        showroom is a meeting at the KOLSS showroom; measurement is an on-site furniture
+        measurement at the customer's place. Both occupy the responsible manager's calendar.
+      enum: [showroom, measurement]
     AppointmentLeadSummary:
       type: object
       additionalProperties: false
@@ -721,6 +743,7 @@ components:
         - lead
         - office
         - responsibleManager
+        - kind
         - startsAt
         - endsAt
         - status
@@ -739,6 +762,7 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/AppointmentManagerSummary'
+        kind: { $ref: '#/components/schemas/AppointmentKind' }
         startsAt: { type: string, format: date-time }
         endsAt: { type: string, format: date-time }
         status: { $ref: '#/components/schemas/AppointmentStatus' }
@@ -777,6 +801,9 @@ components:
       required: [leadId, startsAtLocal, durationMinutes, responsibleManagerId]
       properties:
         leadId: { type: string, format: uuid }
+        kind:
+          allOf: [{ $ref: '#/components/schemas/AppointmentKind' }]
+          default: showroom
         startsAtLocal:
           type: string
           pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$'
@@ -865,6 +892,12 @@ components:
             - $ref: '#/components/schemas/LeadCallStatusActor'
         client_status: { $ref: '#/components/schemas/ClientStatus' }
         client_status_changed_at: { type: string, format: date-time }
+        callback_due_at:
+          description: >
+            Shared due date behind the callback and thinking reminders. Always null for
+            terminal leads (closed_lost, contract_signed) — a closed lead has no reminders.
+          type: [string, 'null']
+          format: date-time
         version: { type: integer, minimum: 1 }
         archived_at: { type: [string, 'null'], format: date-time }
         archived_by: { type: [string, 'null'], format: uuid }
@@ -885,22 +918,35 @@ components:
         comment_reminder_due_at:
           description: >
             Reminder date stored on the latest explicit comment event. Null when the latest
-            explicit comment has no reminder, regardless of later call or client status events.
+            explicit comment has no reminder, regardless of later call or client status events,
+            and always null for terminal leads (closed_lost, contract_signed).
           type: [string, 'null']
           format: date-time
         comment_reminder_assigned_to:
           description: >
             Task assignee stored on the latest explicit comment event. Null when the latest
-            explicit comment has no assignee, regardless of later call or client status events.
+            explicit comment has no assignee, regardless of later call or client status events,
+            and always null for terminal leads (closed_lost, contract_signed).
           type: [string, 'null']
           format: uuid
         showroom_due_at:
           description: >
-            Start of the lead's current scheduled appointment. Derived from
-            lead_showroom_visits and independent from callback reminders.
+            Start of the lead's current scheduled showroom appointment. Derived from
+            lead_showroom_visits and independent from callback reminders. Always null for
+            terminal leads (closed_lost, contract_signed) — closing cancels scheduled visits.
+          type: [string, 'null']
+          format: date-time
+        measurement_due_at:
+          description: >
+            Start of the lead's current scheduled on-site measurement. Derived from
+            lead_showroom_visits and independent from callback reminders. Always null for
+            terminal leads (closed_lost, contract_signed) — closing cancels scheduled visits.
           type: [string, 'null']
           format: date-time
         callback_due_context:
+          description: >
+            Which status change produced callback_due_at. Always null for terminal leads
+            (closed_lost, contract_signed).
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/CallbackDueContext'
@@ -919,7 +965,14 @@ components:
         actor_name: { type: string, minLength: 1 }
     ClientStatus:
       type: string
-      enum: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]
+      enum:
+        - new_lead
+        - showroom_invited
+        - measurement_scheduled
+        - calculation_in_progress
+        - thinking
+        - closed_lost
+        - contract_signed
     LeadMarkerKind:
       type: string
       enum: [reviewed, manager_aware]
@@ -1025,13 +1078,13 @@ components:
         type: { type: string, const: clear_reminder }
         kind:
           type: string
-          enum: [callback, thinking, comment, showroom]
+          enum: [callback, thinking, comment, showroom, measurement]
           description: >
             Clears only the reminder due date for the given kind. Call and client
             statuses are unchanged. Callback and thinking share leads.callback_due_at;
             comment clears the derived comment reminder (and leads.callback_due_at when
-            it matches that comment reminder); showroom cancels scheduled showroom
-            appointments so showroom_due_at becomes null.
+            it matches that comment reminder); showroom and measurement cancel the
+            scheduled appointment of that kind so the matching due date becomes null.
     ReopenActivityRequest:
       type: object
       additionalProperties: false
@@ -1077,10 +1130,18 @@ components:
     ReportStatusCounts:
       type: object
       additionalProperties: false
-      required: [new_lead, showroom_invited, calculation_in_progress, thinking, closed_lost, contract_signed]
+      required:
+        - new_lead
+        - showroom_invited
+        - measurement_scheduled
+        - calculation_in_progress
+        - thinking
+        - closed_lost
+        - contract_signed
       properties:
         new_lead: { type: integer, minimum: 0 }
         showroom_invited: { type: integer, minimum: 0 }
+        measurement_scheduled: { type: integer, minimum: 0 }
         calculation_in_progress: { type: integer, minimum: 0 }
         thinking: { type: integer, minimum: 0 }
         closed_lost: { type: integer, minimum: 0 }
