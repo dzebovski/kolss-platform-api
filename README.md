@@ -59,21 +59,41 @@ in Europe/Warsaw) are delivered only to Slack.
 
 ### Daily report
 
-Kyiv receives the morning report on Telegram; Warsaw receives it on Slack. Both
-use the same local hour (`DAILY_REPORT_HOUR_LOCAL`, default 9) and skip Sundays.
+Kyiv receives the morning report on Telegram (Ukrainian); Warsaw receives it
+on Slack (Polish). Both use the same local hour (`DAILY_REPORT_HOUR_LOCAL`,
+default 9) and skip Sundays.
 
-Lead selection (non-archived, not `closed_lost` / `contract_signed`):
+The message has one line per non-empty group: emoji, group name, count, and a
+CRM deep link. There is no per-lead detail — the count on the line always
+equals what the manager sees after clicking through, because both the digest
+and the CRM read the same [`internal/leadcohorts`](./internal/leadcohorts)
+queries. If every group is empty, a single "nothing needs attention" message
+is sent instead. Six groups, in display order (non-archived, not
+`closed_lost` / `contract_signed`):
 
-1. **Reminders** — any due date today or overdue in the office timezone
-   (`callback_requested`, `thinking`, `showroom_invited`, or latest comment).
-2. **New** — `call_status` is null.
-3. **No answer** — `call_status = no_answer`.
-4. **Callback** — `callback_requested` **without** a due date.
+1. **New leads** (🆕) — `call_status` is null.
+2. **No answer + undated callback** (📵) — `call_status = no_answer`, or
+   `callback_requested` with no due date yet.
+3. **Callbacks due today** (⏰) — a callback reminder due on the office-local
+   report date.
+4. **Visits due today** (🏠) — a scheduled showroom/measurement visit due on
+   the office-local report date.
+5. **Other reminders due today** (💬) — a `thinking` or comment reminder due
+   on the office-local report date.
+6. **Overdue reminders** (⚠️) — any reminder (callback, visit, or other) due
+   strictly before the office-local report date.
 
-Dated `callback_requested` leads appear only under reminders (not the callback
-section). Future due dates are excluded until that local calendar day.
+Each line links into the CRM: groups 1-2 to the leads list
+(`/crm/leads?office=<code>&callStatus=…&clientStatus=…&days=all`), groups 3-5
+to that day's calendar (`/crm/calendar?office=<code>&date=<YYYY-MM-DD>&kind=…`),
+and group 6 to the calendar filtered to overdue items
+(`/crm/calendar?office=<code>&due=overdue`). Set
+`CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without a path; an invalid or empty
+value degrades a line to plain text instead of emitting a broken link.
 
-Set `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without `/crm/leads/:id`.
+Use `cmd/dailyreport-preview` to inspect a composed message (including the six
+raw counts) for a given office and date without waiting for the schedule or
+sending anything — see below.
 
 ## Deploy
 
@@ -92,6 +112,34 @@ go build -o /tmp/kolss-platform-api ./cmd/api
 ```
 
 The explicit output path avoids colliding with the repository's `api/` OpenAPI directory.
+
+## Daily report preview
+
+Compose and print the morning digest for one office and date to stdout,
+without sending anything:
+
+```bash
+go build -o /tmp/kolss-dailyreport-preview ./cmd/dailyreport-preview
+set -a && source .env.local && set +a   # or .env, or export DATABASE_URL yourself
+/tmp/kolss-dailyreport-preview -office=warsaw -date=2026-08-17
+```
+
+`-date` defaults to today in the office's timezone when omitted. It prints
+the six raw group counts and the exact rendered message (Slack for `warsaw`,
+Telegram for `kyiv`).
+
+Unlike `cmd/api`, this tool only needs `DATABASE_URL` (required) and
+optionally `CRM_SITE_URL_PUBLIC` (falling back to `SITE_URL_PUBLIC`) for the
+CRM deep links — see `config.LoadPreview` in
+[`internal/config/config.go`](./internal/config/config.go). It does **not**
+need `SUPABASE_URL`/`SUPABASE_SECRET_KEY` or any Telegram/Slack token: it
+only runs read-only `SELECT`s through `internal/leadcohorts` and prints text,
+so it works with exactly the environment a local checkout's `.env`/`.env.local`
+already provide. Leave `CRM_SITE_URL_PUBLIC` unset to see how a line degrades
+to plain text without a link. There is no `.env` auto-loading in this
+repository (no dotenv dependency) — export the variables yourself, e.g. via
+`source` as shown above, before running the binary or `go run`. It never
+sends a message and never prints secrets.
 
 ## One-off Biuro Leads Status import
 

@@ -152,6 +152,215 @@ func TestClientStatusFilterWhereMulti(t *testing.T) {
 	}
 }
 
+func TestCallStatusFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	tests := []struct {
+		name    string
+		raw     string
+		wantOK  bool
+		wantSQL []string
+	}{
+		{
+			name:    "none means no call recorded",
+			raw:     "none",
+			wantOK:  true,
+			wantSQL: []string{"l.call_status is null"},
+		},
+		{
+			name:   "callback_undated pairs status with a null due date",
+			raw:    "callback_undated",
+			wantOK: true,
+			wantSQL: []string{
+				`l.call_status = "callback_requested"`,
+				"l.callback_due_at is null",
+			},
+		},
+		{
+			name:    "reached exact status",
+			raw:     "reached",
+			wantOK:  true,
+			wantSQL: []string{`l.call_status = "reached"`},
+		},
+		{
+			name:    "no_answer exact status",
+			raw:     "no_answer",
+			wantOK:  true,
+			wantSQL: []string{`l.call_status = "no_answer"`},
+		},
+		{
+			name:    "callback_requested exact status",
+			raw:     "callback_requested",
+			wantOK:  true,
+			wantSQL: []string{`l.call_status = "callback_requested"`},
+		},
+		{
+			name:   "unknown status",
+			raw:    "escalated",
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := callStatusFilterWhere(test.raw, addArg)
+			if ok != test.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
+			}
+			if !test.wantOK {
+				if got != nil {
+					t.Fatalf("clauses=%v, want nil", got)
+				}
+				return
+			}
+			if len(got) != len(test.wantSQL) {
+				t.Fatalf("clauses=%v, want %v", got, test.wantSQL)
+			}
+			for i := range got {
+				if got[i] != test.wantSQL[i] {
+					t.Fatalf("clause[%d]=%q, want %q", i, got[i], test.wantSQL[i])
+				}
+			}
+		})
+	}
+}
+
+func TestCallStatusFilterWhereMulti(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	tests := []struct {
+		name    string
+		values  []string
+		wantOK  bool
+		wantSQL string
+	}{
+		{name: "no values", values: nil, wantOK: true, wantSQL: ""},
+		{
+			name:    "single exact status",
+			values:  []string{"reached"},
+			wantOK:  true,
+			wantSQL: `l.call_status = "reached"`,
+		},
+		{
+			// This is the digest's "Недозвон + перезвон" cohort. A no_answer lead can
+			// legitimately keep a non-null callback_due_at (see applyLeadActivity in
+			// activities.go, which preserves callback_due_at when client_status is
+			// thinking), so callback_undated must stay its own OR'd clause group rather
+			// than an AND'd "callback_due_at is null" applied across the whole filter —
+			// otherwise it would wrongly exclude such no_answer leads from this cohort.
+			name:    "no_answer OR undated callback keeps no_answer leads with a due date",
+			values:  []string{"no_answer", "callback_undated"},
+			wantOK:  true,
+			wantSQL: `(l.call_status = "no_answer" or (l.call_status = "callback_requested" and l.callback_due_at is null))`,
+		},
+		{
+			name:    "ORs multi-clause and single-clause groups together",
+			values:  []string{"callback_undated", "reached"},
+			wantOK:  true,
+			wantSQL: `((l.call_status = "callback_requested" and l.callback_due_at is null) or l.call_status = "reached")`,
+		},
+		{
+			name:   "unknown value fails the whole set",
+			values: []string{"reached", "escalated"},
+			wantOK: false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, ok := callStatusFilterWhereMulti(test.values, addArg)
+			if ok != test.wantOK {
+				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
+			}
+			if test.wantOK && got != test.wantSQL {
+				t.Fatalf("sql=%q, want %q", got, test.wantSQL)
+			}
+		})
+	}
+}
+
+// TestCallStatusNoAnswerWithDueDateStillMatchesCallbackUndatedGroup is the
+// explicit regression test for the §3 correctness trap: a no_answer lead
+// that still carries a non-null callback_due_at (possible when
+// client_status is thinking — applyLeadActivity in activities.go only clears
+// callback_due_at on a call-status change when client_status isn't thinking)
+// must still be matched by callStatus=no_answer,callback_undated, because the
+// no_answer branch of the OR does not reference callback_due_at at all.
+func TestCallStatusNoAnswerWithDueDateStillMatchesCallbackUndatedGroup(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	sql, ok := callStatusFilterWhereMulti([]string{"no_answer", "callback_undated"}, addArg)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	const want = `(l.call_status = "no_answer" or (l.call_status = "callback_requested" and l.callback_due_at is null))`
+	if sql != want {
+		t.Fatalf("sql=%q, want %q", sql, want)
+	}
+	// The no_answer disjunct is a bare status equality with no callback_due_at
+	// condition, so it cannot exclude a no_answer lead based on its due date —
+	// this is what makes the trap-in-brief scenario (no_answer lead with a
+	// non-null callback_due_at) still match the whole OR group.
+	noAnswerDisjunct := `l.call_status = "no_answer"`
+	if !strings.Contains(sql, noAnswerDisjunct) || strings.Contains(sql, noAnswerDisjunct+" and") {
+		t.Fatalf("no_answer disjunct must be a bare equality, not ANDed with a due-date condition: %q", sql)
+	}
+}
+
+func TestClientStatusFilterWhereActive(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+
+	got, ok := clientStatusFilterWhere("active", addArg)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	want := []string{`l.client_status not in ("closed_lost","contract_signed")`}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("clauses=%v, want %v", got, want)
+	}
+}
+
+// TestDigestGroupOneCombinesCallStatusNoneWithClientStatusActive covers the
+// exact URL shape the daily-digest deep link for "New leads" (group 1) will
+// use: callStatus=none combined with clientStatus=active, each parsed
+// independently through the same addArg counter handleListLeads uses.
+func TestDigestGroupOneCombinesCallStatusNoneWithClientStatusActive(t *testing.T) {
+	var args []any
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	callSQL, ok := callStatusFilterWhereMulti([]string{"none"}, addArg)
+	if !ok {
+		t.Fatal("expected callStatus ok=true")
+	}
+	clientSQL, ok := clientStatusFilterWhereMulti([]string{"active"}, addArg)
+	if !ok {
+		t.Fatal("expected clientStatus ok=true")
+	}
+
+	if callSQL != "l.call_status is null" {
+		t.Fatalf("callStatus sql=%q, want %q", callSQL, "l.call_status is null")
+	}
+	wantClientSQL := `l.client_status not in ($1,$2)`
+	if clientSQL != wantClientSQL {
+		t.Fatalf("clientStatus sql=%q, want %q", clientSQL, wantClientSQL)
+	}
+	wantArgs := []any{"closed_lost", "contract_signed"}
+	if len(args) != len(wantArgs) || args[0] != wantArgs[0] || args[1] != wantArgs[1] {
+		t.Fatalf("args=%v, want %v", args, wantArgs)
+	}
+}
+
 func TestLeadJSONExpressionEmbedsChronologicalFirstContactAttempt(t *testing.T) {
 	expr := leadJSONExpression
 	firstAttemptStart := strings.Index(expr, "'first_contact_attempt'")

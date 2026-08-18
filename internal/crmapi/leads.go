@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/dzebovski/kolss-platform-api/internal/leadcohorts"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
 )
 
@@ -138,18 +139,7 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		),
-		'comment_reminder_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else (
-			select case
-				when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-					then e.new_value->>'callback_due_at'
-				else null
-			end
-			from public.lead_events e
-			where e.lead_id = l.id
-				and e.event_category = 'comment'
-			order by e.created_at desc
-			limit 1
-		) end,
+		'comment_reminder_due_at', case when l.client_status in ('closed_lost','contract_signed') then null else ` + leadcohorts.CommentReminderDueAtSQL + ` end,
 		'comment_reminder_assigned_to', case when l.client_status in ('closed_lost','contract_signed') then null else (
 			select case
 				when jsonb_typeof(e.new_value->'assigned_to') = 'string'
@@ -162,36 +152,7 @@ const leadJSONExpression = `
 			order by e.created_at desc
 			limit 1
 		) end,
-		'callback_due_context', case
-			when l.client_status in ('closed_lost','contract_signed') then null
-			when l.callback_due_at is null then null
-			else coalesce((
-				select case
-					when jsonb_typeof(e.new_value->'callback_due_at') = 'string' then
-						jsonb_build_object(
-							'event_category', e.event_category,
-							'status_code', e.status_code
-						)
-					when l.call_status = 'callback_requested' then
-						jsonb_build_object(
-							'event_category', 'call_status',
-							'status_code', 'callback_requested'
-						)
-					else null
-				end
-				from public.lead_events e
-				where e.lead_id = l.id
-					and e.new_value ? 'callback_due_at'
-				order by e.created_at desc
-				limit 1
-			), case
-				when l.call_status = 'callback_requested' then
-					jsonb_build_object('event_category', 'call_status', 'status_code', 'callback_requested')
-				when l.client_status = 'thinking' then
-					jsonb_build_object('event_category', 'client_status', 'status_code', 'thinking')
-				else null
-			end)
-		end,
+		'callback_due_context', ` + leadcohorts.CallbackDueContextSQL + `,
 		'markers', coalesce((
 			select jsonb_agg(jsonb_build_object(
 				'kind', m.kind,
@@ -248,7 +209,8 @@ func splitQueryValues(raw string) []string {
 }
 
 // clientStatusFilterWhere maps list filter values to SQL clauses.
-// new_lead means truly new (no call yet); in_work is new_lead with a recorded call.
+// new_lead means truly new (no call yet); in_work is new_lead with a recorded call;
+// active means anything not terminal (closed_lost, contract_signed).
 func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
 	switch raw {
 	case "new_lead":
@@ -260,6 +222,10 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 		return []string{
 			"l.client_status = " + addArg("new_lead"),
 			"l.call_status is not null",
+		}, true
+	case "active":
+		return []string{
+			"l.client_status not in (" + addArg("closed_lost") + "," + addArg("contract_signed") + ")",
 		}, true
 	case "showroom_invited",
 		"measurement_scheduled",
@@ -280,6 +246,54 @@ func clientStatusFilterWhereMulti(values []string, addArg func(any) string) (str
 	groups := make([]string, 0, len(values))
 	for _, v := range values {
 		clauses, ok := clientStatusFilterWhere(v, addArg)
+		if !ok {
+			return "", false
+		}
+		if len(clauses) == 1 {
+			groups = append(groups, clauses[0])
+		} else {
+			groups = append(groups, "("+strings.Join(clauses, " and ")+")")
+		}
+	}
+	switch len(groups) {
+	case 0:
+		return "", true
+	case 1:
+		return groups[0], true
+	default:
+		return "(" + strings.Join(groups, " or ") + ")", true
+	}
+}
+
+// callStatusFilterWhere maps list filter values to SQL clauses.
+// none means no call recorded yet; callback_undated is callback_requested
+// without a due date. It must stay a distinct clause group rather than a
+// global "callback_due_at is null" AND, because a no_answer lead keeps its
+// callback_due_at when client_status is thinking (see applyLeadActivity in
+// activities.go) — ANDing it globally would wrongly drop those no_answer leads.
+func callStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
+	switch raw {
+	case "none":
+		return []string{"l.call_status is null"}, true
+	case "callback_undated":
+		return []string{
+			"l.call_status = " + addArg("callback_requested"),
+			"l.callback_due_at is null",
+		}, true
+	case "reached", "no_answer", "callback_requested":
+		return []string{"l.call_status = " + addArg(raw)}, true
+	default:
+		return nil, false
+	}
+}
+
+// callStatusFilterWhereMulti OR's together the clause group for each selected
+// value (each group's own clauses stay AND'd), e.g. ["no_answer", "callback_undated"] ->
+// "(l.call_status = $1 or (l.call_status = $2 and l.callback_due_at is null))".
+func callStatusFilterWhereMulti(values []string, addArg func(any) string) (string, bool) {
+	groups := make([]string, 0, len(values))
+	for _, v := range values {
+		clauses, ok := callStatusFilterWhere(v, addArg)
 		if !ok {
 			return "", false
 		}
@@ -352,16 +366,13 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("callStatus")); raw != "" {
-		values := splitQueryValues(raw)
-		allowed := map[string]bool{"reached": true, "no_answer": true, "callback_requested": true}
-		for _, v := range values {
-			if !allowed[v] {
-				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
-				return
-			}
+		group, ok := callStatusFilterWhereMulti(splitQueryValues(raw), addArg)
+		if !ok {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
+			return
 		}
-		if len(values) > 0 {
-			where = append(where, "l.call_status = any("+addArg(values)+"::text[])")
+		if group != "" {
+			where = append(where, group)
 		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("clientStatus")); raw != "" {

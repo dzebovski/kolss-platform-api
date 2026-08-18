@@ -195,6 +195,43 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// PreviewConfig holds the minimal environment cmd/dailyreport-preview needs:
+// enough to run read-only cohort queries and render digest links, and
+// nothing that only cmd/api's HTTP server, auth, or delivery paths require.
+type PreviewConfig struct {
+	DatabaseURL      string
+	CRMSiteURLPublic string
+}
+
+// LoadPreview reads PreviewConfig from the environment. DATABASE_URL is
+// required, matching Load's own DATABASE_URL handling exactly (same
+// variable, same trimming, same error message). CRM_SITE_URL_PUBLIC
+// (falling back to SITE_URL_PUBLIC, via the same firstNonEmpty Load uses) is
+// optional: internal/dailyreport's URL builders already degrade a digest
+// line to plain text when the base URL is empty or invalid.
+//
+// This deliberately does not call Load(): Load also requires Supabase auth
+// admin credentials and Meta/Telegram/Slack delivery secrets that only
+// cmd/api's HTTP handlers and outbound delivery need, none of which
+// cmd/dailyreport-preview touches — it only runs SELECTs against
+// internal/leadcohorts and prints text. Requiring those secrets here would
+// make the preview tool unusable in exactly the environment it exists for:
+// a local checkout whose .env/.env.local carry DATABASE_URL and little
+// else. Load's validation for cmd/api is unchanged by this function.
+func LoadPreview() (PreviewConfig, error) {
+	cfg := PreviewConfig{
+		DatabaseURL: strings.TrimSpace(os.Getenv("DATABASE_URL")),
+		CRMSiteURLPublic: strings.TrimSpace(firstNonEmpty(
+			os.Getenv("CRM_SITE_URL_PUBLIC"),
+			os.Getenv("SITE_URL_PUBLIC"),
+		)),
+	}
+	if cfg.DatabaseURL == "" {
+		return PreviewConfig{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	return cfg, nil
+}
+
 func (c Config) HasS3() bool {
 	return c.S3Endpoint != "" || c.S3AccessKeyID != "" || c.S3SecretAccessKey != ""
 }

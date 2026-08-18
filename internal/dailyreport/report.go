@@ -5,41 +5,26 @@ import (
 	"html"
 	"net/http"
 	"net/url"
-	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"log/slog"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/dzebovski/kolss-platform-api/internal/leadcohorts"
 	"github.com/dzebovski/kolss-platform-api/internal/notifications"
 )
 
 const (
-	maxMessageLength = 3500
+	telegramGreetingLine = "🌻 Колеги доброго ранку!\nЛіди, які потребують уваги сьогодні:"
+	telegramEmptyMessage = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
+	telegramOpenLabel    = "відкрити"
 
-	telegramGreetingLine     = "🌻 Колеги доброго ранку!\nСписок лідів на які потрібно звернути увагу:"
-	telegramEmptyMessage     = "🌻 Колеги доброго ранку!\nНаразі немає лідів, які потребують уваги. Гарного дня!"
-	telegramSectionReminders = "<b>Сьогоднішні нагадування:</b>"
-	telegramSectionNew       = "<b>Нові заявки:</b>"
-	telegramSectionNoAnswer  = "<b>Не дозволилися:</b>"
-	telegramSectionCallback  = "<b>Потрібно передзвонити:</b>"
-	telegramOpenLabel        = "відкрити"
-
-	slackGreetingLine     = "🌻 Dzień dobry!\nLista leadów, na które warto zwrócić uwagę:"
-	slackEmptyMessage     = "🌻 Dzień dobry!\nObecnie nie ma leadów wymagających uwagi. Miłego dnia!"
-	slackSectionReminders = "*Dzisiejsze przypomnienia:*"
-	slackSectionNew       = "*Nowe zgłoszenia:*"
-	slackSectionNoAnswer  = "*Nieodebrane:*"
-	slackSectionCallback  = "*Do oddzwonienia:*"
-	slackOpenLabel        = "otwórz"
-
-	emojiReminder = "⏰"
-	emojiNew      = "🆕"
-	emojiNoAnswer = "📵"
-	emojiCallback = "📞"
+	slackGreetingLine = "🌻 Dzień dobry!\nLeady, które wymagają dzisiaj uwagi:"
+	slackEmptyMessage = "🌻 Dzień dobry!\nObecnie nie ma leadów wymagających uwagi. Miłego dnia!"
+	slackOpenLabel    = "otwórz"
 
 	channelTelegram = "telegram"
 	channelSlack    = "slack"
@@ -146,6 +131,31 @@ func (s *Scheduler) offices() []office {
 	return out
 }
 
+// OfficeTimezone returns the IANA timezone name configured for a scheduled
+// office code (e.g. "kyiv" -> "Europe/Kyiv"), and whether that office is
+// known. Exported so cmd/dailyreport-preview can resolve the office-local
+// report date the same way Scheduler.runForOffice does, instead of keeping
+// its own copy of the office table.
+func OfficeTimezone(officeCode string) (string, bool) {
+	for _, def := range scheduledOffices {
+		if def.code == officeCode {
+			return def.tz, true
+		}
+	}
+	return "", false
+}
+
+// OfficeChannel returns the delivery channel ("telegram" or "slack")
+// configured for a scheduled office code, and whether that office is known.
+func OfficeChannel(officeCode string) (string, bool) {
+	for _, def := range scheduledOffices {
+		if def.code == officeCode {
+			return def.channel, true
+		}
+	}
+	return "", false
+}
+
 func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 	nowLocal := time.Now().In(off.loc)
 	if nowLocal.Weekday() == time.Sunday {
@@ -164,14 +174,13 @@ func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 	}
 
 	timezone := off.loc.String()
-	attention, err := s.fetchLeads(ctx, off.code, timezone)
+	counts, err := leadcohorts.FetchCounts(ctx, s.Pool, leadcohorts.Params{
+		OfficeCode: off.code,
+		LocalDate:  reportDate,
+		Timezone:   timezone,
+	})
 	if err != nil {
-		s.log().Error("daily report query failed", "office", off.code, "error", err)
-		return
-	}
-	reminders, err := s.fetchReminderLeads(ctx, off.code, timezone)
-	if err != nil {
-		s.log().Error("daily report reminders query failed", "office", off.code, "error", err)
+		s.log().Error("daily report cohort query failed", "office", off.code, "error", err)
 		return
 	}
 
@@ -180,7 +189,7 @@ func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
 
-	var messages []string
+	var message string
 	var destinations []string
 	sent := 0
 
@@ -196,16 +205,14 @@ func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 			s.log().Warn("daily report missing Slack token", "office", off.code)
 			return
 		}
-		messages = s.formatSlackMessages(attention, reminders, off.loc)
+		message = s.FormatSlackMessage(counts, off.code, reportDate)
 		destinations = []string{channelID}
 		for _, destination := range destinations {
-			for _, message := range messages {
-				if err := notifications.SendSlackMessage(ctx, client, token, destination, message); err != nil {
-					s.log().Warn("daily report send failed", "office", off.code, "channel", channelSlack, "destination", destination, "error", err)
-					continue
-				}
-				sent++
+			if err := notifications.SendSlackMessage(ctx, client, token, destination, message); err != nil {
+				s.log().Warn("daily report send failed", "office", off.code, "channel", channelSlack, "destination", destination, "error", err)
+				continue
 			}
+			sent++
 		}
 	default:
 		chatIDs := s.Chats.TelegramChatIDs(off.code)
@@ -214,20 +221,30 @@ func (s *Scheduler) runForOffice(ctx context.Context, off office) {
 			return
 		}
 		token := s.Credentials.TelegramBotTokenFor(off.code)
-		messages = s.formatTelegramMessages(attention, reminders, off.loc)
+		message = s.FormatTelegramMessage(counts, off.code, reportDate)
 		destinations = chatIDs
 		for _, chatID := range destinations {
-			for _, message := range messages {
-				if err := notifications.SendTelegramMessage(ctx, client, token, chatID, message); err != nil {
-					s.log().Warn("daily report send failed", "office", off.code, "channel", channelTelegram, "chat_id", chatID, "error", err)
-					continue
-				}
-				sent++
+			if err := notifications.SendTelegramMessage(ctx, client, token, chatID, message); err != nil {
+				s.log().Warn("daily report send failed", "office", off.code, "channel", channelTelegram, "chat_id", chatID, "error", err)
+				continue
 			}
+			sent++
 		}
 	}
 
-	s.log().Info("daily report sent", "office", off.code, "channel", off.channel, "date", reportDate, "leads", len(attention), "reminders", len(reminders), "messages", len(messages), "destinations", len(destinations), "delivered", sent)
+	s.log().Info("daily report sent",
+		"office", off.code,
+		"channel", off.channel,
+		"date", reportDate,
+		"newLeads", counts.NewLeads,
+		"noAnswerOrCallbackUndated", counts.NoAnswerOrCallbackUndated,
+		"callbackDueToday", counts.CallbackDueToday,
+		"visitsDueToday", counts.VisitsDueToday,
+		"reminderDueToday", counts.ReminderDueToday,
+		"overdue", counts.Overdue,
+		"destinations", len(destinations),
+		"delivered", sent,
+	)
 }
 
 func (s *Scheduler) claim(ctx context.Context, officeCode, reportDate string) (bool, error) {
@@ -242,415 +259,191 @@ func (s *Scheduler) claim(ctx context.Context, officeCode, reportDate string) (b
 	return tag.RowsAffected() == 1, nil
 }
 
-type reportLead struct {
-	ID            uuid.UUID
-	Name          string
-	Phone         string
-	CallStatus    *string
-	CallbackDueAt *time.Time
+// digestGroup pairs one leadcohorts.Group with the presentation the digest
+// needs for it: emoji, the Ukrainian (Telegram) and Polish (Slack) labels,
+// and the CRM deep link a manager lands on after clicking "відкрити"/"otwórz".
+//
+// Order matches leadcohorts.Groups, which is also the digest's display
+// order (see the "Group lines and links" table in the task brief).
+type digestGroup struct {
+	cohort leadcohorts.Group
+	emoji  string
+	uk     string
+	pl     string
+	url    func(base, officeCode, localDate string) string
 }
 
-const attentionLeadsQuery = `
-	select
-	  l.id,
-	  coalesce(l.name,''),
-	  coalesce(l.phone,''),
-	  l.call_status,
-	  case
-	    when l.call_status is distinct from 'callback_requested' then null
-	    else coalesce(active_call.due_at, l.callback_due_at)
-	  end as callback_due_at
-	from public.leads l
-	join public.offices o on o.id = l.office_id
-	left join lateral (
-	  select
-	    case
-	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-	        then (e.new_value->>'callback_due_at')::timestamptz
-	      else null
-	    end as due_at
-	  from public.lead_events e
-	  where e.lead_id = l.id
-	    and e.event_category = 'call_status'
-	    and e.status_code = 'callback_requested'
-	  order by e.created_at desc
-	  limit 1
-	) active_call on l.call_status = 'callback_requested'
-	where l.archived_at is null
-	  and o.code = $1
-	  and (l.call_status is null or l.call_status in ('no_answer','callback_requested'))
-	  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
-	  and (
-	    l.call_status is distinct from 'callback_requested'
-	    or coalesce(active_call.due_at, l.callback_due_at) is null
-	    or (coalesce(active_call.due_at, l.callback_due_at) at time zone $2)::date <=
-	      (now() at time zone $2)::date
-	  )
-	order by (l.call_status is not null), coalesce(l.source_created_at, l.created_at) asc
-`
-
-const reminderLeadCandidatesQuery = `
-	select
-	  l.id,
-	  coalesce(l.name,''),
-	  coalesce(l.phone,''),
-	  l.call_status,
-	  case
-	    when l.call_status is distinct from 'callback_requested' then null
-	    else coalesce(active_call.due_at, l.callback_due_at)
-	  end as call_due_at,
-	  case
-	    when l.client_status = 'thinking' then coalesce(active_client.due_at, l.callback_due_at)
-	    when l.client_status in ('showroom_invited', 'measurement_scheduled') then active_visit.due_at
-	    else null
-	  end as client_due_at,
-	  latest_comment.due_at as comment_due_at
-	from public.leads l
-	join public.offices o on o.id = l.office_id
-	left join lateral (
-	  select
-	    case
-	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-	        then (e.new_value->>'callback_due_at')::timestamptz
-	      else null
-	    end as due_at
-	  from public.lead_events e
-	  where e.lead_id = l.id
-	    and e.event_category = 'call_status'
-	    and e.status_code = 'callback_requested'
-	  order by e.created_at desc
-	  limit 1
-	) active_call on l.call_status = 'callback_requested'
-	left join lateral (
-	  select
-	    case
-	      when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-	        then (e.new_value->>'callback_due_at')::timestamptz
-	      else null
-	    end as due_at
-	  from public.lead_events e
-	  where e.lead_id = l.id
-	    and e.event_category = 'client_status'
-	    and e.status_code = l.client_status
-	  order by e.created_at desc
-	  limit 1
-	) active_client on l.client_status = 'thinking'
-	left join lateral (
-	  select v.scheduled_at as due_at
-	  from public.lead_showroom_visits v
-	  where v.lead_id = l.id
-	    and v.status = 'scheduled'
-	    and v.kind = case l.client_status
-	      when 'measurement_scheduled' then 'measurement'
-	      else 'showroom'
-	    end
-	  order by v.scheduled_at desc, v.created_at desc
-	  limit 1
-	) active_visit on l.client_status in ('showroom_invited', 'measurement_scheduled')
-	left join lateral (
-	  select case
-	    when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-	      then (e.new_value->>'callback_due_at')::timestamptz
-	    else null
-	  end as due_at
-	  from public.lead_events e
-	  where e.lead_id = l.id
-	    and e.event_category = 'comment'
-	  order by e.created_at desc
-	  limit 1
-	) latest_comment on true
-	where l.archived_at is null
-	  and o.code = $1
-	  and (l.client_status is null or l.client_status not in ('closed_lost','contract_signed'))
-`
-
-func (s *Scheduler) fetchLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
-	rows, err := s.Pool.Query(ctx, attentionLeadsQuery, officeCode, timezone)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var leads []reportLead
-	for rows.Next() {
-		var lead reportLead
-		if err := rows.Scan(&lead.ID, &lead.Name, &lead.Phone, &lead.CallStatus, &lead.CallbackDueAt); err != nil {
-			return nil, err
-		}
-		leads = append(leads, lead)
-	}
-	return leads, rows.Err()
+var digestGroups = []digestGroup{
+	{
+		cohort: leadcohorts.GroupNewLeads,
+		emoji:  "🆕",
+		uk:     "Нові заявки",
+		pl:     "Nowe zgłoszenia",
+		url: func(base, officeCode, _ string) string {
+			return crmLeadsListURL(base, officeCode, "none", "active")
+		},
+	},
+	{
+		cohort: leadcohorts.GroupNoAnswerOrCallbackUndated,
+		emoji:  "📵",
+		uk:     "Недозвон + перезвон",
+		pl:     "Nieodebrane i do oddzwonienia",
+		url: func(base, officeCode, _ string) string {
+			return crmLeadsListURL(base, officeCode, "no_answer,callback_undated", "active")
+		},
+	},
+	{
+		cohort: leadcohorts.GroupCallbackDueToday,
+		emoji:  "⏰",
+		uk:     "Перезвони на сьогодні",
+		pl:     "Oddzwonienia na dziś",
+		url: func(base, officeCode, localDate string) string {
+			return crmCalendarURL(base, officeCode, localDate, "callback")
+		},
+	},
+	{
+		cohort: leadcohorts.GroupVisitsDueToday,
+		emoji:  "🏠",
+		uk:     "Візити в салон",
+		pl:     "Wizyty w salonie",
+		url: func(base, officeCode, localDate string) string {
+			return crmCalendarURL(base, officeCode, localDate, "visit")
+		},
+	},
+	{
+		cohort: leadcohorts.GroupReminderDueToday,
+		emoji:  "💬",
+		uk:     "Інші нагадування",
+		pl:     "Pozostałe przypomnienia",
+		url: func(base, officeCode, localDate string) string {
+			return crmCalendarURL(base, officeCode, localDate, "reminder")
+		},
+	},
+	{
+		cohort: leadcohorts.GroupOverdue,
+		emoji:  "⚠️",
+		uk:     "Прострочені нагадування",
+		pl:     "Zaległe przypomnienia",
+		url: func(base, officeCode, _ string) string {
+			return crmOverdueCalendarURL(base, officeCode)
+		},
+	},
 }
 
-func (s *Scheduler) fetchReminderLeads(ctx context.Context, officeCode, timezone string) ([]reportLead, error) {
-	loc, err := time.LoadLocation(timezone)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.Pool.Query(ctx, reminderLeadCandidatesQuery, officeCode)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	now := time.Now()
-	var leads []reportLead
-	for rows.Next() {
-		var lead reportLead
-		var callDueAt, clientDueAt, commentDueAt *time.Time
-		if err := rows.Scan(
-			&lead.ID,
-			&lead.Name,
-			&lead.Phone,
-			&lead.CallStatus,
-			&callDueAt,
-			&clientDueAt,
-			&commentDueAt,
-		); err != nil {
-			return nil, err
-		}
-		lead.CallbackDueAt = latestDueAt(callDueAt, clientDueAt, commentDueAt)
-		if lead.CallbackDueAt == nil || !isDueOnOrBeforeLocalDate(*lead.CallbackDueAt, now, loc) {
+// FormatTelegramMessage renders the Kyiv digest: one line per non-empty
+// group, in digestGroups order, with an HTML link. Returns
+// telegramEmptyMessage when every count is zero. Exported so
+// cmd/dailyreport-preview can render exactly what production would send
+// without duplicating the template.
+func (s *Scheduler) FormatTelegramMessage(counts leadcohorts.Counts, officeCode, localDate string) string {
+	lines := make([]string, 0, len(digestGroups))
+	for _, g := range digestGroups {
+		count := counts.Value(g.cohort)
+		if count <= 0 {
 			continue
 		}
-		leads = append(leads, lead)
+		line := g.emoji + " <b>" + html.EscapeString(g.uk) + "</b> — " + strconv.Itoa(count)
+		if link := g.url(s.CRMSiteURLPublic, officeCode, localDate); link != "" {
+			line += " · <a href=\"" + html.EscapeString(link) + "\">" + telegramOpenLabel + "</a>"
+		}
+		lines = append(lines, line)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+	if len(lines) == 0 {
+		return telegramEmptyMessage
 	}
-	sort.SliceStable(leads, func(i, j int) bool {
-		return leads[i].CallbackDueAt.Before(*leads[j].CallbackDueAt)
-	})
-	return leads, nil
+	return telegramGreetingLine + "\n\n" + strings.Join(lines, "\n")
 }
 
-// latestDueAt picks the furthest-out non-nil candidate: a later status change
-// or comment is assumed to supersede an earlier one that a manager never
-// went back to edit or clear.
-func latestDueAt(dates ...*time.Time) *time.Time {
-	var latest *time.Time
-	for _, dueAt := range dates {
-		if dueAt == nil || (latest != nil && !dueAt.After(*latest)) {
+// FormatSlackMessage renders the Warsaw digest: one line per non-empty
+// group, in digestGroups order, with a Slack mrkdwn link. Returns
+// slackEmptyMessage when every count is zero. Exported so
+// cmd/dailyreport-preview can render exactly what production would send
+// without duplicating the template.
+func (s *Scheduler) FormatSlackMessage(counts leadcohorts.Counts, officeCode, localDate string) string {
+	lines := make([]string, 0, len(digestGroups))
+	for _, g := range digestGroups {
+		count := counts.Value(g.cohort)
+		if count <= 0 {
 			continue
 		}
-		value := *dueAt
-		latest = &value
-	}
-	return latest
-}
-
-func isDueOnOrBeforeLocalDate(dueAt, now time.Time, loc *time.Location) bool {
-	dueYear, dueMonth, dueDay := dueAt.In(loc).Date()
-	nowYear, nowMonth, nowDay := now.In(loc).Date()
-	dueDate := time.Date(dueYear, dueMonth, dueDay, 0, 0, 0, 0, loc)
-	nowDate := time.Date(nowYear, nowMonth, nowDay, 0, 0, 0, 0, loc)
-	return !dueDate.After(nowDate)
-}
-
-type leadSection struct {
-	header      string
-	emoji       string
-	leads       []reportLead
-	withDueDate bool
-}
-
-func groupAttentionBySection(leads []reportLead, newHeader, noAnswerHeader, callbackHeader string) []leadSection {
-	sections := []leadSection{
-		{header: newHeader, emoji: emojiNew},
-		{header: noAnswerHeader, emoji: emojiNoAnswer},
-		{header: callbackHeader, emoji: emojiCallback},
-	}
-	for _, lead := range leads {
-		switch {
-		case lead.CallStatus != nil && *lead.CallStatus == "no_answer":
-			sections[1].leads = append(sections[1].leads, lead)
-		case lead.CallStatus != nil && *lead.CallStatus == "callback_requested":
-			// Dated callbacks belong only in today's reminders, not this section.
-			if lead.CallbackDueAt != nil {
-				continue
-			}
-			sections[2].leads = append(sections[2].leads, lead)
-		default:
-			sections[0].leads = append(sections[0].leads, lead)
+		line := g.emoji + " *" + escapeSlackText(g.pl) + "* — " + strconv.Itoa(count)
+		if link := g.url(s.CRMSiteURLPublic, officeCode, localDate); link != "" {
+			line += " · <" + escapeSlackText(link) + "|" + slackOpenLabel + ">"
 		}
+		lines = append(lines, line)
 	}
-	return sections
-}
-
-func buildReportSections(
-	attention, reminders []reportLead,
-	remindersHeader, newHeader, noAnswerHeader, callbackHeader string,
-) []leadSection {
-	sections := make([]leadSection, 0, 4)
-	if len(reminders) > 0 {
-		sections = append(sections, leadSection{
-			header:      remindersHeader,
-			emoji:       emojiReminder,
-			leads:       reminders,
-			withDueDate: true,
-		})
+	if len(lines) == 0 {
+		return slackEmptyMessage
 	}
-	sections = append(sections, groupAttentionBySection(attention, newHeader, noAnswerHeader, callbackHeader)...)
-	return sections
-}
-
-func (s *Scheduler) formatTelegramMessages(attention, reminders []reportLead, loc *time.Location) []string {
-	return s.formatMessages(
-		attention,
-		reminders,
-		loc,
-		telegramGreetingLine,
-		telegramEmptyMessage,
-		telegramSectionReminders,
-		telegramSectionNew,
-		telegramSectionNoAnswer,
-		telegramSectionCallback,
-		s.formatTelegramLine,
-	)
-}
-
-func (s *Scheduler) formatSlackMessages(attention, reminders []reportLead, loc *time.Location) []string {
-	return s.formatMessages(
-		attention,
-		reminders,
-		loc,
-		slackGreetingLine,
-		slackEmptyMessage,
-		slackSectionReminders,
-		slackSectionNew,
-		slackSectionNoAnswer,
-		slackSectionCallback,
-		s.formatSlackLine,
-	)
-}
-
-type lineFormatter func(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string
-
-func (s *Scheduler) formatMessages(
-	attention, reminders []reportLead,
-	loc *time.Location,
-	greeting, empty, remindersHeader, newHeader, noAnswerHeader, callbackHeader string,
-	formatLine lineFormatter,
-) []string {
-	sections := buildReportSections(attention, reminders, remindersHeader, newHeader, noAnswerHeader, callbackHeader)
-	hasContent := false
-	for _, section := range sections {
-		if len(section.leads) > 0 {
-			hasContent = true
-			break
-		}
-	}
-	if !hasContent {
-		return []string{empty}
-	}
-
-	var messages []string
-	var builder strings.Builder
-	builder.WriteString(greeting)
-	activeHeader := ""
-
-	flush := func() {
-		messages = append(messages, builder.String())
-		builder.Reset()
-		builder.WriteString(greeting)
-		activeHeader = ""
-	}
-
-	for _, section := range sections {
-		if len(section.leads) == 0 {
-			continue
-		}
-		for _, lead := range section.leads {
-			line := formatLine(lead, section.emoji, loc, section.withDueDate)
-			block := leadBlock(section.header, line, activeHeader != section.header)
-			if builder.Len()+len(block) > maxMessageLength && builder.Len() > len(greeting) {
-				flush()
-				block = leadBlock(section.header, line, true)
-			}
-			builder.WriteString(block)
-			activeHeader = section.header
-		}
-	}
-
-	messages = append(messages, builder.String())
-	return messages
-}
-
-func leadBlock(header, line string, withHeader bool) string {
-	var b strings.Builder
-	if withHeader {
-		b.WriteString("\n\n")
-		b.WriteString(header)
-		b.WriteString("\n")
-	}
-	b.WriteByte('\n')
-	b.WriteString(line)
-	return b.String()
-}
-
-func (s *Scheduler) formatTelegramLine(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string {
-	name, phone := leadDisplay(lead)
-	line := emoji + " " + html.EscapeString(name) + ", " + html.EscapeString(phone)
-	if withDueDate {
-		if due := formatDueDate(lead.CallbackDueAt, loc); due != "" {
-			line += ", " + html.EscapeString(due)
-		}
-	}
-	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
-		line += ", <a href=\"" + html.EscapeString(link) + "\">" + telegramOpenLabel + "</a>"
-	}
-	return line
-}
-
-func (s *Scheduler) formatSlackLine(lead reportLead, emoji string, loc *time.Location, withDueDate bool) string {
-	name, phone := leadDisplay(lead)
-	line := emoji + " " + escapeSlackText(name) + ", " + escapeSlackText(phone)
-	if withDueDate {
-		if due := formatDueDate(lead.CallbackDueAt, loc); due != "" {
-			line += ", " + escapeSlackText(due)
-		}
-	}
-	if link := crmLeadURL(s.CRMSiteURLPublic, lead.ID); link != "" {
-		line += ", <" + escapeSlackText(link) + "|" + slackOpenLabel + ">"
-	}
-	return line
-}
-
-func formatDueDate(dueAt *time.Time, loc *time.Location) string {
-	if dueAt == nil {
-		return ""
-	}
-	if loc == nil {
-		loc = time.UTC
-	}
-	return dueAt.In(loc).Format("02.01.2006")
-}
-
-func leadDisplay(lead reportLead) (name, phone string) {
-	name = strings.TrimSpace(lead.Name)
-	if name == "" {
-		name = "—"
-	}
-	phone = strings.TrimSpace(lead.Phone)
-	if phone == "" {
-		phone = "—"
-	}
-	return name, phone
+	return slackGreetingLine + "\n\n" + strings.Join(lines, "\n")
 }
 
 func escapeSlackText(value string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
-func crmLeadURL(base string, leadID uuid.UUID) string {
+// crmLeadsListURL builds the deep link for the two lead-list groups (new
+// leads; no-answer + undated callback). The query-param names/values
+// (office, callStatus, clientStatus, days=all) are a fixed contract shared
+// with the CRM's leads-list filters (see callStatusFilterWhere /
+// clientStatusFilterWhere in internal/crmapi/leads.go) and with the
+// calendar package implemented against the same contract in parallel.
+func crmLeadsListURL(base, officeCode, callStatus, clientStatus string) string {
+	return crmURL(base, "/crm/leads", [][2]string{
+		{"office", officeCode},
+		{"callStatus", callStatus},
+		{"clientStatus", clientStatus},
+		{"days", "all"},
+	})
+}
+
+// crmCalendarURL builds the deep link for the three "due today" reminder
+// groups (callback, visit, reminder), scoped to office and the office-local
+// report date.
+func crmCalendarURL(base, officeCode, localDate, kind string) string {
+	return crmURL(base, "/crm/calendar", [][2]string{
+		{"office", officeCode},
+		{"date", localDate},
+		{"kind", kind},
+	})
+}
+
+// crmOverdueCalendarURL builds the deep link for the overdue-reminders
+// group. It has no "kind" or "date" — due=overdue spans every kind and every
+// date strictly before today.
+func crmOverdueCalendarURL(base, officeCode string) string {
+	return crmURL(base, "/crm/calendar", [][2]string{
+		{"office", officeCode},
+		{"due", "overdue"},
+	})
+}
+
+// crmURL joins path and an ordered list of query params onto base, after
+// validating base has an http/https scheme and a non-empty host. It returns
+// "" when base is not a usable absolute URL, so the caller can degrade the
+// digest line to plain text instead of emitting a broken link.
+//
+// Params are encoded in the given order (rather than via url.Values, which
+// sorts keys alphabetically) so the generated URL matches the fixed
+// query-param contract byte-for-byte modulo percent-encoding.
+func crmURL(base, path string, params [][2]string) string {
 	parsed, err := url.Parse(strings.TrimSpace(base))
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return ""
 	}
-	parsed.Path = "/crm/leads/" + leadID.String()
+	parsed.Path = path
 	parsed.RawPath = ""
-	parsed.RawQuery = ""
 	parsed.Fragment = ""
+	var q strings.Builder
+	for i, kv := range params {
+		if i > 0 {
+			q.WriteByte('&')
+		}
+		q.WriteString(url.QueryEscape(kv[0]))
+		q.WriteByte('=')
+		q.WriteString(url.QueryEscape(kv[1]))
+	}
+	parsed.RawQuery = q.String()
 	return parsed.String()
 }
 

@@ -112,3 +112,53 @@ func TestSupabaseServiceRoleKeyFallback(t *testing.T) {
 		t.Fatalf("SupabaseSecretKey=%q", cfg.SupabaseSecretKey)
 	}
 }
+
+// TestLoadPreviewRequiresOnlyDatabaseURL is the point of LoadPreview: unlike
+// Load, it must succeed with none of the Supabase/Telegram/Slack/Turnstile
+// secrets set, because cmd/dailyreport-preview only runs read-only SELECTs
+// and never touches auth or delivery.
+func TestLoadPreviewRequiresOnlyDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://example")
+	t.Setenv("SUPABASE_URL", "")
+	t.Setenv("SUPABASE_SECRET_KEY", "")
+	t.Setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+	t.Setenv("TELEGRAM_BOT_TOKEN", "")
+	t.Setenv("SLACK_BOT_TOKEN_WARSAW", "")
+	t.Setenv("TURNSTILE_SECRET_KEY", "")
+	t.Setenv("CRM_SITE_URL_PUBLIC", "")
+	t.Setenv("SITE_URL_PUBLIC", "")
+
+	cfg, err := LoadPreview()
+	if err != nil {
+		t.Fatalf("LoadPreview() error = %v, want nil", err)
+	}
+	if cfg.DatabaseURL != "postgresql://example" {
+		t.Fatalf("DatabaseURL = %q", cfg.DatabaseURL)
+	}
+	if cfg.CRMSiteURLPublic != "" {
+		t.Fatalf("CRMSiteURLPublic = %q, want empty", cfg.CRMSiteURLPublic)
+	}
+}
+
+func TestLoadPreviewRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+
+	_, err := LoadPreview()
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestLoadPreviewCRMSiteURLFallsBackToSiteURLPublic(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgresql://example")
+	t.Setenv("CRM_SITE_URL_PUBLIC", "")
+	t.Setenv("SITE_URL_PUBLIC", "https://fallback.example")
+
+	cfg, err := LoadPreview()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.CRMSiteURLPublic != "https://fallback.example" {
+		t.Fatalf("CRMSiteURLPublic = %q", cfg.CRMSiteURLPublic)
+	}
+}
