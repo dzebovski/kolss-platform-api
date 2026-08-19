@@ -2,7 +2,9 @@ package crmapi
 
 import (
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseReportPeriod(t *testing.T) {
@@ -56,18 +58,17 @@ func TestReportTotalsUseCurrentIndependentStatuses(t *testing.T) {
 	addLeadToTotals(&totals, reportLead{
 		ClientStatus: "calculation_in_progress",
 		CallStatus:   &callback,
-		InactiveDays: 8,
-		Inactive7d:   true,
+		OverdueDays:  6,
 	})
-	addLeadToTotals(&totals, reportLead{ClientStatus: "contract_signed", InactiveDays: 30})
-	addLeadToTotals(&totals, reportLead{ClientStatus: "closed_lost", InactiveDays: 30})
+	addLeadToTotals(&totals, reportLead{ClientStatus: "contract_signed", OverdueDays: 30})
+	addLeadToTotals(&totals, reportLead{ClientStatus: "closed_lost", OverdueDays: 30})
 	finalizeTotals(&totals)
 
 	if totals.Total != 3 || totals.Active != 1 {
 		t.Fatalf("total=%d active=%d", totals.Total, totals.Active)
 	}
-	if totals.Callback != 1 || totals.Inactive7d != 1 {
-		t.Fatalf("callback=%d inactive=%d", totals.Callback, totals.Inactive7d)
+	if totals.Callback != 1 || totals.OverdueNextActionCount != 1 {
+		t.Fatalf("callback=%d overdueNextAction=%d", totals.Callback, totals.OverdueNextActionCount)
 	}
 	if totals.ContractSigned != 1 || totals.ClosedLost != 1 || totals.ConversionPercent != 33 {
 		t.Fatalf("sold=%d lost=%d conversion=%d", totals.ContractSigned, totals.ClosedLost, totals.ConversionPercent)
@@ -105,18 +106,56 @@ func TestReportTotalsSumSignedContractsByCurrency(t *testing.T) {
 	}
 }
 
-func TestInactiveBoundaryIsMoreThanSevenCalendarDays(t *testing.T) {
+func TestReportOverdueDaysUsesOfficeLocalCalendarDates(t *testing.T) {
+	asOf := time.Date(2026, 8, 18, 22, 30, 0, 0, time.UTC)
+	sixDaysAgo := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	dueTodayInKyiv := time.Date(2026, 8, 18, 21, 30, 0, 0, time.UTC)
+	dueTomorrowInKyiv := time.Date(2026, 8, 19, 21, 0, 0, 0, time.UTC)
+
 	for _, test := range []struct {
-		days int
-		want bool
+		name     string
+		dueAt    *time.Time
+		timezone string
+		want     int
 	}{
-		{days: 7, want: false},
-		{days: 8, want: true},
+		{name: "missing next action", timezone: "Europe/Kyiv", want: 0},
+		{name: "six calendar days overdue", dueAt: &sixDaysAgo, timezone: "Europe/Kyiv", want: 6},
+		{name: "due today is not overdue", dueAt: &dueTodayInKyiv, timezone: "Europe/Kyiv", want: 0},
+		{name: "future action is not overdue", dueAt: &dueTomorrowInKyiv, timezone: "Europe/Kyiv", want: 0},
 	} {
-		terminal := false
-		got := !terminal && test.days > 7
-		if got != test.want {
-			t.Fatalf("days=%d got=%v want=%v", test.days, got, test.want)
+		t.Run(test.name, func(t *testing.T) {
+			got, err := reportOverdueDays(asOf, test.dueAt, test.timezone)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("overdueDays=%d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestReportOverdueDaysRejectsUnknownTimezone(t *testing.T) {
+	dueAt := time.Date(2026, 8, 13, 12, 0, 0, 0, time.UTC)
+	if _, err := reportOverdueDays(time.Now(), &dueAt, "Mars/Olympus"); err == nil {
+		t.Fatal("expected an invalid timezone error")
+	}
+}
+
+func TestLeadReportQuerySelectsOneMostRecentlyRecordedActiveAction(t *testing.T) {
+	normalized := strings.Join(strings.Fields(leadReportQuery), " ")
+	for _, fragment := range []string{
+		"o.timezone_name",
+		"select reminder.due_at",
+		"order by reminder.action_at desc, reminder.due_at desc, reminder.kind, reminder.source_id limit 1",
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("leadReportQuery missing %q\n%s", fragment, leadReportQuery)
+		}
+	}
+	for _, staleFragment := range []string{"last_activity_at", "inactive_days"} {
+		if strings.Contains(leadReportQuery, staleFragment) {
+			t.Fatalf("leadReportQuery still contains stale inactivity fragment %q", staleFragment)
 		}
 	}
 }

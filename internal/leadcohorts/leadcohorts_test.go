@@ -533,20 +533,29 @@ func TestCommentReminderDueAtSQLDoesNotUseExistenceOperator(t *testing.T) {
 	}
 }
 
-func TestRemindersCTEEachBranchScopedToOfficeArchiveAndTerminalStatus(t *testing.T) {
-	branches := strings.Split(remindersCTE, "union all")
-	if len(branches) != 4 {
-		t.Fatalf("remindersCTE has %d branches, want 4 (callback, thinking, comment, showroom/measurement)", len(branches))
+func TestActiveReminderCandidatesAreScopedAndTimestamped(t *testing.T) {
+	for _, fragment := range []string{
+		"l.archived_at is null",
+		"l.client_status not in (" + TerminalClientStatusesSQL + ")",
+		"(e.new_value->>'callback_due_at')::timestamptz = l.callback_due_at",
+		"comment_reminder.action_at",
+		"v.updated_at",
+		"candidate.source_id",
+	} {
+		if !strings.Contains(ActiveReminderCandidatesSQL, fragment) {
+			t.Fatalf("ActiveReminderCandidatesSQL missing %q\n%s", fragment, ActiveReminderCandidatesSQL)
+		}
 	}
-	for i, branch := range branches {
-		for _, fragment := range []string{
-			"o.code = $1",
-			"l.archived_at is null",
-			"l.client_status not in (" + TerminalClientStatusesSQL + ")",
-		} {
-			if !strings.Contains(branch, fragment) {
-				t.Fatalf("remindersCTE branch %d missing %q\n%s", i, fragment, branch)
-			}
+}
+
+func TestRemindersCTEUsesCanonicalCandidatesAndOfficeScope(t *testing.T) {
+	for _, fragment := range []string{
+		"cross join lateral " + ActiveReminderCandidatesSQL,
+		"o.code = $1",
+		"reminder.action_at",
+	} {
+		if !strings.Contains(remindersCTE, fragment) {
+			t.Fatalf("remindersCTE missing %q\n%s", fragment, remindersCTE)
 		}
 	}
 }

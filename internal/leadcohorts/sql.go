@@ -61,6 +61,26 @@ const CallbackDueContextSQL = `case
 	end)
 end`
 
+// latestCommentReminderSQL selects the latest explicit comment event and the
+// optional reminder date it recorded. Keeping the event id and timestamp next
+// to the due date lets report consumers compare this action with callbacks and
+// appointments without independently reimplementing "latest comment".
+const latestCommentReminderSQL = `
+	select
+		e.id,
+		e.created_at as action_at,
+		case
+			when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+				then e.new_value->>'callback_due_at'
+			else null
+		end as due_at
+	from public.lead_events e
+	where e.lead_id = l.id
+		and e.event_category = 'comment'
+	order by e.created_at desc, e.id desc
+	limit 1
+`
+
 // CommentReminderDueAtSQL is a text-valued, correlated, parenthesized
 // subquery returning the due date stored on the latest comment-category
 // public.lead_events row for the lead aliased `l` in the enclosing query, or
@@ -75,14 +95,77 @@ end`
 // needed; crmapi instead keeps it as text since it feeds straight into a
 // JSON response field.
 const CommentReminderDueAtSQL = `(
-	select case
-		when jsonb_typeof(e.new_value->'callback_due_at') = 'string'
-			then e.new_value->>'callback_due_at'
-		else null
-	end
+	select reminder.due_at
+	from lateral (` + latestCommentReminderSQL + `) reminder
+)`
+
+// latestCallbackActionAtSQL returns when the currently active shared callback
+// due date was recorded. Matching the event value to l.callback_due_at avoids
+// treating a later, unrelated lead edit as a newly scheduled action. The
+// fallback in ActiveReminderCandidatesSQL covers legacy rows without a
+// matching event.
+const latestCallbackActionAtSQL = `(
+	select e.created_at
 	from public.lead_events e
 	where e.lead_id = l.id
-		and e.event_category = 'comment'
-	order by e.created_at desc
+		and jsonb_typeof(e.new_value->'callback_due_at') = 'string'
+		and (e.new_value->>'callback_due_at')::timestamptz = l.callback_due_at
+	order by e.created_at desc, e.id desc
 	limit 1
+)`
+
+// ActiveReminderCandidatesSQL is the canonical correlated SQL source for all
+// active dated actions on the lead aliased `l`: callback, thinking, comment,
+// showroom, and measurement. It yields one row per active action with both its
+// due date and the timestamp at which it was last scheduled or rescheduled.
+//
+// Consumers choose their own aggregation semantics. The morning digest keeps
+// every row; the management report orders by action_at and selects one latest
+// action per lead. Cleared/completed/canceled actions and terminal or archived
+// leads produce no rows.
+const ActiveReminderCandidatesSQL = `(
+	select candidate.kind, candidate.due_at, candidate.action_at, candidate.source_id
+	from (
+		select
+			'callback'::text as kind,
+			l.callback_due_at as due_at,
+			coalesce(` + latestCallbackActionAtSQL + `, l.updated_at, l.created_at) as action_at,
+			l.id::text as source_id
+		where l.callback_due_at is not null
+			and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'callback_requested'
+
+		union all
+
+		select
+			'thinking',
+			l.callback_due_at,
+			coalesce(` + latestCallbackActionAtSQL + `, l.updated_at, l.created_at),
+			l.id::text
+		where l.callback_due_at is not null
+			and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'thinking'
+
+		union all
+
+		select
+			'comment',
+			comment_reminder.due_at::timestamptz,
+			comment_reminder.action_at,
+			comment_reminder.id::text
+		from lateral (` + latestCommentReminderSQL + `) comment_reminder
+		where comment_reminder.due_at is not null
+
+		union all
+
+		select
+			v.kind,
+			v.scheduled_at,
+			v.updated_at,
+			v.id::text
+		from public.lead_showroom_visits v
+		where v.lead_id = l.id
+			and v.status = 'scheduled'
+			and v.kind in ('showroom', 'measurement')
+	) candidate
+	where l.archived_at is null
+		and l.client_status not in (` + TerminalClientStatusesSQL + `)
 )`

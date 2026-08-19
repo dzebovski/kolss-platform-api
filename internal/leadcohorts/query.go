@@ -27,7 +27,8 @@ const OverdueLookbackDays = 365
 // It is a `with` clause body (no trailing comma) meant to be embedded as
 // `with ` + remindersCTE + ` select ...`.
 //
-// It unions the three independent sources documented on Params:
+// ActiveReminderCandidatesSQL unions the three independent sources documented
+// on Params:
 //
 //  1. the shared leads.callback_due_at column, disambiguated into the
 //     'callback' / 'thinking' kinds via CallbackDueContextSQL;
@@ -51,50 +52,11 @@ const OverdueLookbackDays = 365
 // thinking, showroom, measurement, comment, in that order) — see
 // TestRemindersCTEKindsMirrorLeadRulesTS.
 const remindersCTE = `reminders as (
-	select l.id as lead_id, 'callback'::text as kind, l.callback_due_at as due_at
+	select l.id as lead_id, reminder.kind, reminder.due_at, reminder.action_at
 	from public.leads l
 	join public.offices o on o.id = l.office_id
+	cross join lateral ` + ActiveReminderCandidatesSQL + ` reminder
 	where o.code = $1
-		and l.archived_at is null
-		and l.client_status not in (` + TerminalClientStatusesSQL + `)
-		and l.callback_due_at is not null
-		and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'callback_requested'
-
-	union all
-
-	select l.id, 'thinking', l.callback_due_at
-	from public.leads l
-	join public.offices o on o.id = l.office_id
-	where o.code = $1
-		and l.archived_at is null
-		and l.client_status not in (` + TerminalClientStatusesSQL + `)
-		and l.callback_due_at is not null
-		and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'thinking'
-
-	union all
-
-	select l.id, 'comment', c.due_at
-	from public.leads l
-	join public.offices o on o.id = l.office_id
-	cross join lateral (
-		select ` + CommentReminderDueAtSQL + `::timestamptz as due_at
-	) c
-	where o.code = $1
-		and l.archived_at is null
-		and l.client_status not in (` + TerminalClientStatusesSQL + `)
-		and c.due_at is not null
-
-	union all
-
-	select l.id, v.kind, v.scheduled_at
-	from public.lead_showroom_visits v
-	join public.leads l on l.id = v.lead_id
-	join public.offices o on o.id = l.office_id
-	where o.code = $1
-		and l.archived_at is null
-		and l.client_status not in (` + TerminalClientStatusesSQL + `)
-		and v.status = 'scheduled'
-		and v.kind in ('showroom', 'measurement')
 )`
 
 // countsQuery returns the six digest group counts as one row, in the fixed

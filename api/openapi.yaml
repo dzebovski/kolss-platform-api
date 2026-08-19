@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.9.0
+  version: 2.10.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1184,7 +1184,7 @@ components:
     ReportTotals:
       type: object
       additionalProperties: false
-      required: [total, active, contractSigned, contractTotals, closedLost, callback, inactive7d, conversionPercent, byClientStatus]
+      required: [total, active, contractSigned, contractTotals, closedLost, callback, overdueNextActionCount, conversionPercent, byClientStatus]
       properties:
         total: { type: integer, minimum: 0 }
         active: { type: integer, minimum: 0 }
@@ -1194,7 +1194,10 @@ components:
           items: { $ref: '#/components/schemas/ReportContractTotal' }
         closedLost: { type: integer, minimum: 0 }
         callback: { type: integer, minimum: 0 }
-        inactive7d: { type: integer, minimum: 0 }
+        overdueNextActionCount:
+          type: integer
+          minimum: 0
+          description: Number of non-terminal leads whose most recently recorded active dated action is before today in the lead office timezone.
         conversionPercent: { type: integer, minimum: 0, maximum: 100 }
         byClientStatus: { $ref: '#/components/schemas/ReportStatusCounts' }
     ReportContractTotal:
@@ -1217,7 +1220,7 @@ components:
     ReportLead:
       type: object
       additionalProperties: false
-      required: [id, name, phone, createdAt, clientStatus, clientStatusChangedAt, callStatus, callStatusChangedAt, lossReason, lastHumanActivityAt, inactiveDays, inactive7d, comments]
+      required: [id, name, phone, createdAt, clientStatus, clientStatusChangedAt, callStatus, callStatusChangedAt, lossReason, nextActionAt, overdueDays, comments]
       properties:
         id: { type: string, format: uuid }
         name: { type: string }
@@ -1231,9 +1234,14 @@ components:
             - { type: 'null' }
         callStatusChangedAt: { type: [string, 'null'], format: date-time }
         lossReason: { type: [string, 'null'] }
-        lastHumanActivityAt: { type: [string, 'null'], format: date-time }
-        inactiveDays: { type: integer, minimum: 0 }
-        inactive7d: { type: boolean }
+        nextActionAt:
+          type: [string, 'null']
+          format: date-time
+          description: Due date of the most recently recorded active callback, thinking, comment, showroom, or measurement action.
+        overdueDays:
+          type: integer
+          minimum: 0
+          description: Calendar days since nextActionAt in the lead office timezone; zero when the action is due today, in the future, or absent.
         comments:
           type: array
           maxItems: 2

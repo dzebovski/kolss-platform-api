@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dzebovski/kolss-platform-api/internal/leadcohorts"
 	"github.com/google/uuid"
 )
 
@@ -34,15 +35,15 @@ type reportPeriod struct {
 }
 
 type reportTotals struct {
-	Total             int                   `json:"total"`
-	Active            int                   `json:"active"`
-	ContractSigned    int                   `json:"contractSigned"`
-	ContractTotals    []reportContractTotal `json:"contractTotals"`
-	ClosedLost        int                   `json:"closedLost"`
-	Callback          int                   `json:"callback"`
-	Inactive7d        int                   `json:"inactive7d"`
-	ConversionPercent int                   `json:"conversionPercent"`
-	ByClientStatus    map[string]int        `json:"byClientStatus"`
+	Total                  int                   `json:"total"`
+	Active                 int                   `json:"active"`
+	ContractSigned         int                   `json:"contractSigned"`
+	ContractTotals         []reportContractTotal `json:"contractTotals"`
+	ClosedLost             int                   `json:"closedLost"`
+	Callback               int                   `json:"callback"`
+	OverdueNextActionCount int                   `json:"overdueNextActionCount"`
+	ConversionPercent      int                   `json:"conversionPercent"`
+	ByClientStatus         map[string]int        `json:"byClientStatus"`
 }
 
 type reportContractTotal struct {
@@ -68,9 +69,8 @@ type reportLead struct {
 	CallStatus            *string         `json:"callStatus"`
 	CallStatusChangedAt   *time.Time      `json:"callStatusChangedAt"`
 	LossReason            *string         `json:"lossReason"`
-	LastHumanActivityAt   *time.Time      `json:"lastHumanActivityAt"`
-	InactiveDays          int             `json:"inactiveDays"`
-	Inactive7d            bool            `json:"inactive7d"`
+	NextActionAt          *time.Time      `json:"nextActionAt"`
+	OverdueDays           int             `json:"overdueDays"`
 	Comments              []reportComment `json:"comments"`
 	ContractAmount        *float64        `json:"-"`
 	ContractCurrency      *string         `json:"-"`
@@ -196,8 +196,8 @@ func addLeadToTotals(totals *reportTotals, lead reportLead) {
 	terminal := lead.ClientStatus == "closed_lost" || lead.ClientStatus == "contract_signed"
 	if !terminal {
 		totals.Active++
-		if lead.Inactive7d {
-			totals.Inactive7d++
+		if lead.OverdueDays > 0 {
+			totals.OverdueNextActionCount++
 		}
 	}
 	if lead.ClientStatus == "contract_signed" {
@@ -241,6 +241,120 @@ func finalizeTotals(totals *reportTotals) {
 	})
 }
 
+func reportOverdueDays(asOf time.Time, dueAt *time.Time, timezoneName string) (int, error) {
+	if dueAt == nil {
+		return 0, nil
+	}
+	location, err := time.LoadLocation(timezoneName)
+	if err != nil {
+		return 0, err
+	}
+	asOfLocal := asOf.In(location)
+	dueLocal := dueAt.In(location)
+	asOfDate := time.Date(asOfLocal.Year(), asOfLocal.Month(), asOfLocal.Day(), 0, 0, 0, 0, time.UTC)
+	dueDate := time.Date(dueLocal.Year(), dueLocal.Month(), dueLocal.Day(), 0, 0, 0, 0, time.UTC)
+	days := int(asOfDate.Sub(dueDate) / (24 * time.Hour))
+	if days < 0 {
+		return 0, nil
+	}
+	return days, nil
+}
+
+var leadReportQuery = `
+	with scoped_leads as (
+		select
+			l.*,
+			o.code as office_code,
+			o.timezone_name
+		from public.leads l
+		join public.offices o on o.id=l.office_id
+		where l.archived_at is null
+		  and ($1::uuid[] is null or l.office_id=any($1))
+	)
+	select
+		l.id,
+		l.office_code,
+		l.timezone_name,
+		l.assigned_to,
+		coalesce(manager.display_name,''),
+		coalesce(l.name,''),
+		coalesce(l.phone,''),
+		coalesce(l.source_created_at,l.created_at),
+		l.client_status,
+		l.client_status_changed_at,
+		l.call_status,
+		l.call_status_changed_at,
+		l.loss_reason,
+		next_action.due_at,
+		coalesce(signed_contract.amount, legacy_contract.amount),
+		coalesce(signed_contract.currency, legacy_contract.currency),
+		comments.items
+	from scoped_leads l
+	left join public.profiles manager on manager.id=l.assigned_to
+	left join lateral (
+		select reminder.due_at
+		from ` + leadcohorts.ActiveReminderCandidatesSQL + ` reminder
+		order by
+			reminder.action_at desc,
+			reminder.due_at desc,
+			reminder.kind,
+			reminder.source_id
+		limit 1
+	) next_action on true
+	left join lateral (
+		select c.amount,c.currency
+		from public.lead_contracts c
+		where c.lead_id=l.id
+		  and c.status='signed'
+		  and c.amount is not null
+		  and c.currency is not null
+		order by c.signed_at desc nulls last,c.created_at desc
+		limit 1
+	) signed_contract on true
+	left join lateral (
+		select (e.new_value->>'amount')::numeric as amount,e.new_value->>'currency' as currency
+		from public.lead_events e
+		where e.lead_id=l.id
+		  and e.event_type in ('successful','contract_signed')
+		  and e.new_value ? 'amount'
+		  and e.new_value ? 'currency'
+		order by e.created_at desc
+		limit 1
+	) legacy_contract on true
+	left join lateral (
+		select coalesce(jsonb_agg(jsonb_build_object(
+			'body', recent.comment,
+			'occurredAt', recent.created_at,
+			'authorId', recent.actor_id,
+			'authorName', recent.author_name,
+			'eventType', recent.event_type
+		) order by recent.created_at desc),'[]'::jsonb) as items
+		from (
+			select e.comment,e.created_at,e.actor_id,coalesce(author.display_name,'') as author_name,e.event_type
+			from public.lead_events e
+			left join public.profiles author on author.id=e.actor_id
+			where e.lead_id=l.id
+			  and e.actor_id is not null
+			  and e.event_category is distinct from 'system'
+			  and e.comment is not null
+			  and btrim(e.comment) <> ''
+			order by e.created_at desc
+			limit 2
+		) recent
+	) comments on true
+	where $2::date is null or (
+		(coalesce(l.source_created_at,l.created_at) at time zone l.timezone_name)::date between $2::date and $3::date
+		or exists (
+			select 1 from public.lead_events period_event
+			where period_event.lead_id=l.id
+			  and period_event.actor_id is not null
+			  and period_event.event_category is distinct from 'system'
+			  and (period_event.created_at at time zone l.timezone_name)::date between $2::date and $3::date
+		)
+	)
+	order by l.office_code,manager.display_name nulls last,l.id
+`
+
 func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
 	officeIDs, ok := s.reportOfficeFilter(w, r, actor)
@@ -253,104 +367,8 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := s.pool.Query(r.Context(), `
-		with scoped_leads as (
-			select
-				l.*,
-				o.code as office_code,
-				case o.code
-					when 'warsaw' then 'Europe/Warsaw'
-					when 'london' then 'Europe/London'
-					else 'Europe/Kyiv'
-				end as timezone_name
-			from public.leads l
-			join public.offices o on o.id=l.office_id
-			where l.archived_at is null
-			  and ($1::uuid[] is null or l.office_id=any($1))
-		)
-		select
-			l.id,
-			l.office_code,
-			l.assigned_to,
-			coalesce(manager.display_name,''),
-			coalesce(l.name,''),
-			coalesce(l.phone,''),
-			coalesce(l.source_created_at,l.created_at),
-			l.client_status,
-			l.client_status_changed_at,
-			l.call_status,
-			l.call_status_changed_at,
-			l.loss_reason,
-			activity.last_activity_at,
-			greatest(0, (
-				(now() at time zone l.timezone_name)::date -
-				(coalesce(activity.last_activity_at,l.source_created_at,l.created_at) at time zone l.timezone_name)::date
-			))::int as inactive_days,
-			coalesce(signed_contract.amount, legacy_contract.amount),
-			coalesce(signed_contract.currency, legacy_contract.currency),
-			comments.items
-		from scoped_leads l
-		left join public.profiles manager on manager.id=l.assigned_to
-		left join lateral (
-			select c.amount,c.currency
-			from public.lead_contracts c
-			where c.lead_id=l.id
-			  and c.status='signed'
-			  and c.amount is not null
-			  and c.currency is not null
-			order by c.signed_at desc nulls last,c.created_at desc
-			limit 1
-		) signed_contract on true
-		left join lateral (
-			select (e.new_value->>'amount')::numeric as amount,e.new_value->>'currency' as currency
-			from public.lead_events e
-			where e.lead_id=l.id
-			  and e.event_type in ('successful','contract_signed')
-			  and e.new_value ? 'amount'
-			  and e.new_value ? 'currency'
-			order by e.created_at desc
-			limit 1
-		) legacy_contract on true
-		left join lateral (
-			select max(e.created_at) as last_activity_at
-			from public.lead_events e
-			where e.lead_id=l.id
-			  and e.actor_id is not null
-			  and e.event_category is distinct from 'system'
-		) activity on true
-		left join lateral (
-			select coalesce(jsonb_agg(jsonb_build_object(
-				'body', recent.comment,
-				'occurredAt', recent.created_at,
-				'authorId', recent.actor_id,
-				'authorName', recent.author_name,
-				'eventType', recent.event_type
-			) order by recent.created_at desc),'[]'::jsonb) as items
-			from (
-				select e.comment,e.created_at,e.actor_id,coalesce(author.display_name,'') as author_name,e.event_type
-				from public.lead_events e
-				left join public.profiles author on author.id=e.actor_id
-				where e.lead_id=l.id
-				  and e.actor_id is not null
-				  and e.event_category is distinct from 'system'
-				  and e.comment is not null
-				  and btrim(e.comment) <> ''
-				order by e.created_at desc
-				limit 2
-			) recent
-		) comments on true
-		where $2::date is null or (
-			(coalesce(l.source_created_at,l.created_at) at time zone l.timezone_name)::date between $2::date and $3::date
-			or exists (
-				select 1 from public.lead_events period_event
-				where period_event.lead_id=l.id
-				  and period_event.actor_id is not null
-				  and period_event.event_category is distinct from 'system'
-				  and (period_event.created_at at time zone l.timezone_name)::date between $2::date and $3::date
-			)
-		)
-		order by l.office_code,manager.display_name nulls last,l.id
-	`, nullableUUIDs(officeIDs), from, to)
+	generatedAt := time.Now().UTC()
+	rows, err := s.pool.Query(r.Context(), leadReportQuery, nullableUUIDs(officeIDs), from, to)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not load report", nil)
 		return
@@ -362,12 +380,13 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	lossCounts := map[string]int{}
 	for rows.Next() {
 		var lead reportLead
-		var officeCode, managerName string
+		var officeCode, timezoneName, managerName string
 		var managerID *uuid.UUID
 		var commentsJSON []byte
 		if err := rows.Scan(
 			&lead.ID,
 			&officeCode,
+			&timezoneName,
 			&managerID,
 			&managerName,
 			&lead.Name,
@@ -378,8 +397,7 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 			&lead.CallStatus,
 			&lead.CallStatusChangedAt,
 			&lead.LossReason,
-			&lead.LastHumanActivityAt,
-			&lead.InactiveDays,
+			&lead.NextActionAt,
 			&lead.ContractAmount,
 			&lead.ContractCurrency,
 			&commentsJSON,
@@ -387,13 +405,16 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not load report", nil)
 			return
 		}
+		lead.OverdueDays, err = reportOverdueDays(generatedAt, lead.NextActionAt, timezoneName)
+		if err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not resolve report timezone", nil)
+			return
+		}
 		lead.Comments = []reportComment{}
 		if err := json.Unmarshal(commentsJSON, &lead.Comments); err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not decode report comments", nil)
 			return
 		}
-		terminal := lead.ClientStatus == "closed_lost" || lead.ClientStatus == "contract_signed"
-		lead.Inactive7d = !terminal && lead.InactiveDays > 7
 		addLeadToTotals(&totals, lead)
 
 		managerKey := officeCode + "|"
@@ -432,8 +453,8 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	for _, manager := range managersByKey {
 		finalizeTotals(&manager.Totals)
 		sort.SliceStable(manager.Leads, func(i, j int) bool {
-			if manager.Leads[i].InactiveDays != manager.Leads[j].InactiveDays {
-				return manager.Leads[i].InactiveDays > manager.Leads[j].InactiveDays
+			if manager.Leads[i].OverdueDays != manager.Leads[j].OverdueDays {
+				return manager.Leads[i].OverdueDays > manager.Leads[j].OverdueDays
 			}
 			return strings.ToLower(manager.Leads[i].Name) < strings.ToLower(manager.Leads[j].Name)
 		})
@@ -455,7 +476,7 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, leadReportResponse{
-		GeneratedAt: time.Now().UTC(),
+		GeneratedAt: generatedAt,
 		Period:      period,
 		Totals:      totals,
 		LossReasons: lossReasons,
