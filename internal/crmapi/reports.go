@@ -18,6 +18,7 @@ var reportClientStatuses = [...]string{
 	"showroom_invited",
 	"measurement_scheduled",
 	"thinking",
+	"postponed",
 	"contract_signed",
 	"closed_lost",
 }

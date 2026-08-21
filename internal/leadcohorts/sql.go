@@ -16,8 +16,11 @@ const TerminalClientStatusesSQL = `'closed_lost','contract_signed'`
 //
 //   - {"event_category":"call_status","status_code":"callback_requested"}
 //     when the due date is a callback reminder,
-//   - {"event_category":"client_status","status_code":"thinking"}
-//     when it is a "thinking" reminder,
+//   - {"event_category":"client_status","status_code":"thinking"} or
+//     {"event_category":"client_status","status_code":"postponed"} when it is
+//     a "thinking" or "postponed" reminder — both are non-terminal, parked
+//     statuses that share leads.callback_due_at and are treated as the same
+//     'thinking' reminder kind by ActiveReminderCandidatesSQL below,
 //   - null when the lead is terminal, has no due date, or the due date on
 //     the column cannot be attributed to either kind.
 //
@@ -55,8 +58,8 @@ const CallbackDueContextSQL = `case
 	), case
 		when l.call_status = 'callback_requested' then
 			jsonb_build_object('event_category', 'call_status', 'status_code', 'callback_requested')
-		when l.client_status = 'thinking' then
-			jsonb_build_object('event_category', 'client_status', 'status_code', 'thinking')
+		when l.client_status in ('thinking', 'postponed') then
+			jsonb_build_object('event_category', 'client_status', 'status_code', l.client_status)
 		else null
 	end)
 end`
@@ -118,6 +121,9 @@ const latestCallbackActionAtSQL = `(
 // active dated actions on the lead aliased `l`: callback, thinking, comment,
 // showroom, and measurement. It yields one row per active action with both its
 // due date and the timestamp at which it was last scheduled or rescheduled.
+// A "postponed" lead's due date surfaces here as a 'thinking'-kind row too —
+// postponed is a second, non-terminal parking status alongside thinking, and
+// the two share both leads.callback_due_at and this reminder kind.
 //
 // Consumers choose their own aggregation semantics. The morning digest keeps
 // every row; the management report orders by action_at and selects one latest
@@ -142,7 +148,7 @@ const ActiveReminderCandidatesSQL = `(
 			coalesce(` + latestCallbackActionAtSQL + `, l.updated_at, l.created_at),
 			l.id::text
 		where l.callback_due_at is not null
-			and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'thinking'
+			and (` + CallbackDueContextSQL + `) ->> 'status_code' in ('thinking', 'postponed')
 
 		union all
 

@@ -52,6 +52,12 @@ func TestClientStatusFilterWhere(t *testing.T) {
 			wantSQL: []string{`l.client_status = "measurement_scheduled"`},
 		},
 		{
+			name:    "postponed",
+			raw:     "postponed",
+			wantOK:  true,
+			wantSQL: []string{`l.client_status = "postponed"`},
+		},
+		{
 			name:   "unknown status",
 			raw:    "taken",
 			wantOK: false,

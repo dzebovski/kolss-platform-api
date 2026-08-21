@@ -169,6 +169,7 @@ func TestReportClientStatusesCoverEveryStoredStatus(t *testing.T) {
 		"measurement_scheduled":   true,
 		"calculation_in_progress": true,
 		"thinking":                true,
+		"postponed":               true,
 		"contract_signed":         true,
 		"closed_lost":             true,
 	}

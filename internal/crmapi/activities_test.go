@@ -30,7 +30,11 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "thinking", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking", DueAt: &dueAt}},
 		{name: "thinking without date", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking"}},
 		{name: "thinking with comment", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking", Comment: "Asked for time to decide"}},
+		{name: "postponed", request: leadActivityRequest{Type: activityClientStatus, Status: "postponed", DueAt: &dueAt, Comment: "Renovation starts in spring"}},
+		{name: "postponed without date", request: leadActivityRequest{Type: activityClientStatus, Status: "postponed", Comment: "No concrete date yet"}},
+		{name: "postponed requires comment", request: leadActivityRequest{Type: activityClientStatus, Status: "postponed", DueAt: &dueAt}, field: "comment"},
 		{name: "close", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "invalid", Comment: "Duplicate request"}},
+		{name: "close with no_contact reason", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "no_contact", Comment: "Unreachable after 5 attempts"}},
 		{name: "close requires comment", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "other"}, field: "comment"},
 		{name: "contract", request: leadActivityRequest{Type: activityClientStatus, Status: "contract_signed", ContractNumber: "K-42", Amount: &amount, Currency: "EUR"}},
 		{name: "comment", request: leadActivityRequest{Type: activityComment, Comment: "Customer sent measurements"}},
@@ -76,6 +80,7 @@ func TestClientStatusUnchanged(t *testing.T) {
 	}{
 		{name: "repeated showroom is allowed", current: "showroom_invited", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}},
 		{name: "repeated thinking is rejected", current: "thinking", request: leadActivityRequest{Type: activityClientStatus, Status: "thinking"}, want: true},
+		{name: "repeated postponed is rejected", current: "postponed", request: leadActivityRequest{Type: activityClientStatus, Status: "postponed"}, want: true},
 		{name: "different client status is allowed", current: "thinking", request: leadActivityRequest{Type: activityClientStatus, Status: "showroom_invited"}},
 		{name: "call status is unrelated", current: "thinking", request: leadActivityRequest{Type: activityCallStatus, Status: "thinking"}},
 	}
@@ -107,6 +112,12 @@ func TestNextClientStatusCallbackDue(t *testing.T) {
 	if got := nextClientStatusCallbackDue(&reached, &current, "thinking", &replacement); got == nil || !got.Equal(replacement) {
 		t.Fatalf("thinking date: got %v, want %v", got, replacement)
 	}
+	if got := nextClientStatusCallbackDue(&reached, &current, "postponed", &replacement); got == nil || !got.Equal(replacement) {
+		t.Fatalf("postponed date: got %v, want %v", got, replacement)
+	}
+	if got := nextClientStatusCallbackDue(&reached, &current, "postponed", nil); got != nil {
+		t.Fatalf("cleared postponed: got %v, want nil", got)
+	}
 
 	// A closed lead keeps no reminder, not even a pending callback.
 	for _, status := range []string{"closed_lost", "contract_signed"} {
@@ -128,6 +139,7 @@ func TestIsTerminalClientStatus(t *testing.T) {
 		"measurement_scheduled":   false,
 		"calculation_in_progress": false,
 		"thinking":                false,
+		"postponed":               false,
 		"":                        false,
 	}
 	for status, want := range terminal {

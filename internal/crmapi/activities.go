@@ -307,6 +307,19 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 			if req.Amount != nil {
 				fields["amount"] = "Not allowed for this status"
 			}
+		case "postponed":
+			// dueAt is optional, like thinking, but comment is required: postponed
+			// leads must record why/what the client said (a concrete future
+			// timeframe), not just that they were parked.
+			reject("reason", req.Reason)
+			reject("contractNumber", req.ContractNumber)
+			reject("currency", req.Currency)
+			if req.Amount != nil {
+				fields["amount"] = "Not allowed for this status"
+			}
+			if req.Comment == "" {
+				fields["comment"] = "Required"
+			}
 		case "closed_lost":
 			rejectDueAt()
 			reject("contractNumber", req.ContractNumber)
@@ -315,9 +328,9 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 				fields["amount"] = "Not allowed for this status"
 			}
 			switch req.Reason {
-			case "expensive", "invalid", "other":
+			case "expensive", "invalid", "other", "no_contact":
 			default:
-				fields["reason"] = "Must be expensive, invalid, or other"
+				fields["reason"] = "Must be expensive, invalid, no_contact, or other"
 			}
 			if req.Comment == "" {
 				fields["comment"] = "Required"
@@ -426,7 +439,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		if req.Status == "callback_requested" {
 			callbackDueAt = req.DueAt
 			newValue["callback_due_at"] = req.DueAt
-		} else if lead.ClientStatus != "thinking" {
+		} else if lead.ClientStatus != "thinking" && lead.ClientStatus != "postponed" {
 			callbackDueAt = nil
 		}
 	case activityComment:
@@ -489,7 +502,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		newValue["client_status"] = req.Status
 		clientStatus = req.Status
 		changeClient = true
-		if req.Status == "thinking" {
+		if req.Status == "thinking" || req.Status == "postponed" {
 			newValue["callback_due_at"] = req.DueAt
 		}
 		if req.Status == "showroom_invited" {
@@ -682,7 +695,7 @@ func nextClientStatusCallbackDue(
 	if isTerminalClientStatus(clientStatus) {
 		return nil
 	}
-	if clientStatus == "thinking" {
+	if clientStatus == "thinking" || clientStatus == "postponed" {
 		return requested
 	}
 	if callStatus != nil && *callStatus == "callback_requested" {

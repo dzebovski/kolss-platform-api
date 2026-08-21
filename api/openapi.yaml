@@ -965,9 +965,10 @@ components:
         matches callback_requested leads with no due date (callback_due_at is null) —
         distinct from no_answer, because a no_answer lead can still carry a non-null
         callback_due_at (preserved from a prior callback_requested while client_status
-        is thinking), so no_answer,callback_undated is required to cover both without
-        dropping those leads. none and callback_undated are filter-only cohorts: they
-        never appear as a lead's own call_status or in a CallStatusActivityRequest.
+        is thinking or postponed), so no_answer,callback_undated is required to cover
+        both without dropping those leads. none and callback_undated are filter-only
+        cohorts: they never appear as a lead's own call_status or in a
+        CallStatusActivityRequest.
       enum: [reached, no_answer, callback_requested, none, callback_undated]
     LeadCallStatusActor:
       type: object
@@ -984,6 +985,7 @@ components:
         - measurement_scheduled
         - calculation_in_progress
         - thinking
+        - postponed
         - closed_lost
         - contract_signed
     ClientStatusFilter:
@@ -991,11 +993,11 @@ components:
       description: >
         listLeads clientStatus filter values, OR'd together when multiple are given.
         new_lead/showroom_invited/measurement_scheduled/calculation_in_progress/
-        thinking/closed_lost/contract_signed match that exact client_status. new_lead
-        also requires call_status is null (truly new, no call yet). in_work matches
-        client_status = new_lead with a recorded call_status (in progress but not yet
-        reclassified). active matches every client_status except closed_lost and
-        contract_signed (client_status not in ('closed_lost','contract_signed')).
+        thinking/postponed/closed_lost/contract_signed match that exact client_status.
+        new_lead also requires call_status is null (truly new, no call yet). in_work
+        matches client_status = new_lead with a recorded call_status (in progress but
+        not yet reclassified). active matches every client_status except closed_lost
+        and contract_signed (client_status not in ('closed_lost','contract_signed')).
         in_work and active are filter-only cohorts: they never appear as a lead's own
         client_status or in a ClientStatusActivityRequest.
       enum:
@@ -1004,6 +1006,7 @@ components:
         - measurement_scheduled
         - calculation_in_progress
         - thinking
+        - postponed
         - closed_lost
         - contract_signed
         - in_work
@@ -1076,8 +1079,10 @@ components:
       properties:
         type: { type: string, const: client_status }
         status: { $ref: '#/components/schemas/ClientStatus' }
-        reason: { type: string, enum: [expensive, invalid, other] }
-        comment: { type: string }
+        reason: { type: string, enum: [expensive, invalid, other, no_contact] }
+        comment:
+          type: string
+          description: Required when status is postponed.
         contractNumber: { type: string }
         amount: { type: number, exclusiveMinimum: 0 }
         currency: { type: string, enum: [UAH, USD, EUR, PLN] }
@@ -1085,8 +1090,8 @@ components:
           type: string
           format: date-time
           description: >
-            Optional reminder date when status is thinking. Required when status is
-            showroom_invited.
+            Optional reminder date when status is thinking or postponed. Required when
+            status is showroom_invited.
     CommentActivityRequest:
       type: object
       additionalProperties: false
@@ -1171,6 +1176,7 @@ components:
         - measurement_scheduled
         - calculation_in_progress
         - thinking
+        - postponed
         - closed_lost
         - contract_signed
       properties:
@@ -1179,6 +1185,7 @@ components:
         measurement_scheduled: { type: integer, minimum: 0 }
         calculation_in_progress: { type: integer, minimum: 0 }
         thinking: { type: integer, minimum: 0 }
+        postponed: { type: integer, minimum: 0 }
         closed_lost: { type: integer, minimum: 0 }
         contract_signed: { type: integer, minimum: 0 }
     ReportTotals:

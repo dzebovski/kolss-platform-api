@@ -231,6 +231,7 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 		"measurement_scheduled",
 		"calculation_in_progress",
 		"thinking",
+		"postponed",
 		"closed_lost",
 		"contract_signed":
 		return []string{"l.client_status = " + addArg(raw)}, true
@@ -269,8 +270,9 @@ func clientStatusFilterWhereMulti(values []string, addArg func(any) string) (str
 // none means no call recorded yet; callback_undated is callback_requested
 // without a due date. It must stay a distinct clause group rather than a
 // global "callback_due_at is null" AND, because a no_answer lead keeps its
-// callback_due_at when client_status is thinking (see applyLeadActivity in
-// activities.go) — ANDing it globally would wrongly drop those no_answer leads.
+// callback_due_at when client_status is thinking or postponed (see
+// applyLeadActivity in activities.go) — ANDing it globally would wrongly
+// drop those no_answer leads.
 func callStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
 	switch raw {
 	case "none":
