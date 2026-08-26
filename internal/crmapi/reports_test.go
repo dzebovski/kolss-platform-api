@@ -10,7 +10,7 @@ import (
 func TestParseReportPeriod(t *testing.T) {
 	t.Run("all time", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/reports/leads", nil)
-		from, to, period, fields := parseReportPeriod(req)
+		from, to, period, fields := parseReportPeriod(req, false)
 		if from != nil || to != nil || period.From != nil || period.To != nil || len(fields) != 0 {
 			t.Fatalf("unexpected all-time period: from=%v to=%v period=%#v fields=%#v", from, to, period, fields)
 		}
@@ -18,7 +18,7 @@ func TestParseReportPeriod(t *testing.T) {
 
 	t.Run("inclusive range", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/v1/reports/leads?from=2026-06-01&to=2026-06-30", nil)
-		from, to, period, fields := parseReportPeriod(req)
+		from, to, period, fields := parseReportPeriod(req, false)
 		if len(fields) != 0 || from == nil || to == nil {
 			t.Fatalf("valid range rejected: from=%v to=%v fields=%#v", from, to, fields)
 		}
@@ -39,16 +39,45 @@ func TestParseReportPeriod(t *testing.T) {
 		key  string
 	}{
 		{name: "missing to", url: "/v1/reports/leads?from=2026-06-01", key: "to"},
+		{name: "calendar requires range", url: "/v1/reports/leads?cohort=calendar", key: "from"},
 		{name: "invalid from", url: "/v1/reports/leads?from=01-06-2026&to=2026-06-30", key: "from"},
 		{name: "reversed", url: "/v1/reports/leads?from=2026-07-01&to=2026-06-30", key: "to"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			req := httptest.NewRequest("GET", test.url, nil)
-			_, _, _, fields := parseReportPeriod(req)
+			criteria, fields := parseReportCriteria(req)
 			if fields[test.key] == "" {
 				t.Fatalf("expected %s error, got %#v", test.key, fields)
 			}
+			if test.name == "calendar requires range" && criteria.Cohort != reportCohortCalendar {
+				t.Fatalf("cohort=%q", criteria.Cohort)
+			}
 		})
+	}
+}
+
+func TestParseReportCriteriaDefaultsToActivityAndReadsStatusArrays(t *testing.T) {
+	req := httptest.NewRequest("GET", "/v1/reports/leads?callStatus=no_answer,callback_undated&clientStatus=thinking,in_work", nil)
+	criteria, fields := parseReportCriteria(req)
+	if len(fields) != 0 {
+		t.Fatalf("fields=%#v", fields)
+	}
+	if criteria.Cohort != reportCohortActivity {
+		t.Fatalf("cohort=%q", criteria.Cohort)
+	}
+	if strings.Join(criteria.CallStatuses, ",") != "no_answer,callback_undated" {
+		t.Fatalf("call statuses=%#v", criteria.CallStatuses)
+	}
+	if strings.Join(criteria.ClientStatuses, ",") != "thinking,in_work" {
+		t.Fatalf("client statuses=%#v", criteria.ClientStatuses)
+	}
+}
+
+func TestParseReportCriteriaRejectsUnknownCohort(t *testing.T) {
+	req := httptest.NewRequest("GET", "/v1/reports/leads?cohort=combined", nil)
+	_, fields := parseReportCriteria(req)
+	if fields["cohort"] == "" {
+		t.Fatalf("fields=%#v", fields)
 	}
 }
 
@@ -143,20 +172,144 @@ func TestReportOverdueDaysRejectsUnknownTimezone(t *testing.T) {
 }
 
 func TestLeadReportQuerySelectsOneMostRecentlyRecordedActiveAction(t *testing.T) {
-	normalized := strings.Join(strings.Fields(leadReportQuery), " ")
+	query, _, fields := buildLeadReportQuery(reportCriteria{Cohort: reportCohortActivity}, nil)
+	if len(fields) != 0 {
+		t.Fatalf("fields=%#v", fields)
+	}
+	normalized := strings.Join(strings.Fields(query), " ")
 	for _, fragment := range []string{
 		"o.timezone_name",
 		"select reminder.due_at",
 		"order by reminder.action_at desc, reminder.due_at desc, reminder.kind, reminder.source_id limit 1",
 	} {
 		if !strings.Contains(normalized, fragment) {
-			t.Fatalf("leadReportQuery missing %q\n%s", fragment, leadReportQuery)
+			t.Fatalf("query missing %q\n%s", fragment, query)
 		}
 	}
 	for _, staleFragment := range []string{"last_activity_at", "inactive_days"} {
-		if strings.Contains(leadReportQuery, staleFragment) {
-			t.Fatalf("leadReportQuery still contains stale inactivity fragment %q", staleFragment)
+		if strings.Contains(query, staleFragment) {
+			t.Fatalf("query still contains stale inactivity fragment %q", staleFragment)
 		}
+	}
+}
+
+func TestLeadReportActivityCohortUsesCreationOrHumanActivity(t *testing.T) {
+	from := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, time.June, 30, 0, 0, 0, 0, time.UTC)
+	query, args, fields := buildLeadReportQuery(reportCriteria{
+		Cohort: reportCohortActivity,
+		From:   &from,
+		To:     &to,
+	}, nil)
+	if len(fields) != 0 {
+		t.Fatalf("fields=%#v", fields)
+	}
+	normalized := strings.Join(strings.Fields(query), " ")
+	for _, fragment := range []string{
+		"coalesce(l.source_created_at,l.created_at)",
+		"period_event.actor_id is not null",
+		"period_event.event_category is distinct from 'system'",
+		"at time zone o.timezone_name",
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("activity query missing %q\n%s", fragment, query)
+		}
+	}
+	if len(args) != 3 {
+		t.Fatalf("args=%#v", args)
+	}
+}
+
+func TestLeadReportCalendarCohortUsesCurrentReminderAndAppointmentExists(t *testing.T) {
+	from := time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	to := time.Date(2026, time.June, 30, 0, 0, 0, 0, time.UTC)
+	query, args, fields := buildLeadReportQuery(reportCriteria{
+		Cohort: reportCohortCalendar,
+		From:   &from,
+		To:     &to,
+	}, nil)
+	if len(fields) != 0 {
+		t.Fatalf("fields=%#v", fields)
+	}
+	normalized := strings.Join(strings.Fields(query), " ")
+	for _, fragment := range []string{
+		"exists ( select 1 from",
+		"reminder.kind in ('callback','thinking','comment')",
+		"calendar_appointment.kind in ('showroom','measurement')",
+		"calendar_appointment.status in ('scheduled','visited','no_show','canceled')",
+		"calendar_appointment.scheduled_at at time zone o.timezone_name",
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("calendar query missing %q\n%s", fragment, query)
+		}
+	}
+	if strings.Contains(query, "calendar_appointment.status in ('scheduled','visited','no_show','canceled','rescheduled')") {
+		t.Fatal("rescheduled appointments must not be selected")
+	}
+	if strings.Contains(normalized, "join public.lead_showroom_visits calendar_appointment") {
+		t.Fatal("calendar appointments must be filtered with EXISTS to keep one row per lead")
+	}
+	if len(args) != 3 {
+		t.Fatalf("args=%#v", args)
+	}
+}
+
+func TestLeadReportStatusFiltersUseOrWithinAndAcrossDimensions(t *testing.T) {
+	query, _, fields := buildLeadReportQuery(reportCriteria{
+		Cohort:         reportCohortActivity,
+		CallStatuses:   []string{"none", "callback_undated"},
+		ClientStatuses: []string{"in_work", "thinking"},
+	}, nil)
+	if len(fields) != 0 {
+		t.Fatalf("fields=%#v", fields)
+	}
+	normalized := strings.Join(strings.Fields(query), " ")
+	for _, fragment := range []string{
+		"(l.call_status is null or (l.call_status = $2 and l.callback_due_at is null))",
+		"((l.client_status = $3 and l.call_status is not null) or l.client_status = $4)",
+	} {
+		if !strings.Contains(normalized, fragment) {
+			t.Fatalf("query missing %q\n%s", fragment, query)
+		}
+	}
+}
+
+func TestLeadReportAcceptsEveryLeadStatusFilterValue(t *testing.T) {
+	callStatuses := []string{"reached", "no_answer", "callback_requested", "none", "callback_undated"}
+	clientStatuses := []string{
+		"new_lead",
+		"showroom_invited",
+		"measurement_scheduled",
+		"calculation_in_progress",
+		"thinking",
+		"postponed",
+		"contract_signed",
+		"closed_lost",
+		"in_work",
+		"active",
+	}
+	for _, status := range callStatuses {
+		_, _, fields := buildLeadReportQuery(reportCriteria{Cohort: reportCohortActivity, CallStatuses: []string{status}}, nil)
+		if len(fields) != 0 {
+			t.Fatalf("call status %q rejected: %#v", status, fields)
+		}
+	}
+	for _, status := range clientStatuses {
+		_, _, fields := buildLeadReportQuery(reportCriteria{Cohort: reportCohortActivity, ClientStatuses: []string{status}}, nil)
+		if len(fields) != 0 {
+			t.Fatalf("client status %q rejected: %#v", status, fields)
+		}
+	}
+}
+
+func TestLeadReportRejectsUnknownStatusFilters(t *testing.T) {
+	_, _, fields := buildLeadReportQuery(reportCriteria{
+		Cohort:         reportCohortActivity,
+		CallStatuses:   []string{"busy"},
+		ClientStatuses: []string{"won"},
+	}, nil)
+	if fields["callStatus"] == "" || fields["clientStatus"] == "" {
+		t.Fatalf("fields=%#v", fields)
 	}
 }
 

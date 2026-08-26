@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.10.0
+  version: 2.11.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -496,12 +496,34 @@ paths:
       operationId: getLeadReport
       security: [{ bearerAuth: [] }]
       parameters:
-        - { name: from, in: query, schema: { type: string, format: date } }
-        - { name: to, in: query, schema: { type: string, format: date } }
+        - name: cohort
+          in: query
+          description: Activity selects leads created or human-active in the period. Calendar selects leads with current calendar events in the period.
+          schema: { type: string, enum: [activity, calendar], default: activity }
+        - name: from
+          in: query
+          description: Inclusive office-local start date. Required together with to, and always required for calendar cohort.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          description: Inclusive office-local end date. Required together with from, and always required for calendar cohort.
+          schema: { type: string, format: date }
+        - name: callStatus
+          in: query
+          description: Comma-separated call statuses. Values within this filter are OR'ed.
+          schema:
+            type: string
+            examples: ['reached,no_answer,callback_requested,none,callback_undated']
+        - name: clientStatus
+          in: query
+          description: Comma-separated client statuses. Values within this filter are OR'ed and are AND'ed with callStatus.
+          schema:
+            type: string
+            examples: ['new_lead,showroom_invited,measurement_scheduled,calculation_in_progress,thinking,postponed,contract_signed,closed_lost,in_work,active']
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
       responses:
         '200':
-          description: Current-status management report for leads created or human-active in the selected period
+          description: Current-status management report for the selected activity or calendar cohort
           content:
             application/json:
               schema: { $ref: '#/components/schemas/LeadReportResponse' }

@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -28,6 +29,22 @@ var reportCurrencyOrder = map[string]int{
 	"USD": 1,
 	"EUR": 2,
 	"PLN": 3,
+}
+
+type reportCohort string
+
+const (
+	reportCohortActivity reportCohort = "activity"
+	reportCohortCalendar reportCohort = "calendar"
+)
+
+type reportCriteria struct {
+	Cohort         reportCohort
+	From           *time.Time
+	To             *time.Time
+	Period         reportPeriod
+	CallStatuses   []string
+	ClientStatuses []string
 }
 
 type reportPeriod struct {
@@ -150,10 +167,16 @@ func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]int{"totalLeads": total, "activeLeads": active, "successfulLeads": successful, "employees": employees})
 }
 
-func parseReportPeriod(r *http.Request) (*time.Time, *time.Time, reportPeriod, map[string]string) {
+func parseReportPeriod(r *http.Request, required bool) (*time.Time, *time.Time, reportPeriod, map[string]string) {
 	fromRaw := strings.TrimSpace(r.URL.Query().Get("from"))
 	toRaw := strings.TrimSpace(r.URL.Query().Get("to"))
 	if fromRaw == "" && toRaw == "" {
+		if required {
+			return nil, nil, reportPeriod{}, map[string]string{
+				"from": "Required for calendar cohort",
+				"to":   "Required for calendar cohort",
+			}
+		}
 		return nil, nil, reportPeriod{}, nil
 	}
 	fields := map[string]string{}
@@ -181,6 +204,30 @@ func parseReportPeriod(r *http.Request) (*time.Time, *time.Time, reportPeriod, m
 		return nil, nil, reportPeriod{}, fields
 	}
 	return &from, &to, reportPeriod{From: &fromRaw, To: &toRaw}, nil
+}
+
+func parseReportCriteria(r *http.Request) (reportCriteria, map[string]string) {
+	criteria := reportCriteria{Cohort: reportCohortActivity}
+	fields := map[string]string{}
+
+	if raw := strings.TrimSpace(r.URL.Query().Get("cohort")); raw != "" {
+		criteria.Cohort = reportCohort(raw)
+	}
+	if criteria.Cohort != reportCohortActivity && criteria.Cohort != reportCohortCalendar {
+		fields["cohort"] = "Must be activity or calendar"
+	}
+
+	from, to, period, periodFields := parseReportPeriod(r, criteria.Cohort == reportCohortCalendar)
+	for field, message := range periodFields {
+		fields[field] = message
+	}
+	criteria.From = from
+	criteria.To = to
+	criteria.Period = period
+	criteria.CallStatuses = splitQueryValues(r.URL.Query().Get("callStatus"))
+	criteria.ClientStatuses = splitQueryValues(r.URL.Query().Get("clientStatus"))
+
+	return criteria, fields
 }
 
 func newReportTotals() reportTotals {
@@ -261,17 +308,7 @@ func reportOverdueDays(asOf time.Time, dueAt *time.Time, timezoneName string) (i
 	return days, nil
 }
 
-var leadReportQuery = `
-	with scoped_leads as (
-		select
-			l.*,
-			o.code as office_code,
-			o.timezone_name
-		from public.leads l
-		join public.offices o on o.id=l.office_id
-		where l.archived_at is null
-		  and ($1::uuid[] is null or l.office_id=any($1))
-	)
+const leadReportSelectSQL = `
 	select
 		l.id,
 		l.office_code,
@@ -343,18 +380,83 @@ var leadReportQuery = `
 			limit 2
 		) recent
 	) comments on true
-	where $2::date is null or (
-		(coalesce(l.source_created_at,l.created_at) at time zone l.timezone_name)::date between $2::date and $3::date
-		or exists (
-			select 1 from public.lead_events period_event
-			where period_event.lead_id=l.id
-			  and period_event.actor_id is not null
-			  and period_event.event_category is distinct from 'system'
-			  and (period_event.created_at at time zone l.timezone_name)::date between $2::date and $3::date
-		)
-	)
 	order by l.office_code,manager.display_name nulls last,l.id
 `
+
+func buildLeadReportQuery(criteria reportCriteria, officeIDs []uuid.UUID) (string, []any, map[string]string) {
+	args := []any{nullableUUIDs(officeIDs)}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return "$" + strconv.Itoa(len(args))
+	}
+	where := []string{
+		"l.archived_at is null",
+		"($1::uuid[] is null or l.office_id=any($1))",
+	}
+	fields := map[string]string{}
+
+	if group, ok := callStatusFilterWhereMulti(criteria.CallStatuses, addArg); !ok {
+		fields["callStatus"] = "Unknown status"
+	} else if group != "" {
+		where = append(where, group)
+	}
+	if group, ok := clientStatusFilterWhereMulti(criteria.ClientStatuses, addArg); !ok {
+		fields["clientStatus"] = "Unknown status"
+	} else if group != "" {
+		where = append(where, group)
+	}
+	if len(fields) > 0 {
+		return "", nil, fields
+	}
+
+	switch criteria.Cohort {
+	case reportCohortActivity:
+		if criteria.From != nil && criteria.To != nil {
+			fromArg := addArg(*criteria.From)
+			toArg := addArg(*criteria.To)
+			where = append(where, `(
+				(coalesce(l.source_created_at,l.created_at) at time zone o.timezone_name)::date between `+fromArg+`::date and `+toArg+`::date
+				or exists (
+					select 1 from public.lead_events period_event
+					where period_event.lead_id=l.id
+					  and period_event.actor_id is not null
+					  and period_event.event_category is distinct from 'system'
+					  and (period_event.created_at at time zone o.timezone_name)::date between `+fromArg+`::date and `+toArg+`::date
+				)
+			)`)
+		}
+	case reportCohortCalendar:
+		fromArg := addArg(*criteria.From)
+		toArg := addArg(*criteria.To)
+		where = append(where, `(
+			exists (
+				select 1
+				from `+leadcohorts.ActiveReminderCandidatesSQL+` reminder
+				where reminder.kind in ('callback','thinking','comment')
+				  and (reminder.due_at at time zone o.timezone_name)::date between `+fromArg+`::date and `+toArg+`::date
+			)
+			or exists (
+				select 1
+				from public.lead_showroom_visits calendar_appointment
+				where calendar_appointment.lead_id=l.id
+				  and calendar_appointment.kind in ('showroom','measurement')
+				  and calendar_appointment.status in ('scheduled','visited','no_show','canceled')
+				  and (calendar_appointment.scheduled_at at time zone o.timezone_name)::date between `+fromArg+`::date and `+toArg+`::date
+			)
+		)`)
+	}
+
+	query := `with scoped_leads as (
+		select
+			l.*,
+			o.code as office_code,
+			o.timezone_name
+		from public.leads l
+		join public.offices o on o.id=l.office_id
+		where ` + strings.Join(where, " and ") + `
+	)` + leadReportSelectSQL
+	return query, args, nil
+}
 
 func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
@@ -362,14 +464,19 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	from, to, period, fields := parseReportPeriod(r)
+	criteria, fields := parseReportCriteria(r)
 	if len(fields) > 0 {
-		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid report period", fields)
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid report criteria", fields)
+		return
+	}
+	query, args, fields := buildLeadReportQuery(criteria, officeIDs)
+	if len(fields) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid report criteria", fields)
 		return
 	}
 
 	generatedAt := time.Now().UTC()
-	rows, err := s.pool.Query(r.Context(), leadReportQuery, nullableUUIDs(officeIDs), from, to)
+	rows, err := s.pool.Query(r.Context(), query, args...)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "report_load_failed", "Could not load report", nil)
 		return
@@ -478,7 +585,7 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, leadReportResponse{
 		GeneratedAt: generatedAt,
-		Period:      period,
+		Period:      criteria.Period,
 		Totals:      totals,
 		LossReasons: lossReasons,
 		Managers:    managers,
