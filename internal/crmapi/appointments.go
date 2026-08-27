@@ -56,9 +56,10 @@ type appointmentMutationRequest struct {
 }
 
 type appointmentLeadSummary struct {
-	ID    uuid.UUID `json:"id"`
-	Name  string    `json:"name"`
-	Phone string    `json:"phone"`
+	ID          uuid.UUID `json:"id"`
+	ReferenceID string    `json:"referenceId"`
+	Name        string    `json:"name"`
+	Phone       string    `json:"phone"`
 }
 
 type appointmentOfficeSummary struct {
@@ -107,6 +108,7 @@ const appointmentSelect = `
 	select
 	  v.id,
 	  l.id,
+	  l.reference_id,
 	  coalesce(l.name, ''),
 	  coalesce(l.phone, ''),
 	  o.id,
@@ -1075,6 +1077,7 @@ func scanAppointment(row appointmentRowScanner) (appointment, error) {
 	err := row.Scan(
 		&item.ID,
 		&item.Lead.ID,
+		&item.Lead.ReferenceID,
 		&item.Lead.Name,
 		&item.Lead.Phone,
 		&item.Office.ID,

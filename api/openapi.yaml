@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.11.0
+  version: 2.12.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -104,7 +104,7 @@ paths:
       parameters:
         - { name: cursor, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 100 } }
-        - { name: search, in: query, schema: { type: string } }
+        - { name: search, in: query, description: Case-insensitive name, phone, email, or exact lead reference ID search, schema: { type: string } }
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
         - { name: source, in: query, schema: { type: string } }
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
@@ -736,9 +736,10 @@ components:
     AppointmentLeadSummary:
       type: object
       additionalProperties: false
-      required: [id, name, phone]
+      required: [id, referenceId, name, phone]
       properties:
         id: { type: string, format: uuid }
+        referenceId: { type: string, pattern: '^[kw][0-9]{4,}$', examples: [k0001] }
         name: { type: string }
         phone: { type: string }
     AppointmentOfficeSummary:
@@ -891,9 +892,10 @@ components:
     Lead:
       type: object
       additionalProperties: true
-      required: [id, office_id, source_system, external_lead_id, lead_status, workflow_status, client_status, version, created_at, updated_at]
+      required: [id, reference_id, office_id, source_system, external_lead_id, lead_status, workflow_status, client_status, version, created_at, updated_at]
       properties:
         id: { type: string, format: uuid }
+        reference_id: { type: string, pattern: '^[kw][0-9]{4,}$', examples: [k0001, w0001] }
         office_id: { type: string, format: uuid }
         source_system: { type: string }
         source_channel: { type: [string, 'null'] }
@@ -1249,9 +1251,10 @@ components:
     ReportLead:
       type: object
       additionalProperties: false
-      required: [id, name, phone, createdAt, clientStatus, clientStatusChangedAt, callStatus, callStatusChangedAt, lossReason, nextActionAt, overdueDays, comments]
+      required: [id, referenceId, name, phone, createdAt, clientStatus, clientStatusChangedAt, callStatus, callStatusChangedAt, lossReason, nextActionAt, overdueDays, comments]
       properties:
         id: { type: string, format: uuid }
+        referenceId: { type: string, pattern: '^[kw][0-9]{4,}$', examples: [w0042] }
         name: { type: string }
         phone: { type: string }
         createdAt: { type: string, format: date-time }

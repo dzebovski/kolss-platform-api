@@ -79,6 +79,7 @@ type reportComment struct {
 
 type reportLead struct {
 	ID                    uuid.UUID       `json:"id"`
+	ReferenceID           string          `json:"referenceId"`
 	Name                  string          `json:"name"`
 	Phone                 string          `json:"phone"`
 	CreatedAt             time.Time       `json:"createdAt"`
@@ -311,6 +312,7 @@ func reportOverdueDays(asOf time.Time, dueAt *time.Time, timezoneName string) (i
 const leadReportSelectSQL = `
 	select
 		l.id,
+		l.reference_id,
 		l.office_code,
 		l.timezone_name,
 		l.assigned_to,
@@ -493,6 +495,7 @@ func (s *Server) handleLeadReport(w http.ResponseWriter, r *http.Request) {
 		var commentsJSON []byte
 		if err := rows.Scan(
 			&lead.ID,
+			&lead.ReferenceID,
 			&officeCode,
 			&timezoneName,
 			&managerID,

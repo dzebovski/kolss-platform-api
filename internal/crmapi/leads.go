@@ -208,6 +208,15 @@ func splitQueryValues(raw string) []string {
 	return values
 }
 
+func leadSearchWhere(search string, addArg func(any) string) string {
+	likePlaceholder := addArg("%" + search + "%")
+	referencePlaceholder := addArg(strings.ToLower(search))
+	return `(coalesce(l.name, '') ilike ` + likePlaceholder +
+		` or coalesce(l.phone, '') ilike ` + likePlaceholder +
+		` or coalesce(l.email, '') ilike ` + likePlaceholder +
+		` or l.reference_id = ` + referencePlaceholder + `)`
+}
+
 // clientStatusFilterWhere maps list filter values to SQL clauses.
 // new_lead means truly new (no call yet); in_work is new_lead with a recorded call;
 // active means anything not terminal (closed_lost, contract_signed).
@@ -388,9 +397,7 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		value := "%" + search + "%"
-		placeholder := addArg(value)
-		where = append(where, `(coalesce(l.name, '') ilike `+placeholder+` or coalesce(l.phone, '') ilike `+placeholder+` or coalesce(l.email, '') ilike `+placeholder+`)`)
+		where = append(where, leadSearchWhere(search, addArg))
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
 		parsed, err := strconv.Atoi(raw)

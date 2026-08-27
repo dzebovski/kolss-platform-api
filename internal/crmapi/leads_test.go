@@ -114,6 +114,29 @@ func TestSplitQueryValues(t *testing.T) {
 	}
 }
 
+func TestLeadSearchWhereIncludesExactCaseInsensitiveReference(t *testing.T) {
+	args := []any{}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
+	}
+
+	clause := leadSearchWhere("K0042", addArg)
+	for _, fragment := range []string{
+		"coalesce(l.name, '') ilike $1",
+		"coalesce(l.phone, '') ilike $1",
+		"coalesce(l.email, '') ilike $1",
+		"l.reference_id = $2",
+	} {
+		if !strings.Contains(clause, fragment) {
+			t.Errorf("search clause missing %q: %s", fragment, clause)
+		}
+	}
+	if got, want := args, []any{"%K0042%", "k0042"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("args=%v, want %v", got, want)
+	}
+}
+
 func TestClientStatusFilterWhereMulti(t *testing.T) {
 	addArg := func(value any) string {
 		return fmt.Sprintf("%q", value)
