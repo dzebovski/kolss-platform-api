@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.12.0
+  version: 2.13.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -528,6 +528,31 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/LeadReportResponse' }
         '400': { $ref: '#/components/responses/CRMError' }
+  /v1/reports/sales-funnel:
+    get:
+      tags: [Reports]
+      operationId: getSalesFunnelReport
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: from
+          in: query
+          required: true
+          description: Inclusive cohort start date, evaluated in each lead office timezone.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          description: Inclusive cohort end date, evaluated in each lead office timezone.
+          schema: { type: string, format: date }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Cohort sales funnel with unique-lead stage counts and monetary totals
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SalesFunnelReportResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
   /v1/files/{fileId}/download-url:
     get:
       tags: [Leads]
@@ -1315,6 +1340,59 @@ components:
         managers:
           type: array
           items: { $ref: '#/components/schemas/ManagerLeadReport' }
+    SalesFunnelStage:
+      type: object
+      additionalProperties: false
+      required: [count, percent]
+      properties:
+        count: { type: integer, minimum: 0 }
+        percent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Rounded conversion from the stage-specific parent; leads are 100 when non-empty.
+    SalesFunnelStages:
+      type: object
+      additionalProperties: false
+      required:
+        - leads
+        - calls
+        - reached
+        - notReached
+        - showroomInvited
+        - showroomVisited
+        - measurementScheduled
+        - measurementCompleted
+        - calculationStarted
+      properties:
+        leads: { $ref: '#/components/schemas/SalesFunnelStage' }
+        calls: { $ref: '#/components/schemas/SalesFunnelStage' }
+        reached: { $ref: '#/components/schemas/SalesFunnelStage' }
+        notReached: { $ref: '#/components/schemas/SalesFunnelStage' }
+        showroomInvited: { $ref: '#/components/schemas/SalesFunnelStage' }
+        showroomVisited: { $ref: '#/components/schemas/SalesFunnelStage' }
+        measurementScheduled: { $ref: '#/components/schemas/SalesFunnelStage' }
+        measurementCompleted: { $ref: '#/components/schemas/SalesFunnelStage' }
+        calculationStarted: { $ref: '#/components/schemas/SalesFunnelStage' }
+    SalesFunnelPotential:
+      type: object
+      additionalProperties: false
+      required: [currency, total]
+      properties:
+        currency: { type: string, const: EUR }
+        total: { type: number, minimum: 0 }
+    SalesFunnelReportResponse:
+      type: object
+      additionalProperties: false
+      required: [generatedAt, period, stages, potential, contractTotals]
+      properties:
+        generatedAt: { type: string, format: date-time }
+        period: { $ref: '#/components/schemas/ReportPeriod' }
+        stages: { $ref: '#/components/schemas/SalesFunnelStages' }
+        potential: { $ref: '#/components/schemas/SalesFunnelPotential' }
+        contractTotals:
+          type: array
+          items: { $ref: '#/components/schemas/ReportContractTotal' }
     CreateLeadRequest:
       type: object
       additionalProperties: false
