@@ -10,21 +10,26 @@ func TestAggregateSalesFunnelUsesUniqueLeadsAndRestoresUpstreamStages(t *testing
 	budgetA, budgetB := 10_000.0, 5_500.0
 	eurAmount, uahAmount := 20_000.0, 420_000.0
 	eur, uah := "EUR", "UAH"
+	rates := currencyRateSet{PLNPerEUR: 4.2, UAHPerEUR: 52, UAHPerUSD: 44.2}
 
-	stages, potential, contracts := aggregateSalesFunnel([]salesFunnelLeadEvidence{
+	stages, potential, contracts, comparisons := aggregateSalesFunnel([]salesFunnelLeadEvidence{
 		{
+			OfficeCode:         "kyiv",
 			EstimatedBudget:    &budgetA,
+			EstimatedCurrency:  "EUR",
+			EstimatedRates:     rates,
 			ExplicitReached:    true,
 			ExplicitNotReached: true,
 			ContractAmount:     &eurAmount,
 			ContractCurrency:   &eur,
+			ContractRates:      rates,
 		},
-		{ClosedNoContact: true},
-		{ShowroomVisited: true, EstimatedBudget: &budgetB},
-		{MeasurementCompleted: true, ContractAmount: &uahAmount, ContractCurrency: &uah},
-		{CalculationStarted: true},
-		{},
-	})
+		{OfficeCode: "kyiv", ClosedNoContact: true},
+		{OfficeCode: "warsaw", ShowroomVisited: true, EstimatedBudget: &budgetB, EstimatedCurrency: "EUR", EstimatedRates: rates},
+		{OfficeCode: "kyiv", MeasurementCompleted: true, ContractAmount: &uahAmount, ContractCurrency: &uah, ContractRates: rates},
+		{OfficeCode: "kyiv", CalculationStarted: true},
+		{OfficeCode: "warsaw"},
+	}, []string{"kyiv", "warsaw"})
 
 	if stages.Leads.Count != 6 || stages.Leads.Percent != 100 {
 		t.Fatalf("leads=%#v", stages.Leads)
@@ -56,15 +61,34 @@ func TestAggregateSalesFunnelUsesUniqueLeadsAndRestoresUpstreamStages(t *testing
 		contracts[1].Currency != "EUR" || contracts[1].Total != 20_000 {
 		t.Fatalf("contracts=%#v", contracts)
 	}
+	if len(comparisons) != 2 {
+		t.Fatalf("comparisons=%#v", comparisons)
+	}
+	if comparisons[0].OfficeCode != "kyiv" || comparisons[0].Currency != "UAH" ||
+		comparisons[0].EstimatedTotal != 520_000 || comparisons[0].ActualTotal != 1_460_000 ||
+		comparisons[0].Difference != 940_000 || comparisons[0].RealizationPercent == nil ||
+		*comparisons[0].RealizationPercent != 280.8 {
+		t.Fatalf("kyiv comparison=%#v", comparisons[0])
+	}
+	if comparisons[1].OfficeCode != "warsaw" || comparisons[1].Currency != "PLN" ||
+		comparisons[1].EstimatedTotal != 23_100 || comparisons[1].RealizationPercent == nil ||
+		*comparisons[1].RealizationPercent != 0 {
+		t.Fatalf("warsaw comparison=%#v", comparisons[1])
+	}
 }
 
 func TestAggregateSalesFunnelHandlesZeroDenominators(t *testing.T) {
-	stages, potential, contracts := aggregateSalesFunnel(nil)
+	stages, potential, contracts, comparisons := aggregateSalesFunnel(nil, []string{"kyiv", "warsaw"})
 	if stages.Leads.Percent != 0 || stages.Calls.Percent != 0 || stages.Reached.Percent != 0 {
 		t.Fatalf("stages=%#v", stages)
 	}
-	if potential.Currency != "EUR" || potential.Total != 0 || len(contracts) != 0 {
-		t.Fatalf("potential=%#v contracts=%#v", potential, contracts)
+	if potential.Currency != "EUR" || potential.Total != 0 || len(contracts) != 0 || len(comparisons) != 2 {
+		t.Fatalf("potential=%#v contracts=%#v comparisons=%#v", potential, contracts, comparisons)
+	}
+	for _, comparison := range comparisons {
+		if comparison.EstimatedTotal != 0 || comparison.ActualTotal != 0 || comparison.Difference != 0 || comparison.RealizationPercent != nil {
+			t.Fatalf("empty comparison=%#v", comparison)
+		}
 	}
 }
 
@@ -79,6 +103,8 @@ func TestBuildSalesFunnelQueryUsesOfficeLocalCohortAndHistoricalEvidence(t *test
 		"v.kind='measurement'",
 		"e.status_code='calculation_in_progress'",
 		"order by c.signed_at desc nulls last,c.created_at desc limit 1",
+		"l.estimated_budget_currency",
+		"public.currency_rate_sets",
 	} {
 		if !strings.Contains(query, fragment) {
 			t.Fatalf("query missing %q", fragment)

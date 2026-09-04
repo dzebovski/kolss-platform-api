@@ -546,11 +546,15 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			newValue["reason"] = req.Reason
 		}
 		if req.Status == "contract_signed" {
+			rates, err := loadCurrencyRateSetAt(r.Context(), tx, now)
+			if err != nil {
+				return err
+			}
 			if _, err := tx.Exec(r.Context(), `
 				insert into public.lead_contracts
-				  (lead_id,signed_at,status,contract_number,amount,currency,created_by)
-				values ($1,$2,'signed',$3,$4,$5,$6)
-			`, leadID, now, req.ContractNumber, req.Amount, req.Currency, actor.ID); err != nil {
+				  (lead_id,signed_at,status,contract_number,amount,currency,currency_rate_set_id,created_by)
+				values ($1,$2,'signed',$3,$4,$5,$6,$7)
+			`, leadID, now, req.ContractNumber, req.Amount, req.Currency, rates.ID, actor.ID); err != nil {
 				return err
 			}
 			newValue["contract_number"] = req.ContractNumber

@@ -810,7 +810,9 @@ func TestManualLeadCreationUsesSelectedSourceTimestamp(t *testing.T) {
 		ProductInterest: "Кухня",
 	}
 
-	args := createLeadInsertArgs(req, "manual", "office", "crm:external", selectedAt)
+	budgetCurrency := "PLN"
+	rateSetID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	args := createLeadInsertArgs(req, "manual", "office", "crm:external", selectedAt, budgetCurrency, &rateSetID)
 	storedAt, ok := args[4].(time.Time)
 	if !ok || !storedAt.Equal(selectedAt) {
 		t.Fatalf("source_created_at argument = %#v, want %s", args[4], selectedAt)

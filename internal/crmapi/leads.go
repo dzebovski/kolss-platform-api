@@ -549,16 +549,17 @@ func (s *Server) loadLeadRelations(r *http.Request, leadID uuid.UUID) (map[strin
 }
 
 type createLeadRequest struct {
-	OfficeID             uuid.UUID `json:"officeId"`
-	Source               string    `json:"source"`
-	Name                 string    `json:"name"`
-	Phone                string    `json:"phone"`
-	Email                *string   `json:"email"`
-	CityRegion           string    `json:"cityRegion"`
-	ProductInterest      string    `json:"productInterest"`
-	EstimatedBudget      *float64  `json:"estimatedBudget"`
-	InitialMessage       string    `json:"initialMessage"`
-	SourceCreatedAtLocal string    `json:"sourceCreatedAtLocal"`
+	OfficeID                uuid.UUID `json:"officeId"`
+	Source                  string    `json:"source"`
+	Name                    string    `json:"name"`
+	Phone                   string    `json:"phone"`
+	Email                   *string   `json:"email"`
+	CityRegion              string    `json:"cityRegion"`
+	ProductInterest         string    `json:"productInterest"`
+	EstimatedBudget         *float64  `json:"estimatedBudget"`
+	EstimatedBudgetCurrency *string   `json:"estimatedBudgetCurrency"`
+	InitialMessage          string    `json:"initialMessage"`
+	SourceCreatedAtLocal    string    `json:"sourceCreatedAtLocal"`
 }
 
 const sourceCreatedAtLocalLayout = "2006-01-02T15:04"
@@ -568,8 +569,10 @@ const createLeadInsertQuery = `
 		insert into public.leads (
 			office_id, source_system, source_channel, external_lead_id,
 			source_created_at,
-			name, phone, email, city_region, product_interest, estimated_budget, order_comment
-		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			name, phone, email, city_region, product_interest,
+			estimated_budget, estimated_budget_currency, estimated_budget_rate_set_id,
+			order_comment
+		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		on conflict (source_system,external_lead_id) do nothing
 		returning *
 	)
@@ -599,7 +602,13 @@ func parseSourceCreatedAtLocal(value, officeCode string) (time.Time, error) {
 	return parsed, nil
 }
 
-func createLeadInsertArgs(req createLeadRequest, sourceSystem, sourceChannel, externalID string, sourceCreatedAt time.Time) []any {
+func createLeadInsertArgs(
+	req createLeadRequest,
+	sourceSystem, sourceChannel, externalID string,
+	sourceCreatedAt time.Time,
+	budgetCurrency string,
+	budgetRateSetID *uuid.UUID,
+) []any {
 	return []any{
 		req.OfficeID,
 		sourceSystem,
@@ -612,6 +621,8 @@ func createLeadInsertArgs(req createLeadRequest, sourceSystem, sourceChannel, ex
 		clean(req.CityRegion),
 		clean(req.ProductInterest),
 		req.EstimatedBudget,
+		budgetCurrency,
+		budgetRateSetID,
 		clean(req.InitialMessage),
 	}
 }
@@ -647,6 +658,23 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusForbidden, "office_forbidden", "Office access denied", nil)
 		return
 	}
+	if req.EstimatedBudget != nil && *req.EstimatedBudget < 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+			"estimatedBudget": "Estimated budget must not be negative",
+		})
+		return
+	}
+	budgetCurrency := currencyEUR
+	if req.EstimatedBudgetCurrency != nil {
+		var valid bool
+		budgetCurrency, valid = normalizeCurrency(*req.EstimatedBudgetCurrency)
+		if !valid {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+				"estimatedBudgetCurrency": "Must be UAH, USD, EUR, or PLN",
+			})
+			return
+		}
+	}
 	sourceSystem, sourceChannel := createSource(req.Source)
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -666,11 +694,20 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	var budgetRateSetID *uuid.UUID
+	if req.EstimatedBudget != nil {
+		rates, rateErr := loadCurrencyRateSetAt(r.Context(), tx, time.Now().UTC())
+		if rateErr != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "lead_create_failed", "Could not load currency rates", nil)
+			return
+		}
+		budgetRateSetID = &rates.ID
+	}
 	var leadID uuid.UUID
 	var raw []byte
 	externalID := "crm:" + uuid.NewSHA1(uuid.NameSpaceURL, []byte(actor.ID.String()+"|"+idempotencyKey)).String()
 	inserted := true
-	err = tx.QueryRow(r.Context(), createLeadInsertQuery, createLeadInsertArgs(req, sourceSystem, sourceChannel, externalID, sourceCreatedAt)...).Scan(&leadID, &raw)
+	err = tx.QueryRow(r.Context(), createLeadInsertQuery, createLeadInsertArgs(req, sourceSystem, sourceChannel, externalID, sourceCreatedAt, budgetCurrency, budgetRateSetID)...).Scan(&leadID, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		inserted = false
 		err = tx.QueryRow(r.Context(), `select id,to_jsonb(l) from public.leads l where source_system=$1 and external_lead_id=$2`, sourceSystem, externalID).Scan(&leadID, &raw)
@@ -702,15 +739,16 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateLeadRequest struct {
-	Name            string   `json:"name"`
-	Phone           string   `json:"phone"`
-	Email           *string  `json:"email"`
-	CityRegion      string   `json:"cityRegion"`
-	ProductInterest string   `json:"productInterest"`
-	EstimatedBudget *float64 `json:"estimatedBudget"`
-	InitialMessage  string   `json:"initialMessage"`
-	AssignedToID    *string  `json:"assignedToId"`
-	EditedFields    []string `json:"editedFields"`
+	Name                    string   `json:"name"`
+	Phone                   string   `json:"phone"`
+	Email                   *string  `json:"email"`
+	CityRegion              string   `json:"cityRegion"`
+	ProductInterest         string   `json:"productInterest"`
+	EstimatedBudget         *float64 `json:"estimatedBudget"`
+	EstimatedBudgetCurrency *string  `json:"estimatedBudgetCurrency"`
+	InitialMessage          string   `json:"initialMessage"`
+	AssignedToID            *string  `json:"assignedToId"`
+	EditedFields            []string `json:"editedFields"`
 }
 
 func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
@@ -728,9 +766,33 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 	}
 	var officeID uuid.UUID
 	var currentAssignedTo *uuid.UUID
-	if err := s.pool.QueryRow(r.Context(), `select office_id, assigned_to from public.leads where id=$1 and archived_at is null`, leadID).Scan(&officeID, &currentAssignedTo); err != nil {
+	var currentBudget *float64
+	var currentBudgetCurrency string
+	var currentBudgetRateSetID *uuid.UUID
+	if err := s.pool.QueryRow(r.Context(), `
+		select office_id, assigned_to, estimated_budget, estimated_budget_currency, estimated_budget_rate_set_id
+		from public.leads
+		where id=$1 and archived_at is null
+	`, leadID).Scan(&officeID, &currentAssignedTo, &currentBudget, &currentBudgetCurrency, &currentBudgetRateSetID); err != nil {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
+	}
+	if req.EstimatedBudget != nil && *req.EstimatedBudget < 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+			"estimatedBudget": "Estimated budget must not be negative",
+		})
+		return
+	}
+	budgetCurrency := currentBudgetCurrency
+	if req.EstimatedBudgetCurrency != nil {
+		var valid bool
+		budgetCurrency, valid = normalizeCurrency(*req.EstimatedBudgetCurrency)
+		if !valid {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+				"estimatedBudgetCurrency": "Must be UAH, USD, EUR, or PLN",
+			})
+			return
+		}
 	}
 	if !actor.CanEditLead(officeID) {
 		s.writeError(w, r, http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil)
@@ -761,14 +823,28 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	budgetRateSetID := currentBudgetRateSetID
+	budgetChanged := !optionalFloatEqual(currentBudget, req.EstimatedBudget) || budgetCurrency != currentBudgetCurrency
+	if budgetChanged {
+		budgetRateSetID = nil
+		if req.EstimatedBudget != nil {
+			rates, rateErr := loadCurrencyRateSetAt(r.Context(), tx, time.Now().UTC())
+			if rateErr != nil {
+				s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not load currency rates", nil)
+				return
+			}
+			budgetRateSetID = &rates.ID
+		}
+	}
 	var nextVersion int64
 	err = tx.QueryRow(r.Context(), `
 		update public.leads set name=$3, phone=$4, email=$5, city_region=$6,
-		product_interest=$7, estimated_budget=$8, order_comment=$9, assigned_to=$10,
+		product_interest=$7, estimated_budget=$8, estimated_budget_currency=$9,
+		estimated_budget_rate_set_id=$10, order_comment=$11, assigned_to=$12,
 		updated_at=now(), version=version+1
 		where id=$1 and version=$2 and archived_at is null
 		returning version
-	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, clean(req.InitialMessage), assignedTo).Scan(&nextVersion)
+	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, budgetCurrency, budgetRateSetID, clean(req.InitialMessage), assignedTo).Scan(&nextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
 		return
@@ -784,6 +860,13 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"version": nextVersion})
+}
+
+func optionalFloatEqual(left, right *float64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 type eventUpdateRequest struct {

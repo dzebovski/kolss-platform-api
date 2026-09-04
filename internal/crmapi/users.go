@@ -74,7 +74,7 @@ func (s *Server) handleListManagers(w http.ResponseWriter, r *http.Request) {
 func (s *Server) requireSuperAdmin(w http.ResponseWriter, r *http.Request) bool {
 	actor, ok := actorFromContext(r.Context())
 	if !ok || !actor.IsSuperAdmin() {
-		s.writeError(w, r, http.StatusForbidden, "super_admin_required", "Only super admin can manage users", nil)
+		s.writeError(w, r, http.StatusForbidden, "super_admin_required", "Only super admin can manage this resource", nil)
 		return false
 	}
 	return true

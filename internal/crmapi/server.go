@@ -124,6 +124,8 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/dashboard/overview", s.handleDashboardOverview)
 			r.Get("/v1/reports/leads", s.handleLeadReport)
 			r.Get("/v1/reports/sales-funnel", s.handleSalesFunnelReport)
+			r.Get("/v1/settings/currency-rates", s.handleGetCurrencyRates)
+			r.Put("/v1/settings/currency-rates", s.handleUpdateCurrencyRates)
 			r.Get("/v1/files/{fileId}/download-url", s.handleFileDownloadURL)
 		})
 
@@ -185,6 +187,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/dashboard/overview",
 	"/v1/reports/leads",
 	"/v1/reports/sales-funnel",
+	"/v1/settings/currency-rates",
 	"/v1/files/{fileId}/download-url",
 }
 
