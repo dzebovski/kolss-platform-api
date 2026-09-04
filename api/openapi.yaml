@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.14.0
+  version: 2.16.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -105,7 +105,7 @@ paths:
       parameters:
         - { name: cursor, in: query, schema: { type: string } }
         - { name: limit, in: query, schema: { type: integer, default: 50, maximum: 100 } }
-        - { name: search, in: query, description: Case-insensitive name, phone, email, or exact lead reference ID search, schema: { type: string } }
+        - { name: search, in: query, description: Case-insensitive partial match on lead reference ID, name, phone, or email, schema: { type: string } }
         - { name: officeId, in: query, schema: { type: string, format: uuid } }
         - { name: source, in: query, schema: { type: string } }
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
@@ -791,8 +791,9 @@ components:
       type: string
       description: >
         showroom is a meeting at the KOLSS showroom; measurement is an on-site furniture
-        measurement at the customer's place. Both occupy the responsible manager's calendar.
-      enum: [showroom, measurement]
+        measurement at the customer's place; office_work is internal work linked to a client and
+        does not change the client's sales status. All kinds occupy the responsible manager's calendar.
+      enum: [showroom, measurement, office_work]
     AppointmentLeadSummary:
       type: object
       additionalProperties: false

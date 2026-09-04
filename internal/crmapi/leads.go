@@ -210,11 +210,10 @@ func splitQueryValues(raw string) []string {
 
 func leadSearchWhere(search string, addArg func(any) string) string {
 	likePlaceholder := addArg("%" + search + "%")
-	referencePlaceholder := addArg(strings.ToLower(search))
 	return `(coalesce(l.name, '') ilike ` + likePlaceholder +
 		` or coalesce(l.phone, '') ilike ` + likePlaceholder +
 		` or coalesce(l.email, '') ilike ` + likePlaceholder +
-		` or l.reference_id = ` + referencePlaceholder + `)`
+		` or l.reference_id ilike ` + likePlaceholder + `)`
 }
 
 // clientStatusFilterWhere maps list filter values to SQL clauses.
@@ -519,7 +518,7 @@ func (s *Server) loadLeadRelations(r *http.Request, leadID uuid.UUID) (map[strin
 		sql string
 	}{
 		{"contactAttempts", `select to_jsonb(a) || jsonb_build_object('profiles', jsonb_build_object('display_name', p.display_name)) from public.lead_contact_attempts a left join public.profiles p on p.id=a.manager_id where a.lead_id=$1 order by a.created_at desc`},
-		{"showroomVisits", `select to_jsonb(v) from public.lead_showroom_visits v where v.lead_id=$1 order by v.created_at desc`},
+		{"showroomVisits", `select to_jsonb(v) from public.lead_showroom_visits v where v.lead_id=$1 and v.kind in ('showroom','measurement') order by v.created_at desc`},
 		{"contracts", `select to_jsonb(c) from public.lead_contracts c where c.lead_id=$1 order by c.created_at desc`},
 		{"events", `select to_jsonb(e) || jsonb_build_object('profiles', case when p.id is null then null else jsonb_build_object('display_name', p.display_name) end) from public.lead_events e left join public.profiles p on p.id=e.actor_id where e.lead_id=$1 order by e.created_at desc`},
 	}

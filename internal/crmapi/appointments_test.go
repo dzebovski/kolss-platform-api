@@ -197,6 +197,7 @@ func TestCloseAndArchiveCancelScheduledAppointments(t *testing.T) {
 func TestAppointmentKindValidation(t *testing.T) {
 	showroom := appointmentKindShowroom
 	measurement := appointmentKindMeasurement
+	officeWork := appointmentKindOfficeWork
 	unknown := "delivery"
 	manager := uuid.New()
 	starts := "2026-08-11T10:00"
@@ -216,6 +217,7 @@ func TestAppointmentKindValidation(t *testing.T) {
 		"omitted":     nil,
 		"showroom":    &showroom,
 		"measurement": &measurement,
+		"office_work": &officeWork,
 	} {
 		if fields := validateCreateAppointment(base(kind)); len(fields) != 0 {
 			t.Fatalf("%s kind should be accepted, got %#v", name, fields)
@@ -231,6 +233,59 @@ func TestAppointmentKindValidation(t *testing.T) {
 	}
 }
 
+func TestOfficeWorkIsNotAVisitKind(t *testing.T) {
+	if !isAppointmentKind(appointmentKindOfficeWork) {
+		t.Fatal("office work must be accepted as an appointment kind")
+	}
+	if isVisitAppointmentKind(appointmentKindOfficeWork) {
+		t.Fatal("office work must not participate in visit workflow rules")
+	}
+	for _, kind := range []string{appointmentKindShowroom, appointmentKindMeasurement} {
+		if !isVisitAppointmentKind(kind) {
+			t.Fatalf("%q must remain a visit kind", kind)
+		}
+	}
+}
+
+func TestOfficeWorkUsesSeparateSystemAuditEvents(t *testing.T) {
+	for _, fragment := range []string{
+		"'office_work_scheduled'",
+		"'system'",
+		"'scheduled'",
+		"'kind','office_work'",
+	} {
+		if !strings.Contains(officeWorkScheduledEventInsert, fragment) {
+			t.Fatalf("office work audit query missing %q", fragment)
+		}
+	}
+}
+
+func TestLegacyVisitFlowsCannotTargetOfficeWork(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime caller")
+	}
+	root := filepath.Dir(file)
+	workflowBytes, err := os.ReadFile(filepath.Join(root, "workflow.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	leadsBytes, err := os.ReadFile(filepath.Join(root, "leads.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(workflowBytes)
+	if strings.Count(workflow, "where lead_id=$1 and kind='showroom'") < 2 {
+		t.Fatal("legacy reschedule and completion must target showroom rows explicitly")
+	}
+	if !strings.Contains(workflow, "(lead_id,kind,scheduled_at,status,comment,created_by)") {
+		t.Fatal("legacy visit creation must persist the showroom kind explicitly")
+	}
+	if !strings.Contains(string(leadsBytes), "v.kind in ('showroom','measurement')") {
+		t.Fatal("lead visit relations must exclude office work")
+	}
+}
+
 func TestClientStatusForAppointmentKind(t *testing.T) {
 	if got := clientStatusForAppointmentKind(appointmentKindMeasurement); got != "measurement_scheduled" {
 		t.Fatalf("got %q, want measurement_scheduled", got)
@@ -242,9 +297,8 @@ func TestClientStatusForAppointmentKind(t *testing.T) {
 	}
 }
 
-// The active-appointment probe is scoped by kind so a lead can hold a showroom
-// meeting and a measurement at the same time, while the manager-overlap probe is
-// deliberately not, so a measurement blocks a showroom slot and vice versa.
+// The active-appointment probe applies only to visit kinds; office work may have
+// several active blocks. Manager overlap remains cross-kind.
 func TestAppointmentScopingIsPerKindExceptManagerAvailability(t *testing.T) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
@@ -258,6 +312,15 @@ func TestAppointmentScopingIsPerKindExceptManagerAvailability(t *testing.T) {
 
 	if !strings.Contains(appointments, "where lead_id=$1 and kind=$2 and status='scheduled'") {
 		t.Fatal("the active-appointment probe must be scoped by kind")
+	}
+	if !strings.Contains(appointments, "if isVisitAppointmentKind(kind)") {
+		t.Fatal("only showroom and measurement should use the active-kind probe")
+	}
+	if !strings.Contains(appointments, "if kind == appointmentKindOfficeWork") {
+		t.Fatal("office work must bypass lead workflow mutations")
+	}
+	if !strings.Contains(appointments, "currentKind == appointmentKindOfficeWork && req.Status != nil") {
+		t.Fatal("office work must reject manual visit status actions")
 	}
 	if !strings.Contains(appointments, "where lead_id=$1 and kind='showroom' and status='scheduled'") {
 		t.Fatal("the legacy showroom_invited path must stay on the showroom kind")

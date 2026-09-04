@@ -321,7 +321,7 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 	case "schedule-visit", "reschedule-visit":
 		scheduledAt, _ := time.Parse(time.RFC3339, req.ScheduledAt)
 		if action == "reschedule-visit" {
-			if _, err := tx.Exec(r.Context(), `update public.lead_showroom_visits set status='rescheduled' where id=(select id from public.lead_showroom_visits where lead_id=$1 order by created_at desc limit 1)`, leadID); err != nil {
+			if _, err := tx.Exec(r.Context(), `update public.lead_showroom_visits set status='rescheduled' where id=(select id from public.lead_showroom_visits where lead_id=$1 and kind='showroom' order by created_at desc limit 1)`, leadID); err != nil {
 				return err
 			}
 			workflow = "visit_rescheduled"
@@ -330,13 +330,13 @@ func (s *Server) applyLeadAction(r *http.Request, tx pgx.Tx, actor Actor, leadID
 			workflow = "visit_scheduled"
 			eventType = "showroom_visit_scheduled"
 		}
-		if _, err := tx.Exec(r.Context(), `insert into public.lead_showroom_visits (lead_id,scheduled_at,status,comment,created_by) values ($1,$2,'scheduled',$3,$4)`, leadID, scheduledAt, comment, actor.ID); err != nil {
+		if _, err := tx.Exec(r.Context(), `insert into public.lead_showroom_visits (lead_id,kind,scheduled_at,status,comment,created_by) values ($1,'showroom',$2,'scheduled',$3,$4)`, leadID, scheduledAt, comment, actor.ID); err != nil {
 			return err
 		}
 		callbackDue = nil
 		newValue = map[string]any{"scheduled_at": scheduledAt, "workflow_status": workflow}
 	case "complete-visit":
-		if _, err := tx.Exec(r.Context(), `update public.lead_showroom_visits set status='visited' where id=(select id from public.lead_showroom_visits where lead_id=$1 order by created_at desc limit 1)`, leadID); err != nil {
+		if _, err := tx.Exec(r.Context(), `update public.lead_showroom_visits set status='visited' where id=(select id from public.lead_showroom_visits where lead_id=$1 and kind='showroom' order by created_at desc limit 1)`, leadID); err != nil {
 			return err
 		}
 		workflow = "visit_completed"

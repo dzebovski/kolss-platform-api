@@ -21,6 +21,7 @@ const (
 	appointmentStatusCanceled  = "canceled"
 	appointmentKindShowroom    = "showroom"
 	appointmentKindMeasurement = "measurement"
+	appointmentKindOfficeWork  = "office_work"
 	appointmentLocalLayout     = "2006-01-02T15:04"
 	appointmentDateLayout      = "2006-01-02"
 )
@@ -181,6 +182,28 @@ const appointmentChangedEventInsert = `
 	    'responsible_manager_id',$14::uuid,
 	    'status',$4::text,
 	    'comment',$5::text
+	  )
+	)
+`
+
+const officeWorkScheduledEventInsert = `
+	insert into public.lead_events (
+	  lead_id,
+	  actor_id,
+	  event_type,
+	  event_category,
+	  status_code,
+	  comment,
+	  new_value
+	)
+	values (
+	  $1,$2,'office_work_scheduled','system','scheduled',$3,
+	  jsonb_build_object(
+	    'appointment_id',$4::uuid,
+	    'starts_at',$5::timestamptz,
+	    'ends_at',$6::timestamptz,
+	    'responsible_manager_id',$7::uuid,
+	    'kind','office_work'
 	  )
 	)
 `
@@ -402,6 +425,7 @@ var (
 	errAppointmentAlreadyActive  = errors.New("appointment already active")
 	errAppointmentManagerBusy    = errors.New("appointment manager busy")
 	errAppointmentTerminal       = errors.New("appointment terminal")
+	errOfficeWorkStatus          = errors.New("office work status is immutable")
 	errAppointmentVersion        = errors.New("appointment version conflict")
 )
 
@@ -513,17 +537,19 @@ func (s *Server) createAppointment(
 	if req.Kind != nil {
 		kind = *req.Kind
 	}
-	var activeExists bool
-	if err := tx.QueryRow(r.Context(), `
-		select exists(
-		  select 1 from public.lead_showroom_visits
-		  where lead_id=$1 and kind=$2 and status='scheduled'
-		)
-	`, req.LeadID, kind).Scan(&activeExists); err != nil {
-		return appointment{}, err
-	}
-	if activeExists {
-		return appointment{}, errAppointmentAlreadyActive
+	if isVisitAppointmentKind(kind) {
+		var activeExists bool
+		if err := tx.QueryRow(r.Context(), `
+			select exists(
+			  select 1 from public.lead_showroom_visits
+			  where lead_id=$1 and kind=$2 and status='scheduled'
+			)
+		`, req.LeadID, kind).Scan(&activeExists); err != nil {
+			return appointment{}, err
+		}
+		if activeExists {
+			return appointment{}, errAppointmentAlreadyActive
+		}
 	}
 	if err := ensureManagerFree(
 		r.Context(),
@@ -554,6 +580,22 @@ func (s *Server) createAppointment(
 	`, req.LeadID, kind, startsAt, endsAt, cleanOptional(req.Comment), *req.ResponsibleManagerID, actor.ID).Scan(&appointmentID)
 	if err != nil {
 		return appointment{}, err
+	}
+	if kind == appointmentKindOfficeWork {
+		if _, err := tx.Exec(
+			r.Context(),
+			officeWorkScheduledEventInsert,
+			req.LeadID,
+			actor.ID,
+			cleanOptional(req.Comment),
+			appointmentID,
+			startsAt,
+			endsAt,
+			*req.ResponsibleManagerID,
+		); err != nil {
+			return appointment{}, err
+		}
+		return loadAppointmentTx(r, tx, appointmentID)
 	}
 	nextAssignee := assignedTo
 	if nextAssignee == nil {
@@ -606,7 +648,7 @@ func (s *Server) updateAppointment(
 	var currentStart, currentEnd time.Time
 	var currentManager *uuid.UUID
 	var currentComment *string
-	var currentStatus string
+	var currentStatus, currentKind string
 	var currentVersion int64
 	err := tx.QueryRow(r.Context(), `
 		select
@@ -617,6 +659,7 @@ func (s *Server) updateAppointment(
 		  v.responsible_manager_id,
 		  v.comment,
 		  v.status,
+		  v.kind,
 		  v.version
 		from public.lead_showroom_visits v
 		join public.leads l on l.id=v.lead_id
@@ -630,6 +673,7 @@ func (s *Server) updateAppointment(
 		&currentManager,
 		&currentComment,
 		&currentStatus,
+		&currentKind,
 		&currentVersion,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -643,6 +687,9 @@ func (s *Server) updateAppointment(
 	}
 	if currentVersion != version {
 		return appointment{}, errAppointmentVersion
+	}
+	if currentKind == appointmentKindOfficeWork && req.Status != nil {
+		return appointment{}, errOfficeWorkStatus
 	}
 	if !canUpdateAppointment(currentStatus, req) {
 		return appointment{}, errAppointmentTerminal
@@ -721,7 +768,9 @@ func (s *Server) updateAppointment(
 	}
 
 	eventType := "appointment_updated"
-	if nextStatus != currentStatus {
+	if currentKind == appointmentKindOfficeWork {
+		eventType = "office_work_updated"
+	} else if nextStatus != currentStatus {
 		eventType = "appointment_status_changed"
 	} else if currentStatus == appointmentStatusScheduled &&
 		(!nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd) || !sameUUID(nextManager, currentManager)) {
@@ -758,6 +807,8 @@ func (s *Server) writeAppointmentMutationError(
 		s.writeError(w, r, http.StatusConflict, "manager_busy", "Manager already has an appointment in this time range", nil)
 	case errors.Is(err, errAppointmentTerminal):
 		s.writeError(w, r, http.StatusConflict, "appointment_terminal", "Completed appointment status cannot be changed", nil)
+	case errors.Is(err, errOfficeWorkStatus):
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Office work has no manual status actions", map[string]string{"status": "Office work status cannot be changed manually"})
 	case errors.Is(err, errAppointmentVersion):
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Appointment was changed by another user", nil)
 	case strings.HasPrefix(err.Error(), "starts_at_local:"):
@@ -788,7 +839,7 @@ func validateCreateAppointment(req appointmentMutationRequest) map[string]string
 		fields["responsibleManagerId"] = "Required"
 	}
 	if req.Kind != nil && !isAppointmentKind(*req.Kind) {
-		fields["kind"] = "Use showroom or measurement"
+		fields["kind"] = "Use showroom, measurement, or office_work"
 	}
 	if req.Status != nil {
 		fields["status"] = "Status is assigned automatically"
@@ -851,6 +902,10 @@ func isAppointmentTerminalStatus(status string) bool {
 }
 
 func isAppointmentKind(kind string) bool {
+	return isVisitAppointmentKind(kind) || kind == appointmentKindOfficeWork
+}
+
+func isVisitAppointmentKind(kind string) bool {
 	return kind == appointmentKindShowroom || kind == appointmentKindMeasurement
 }
 
