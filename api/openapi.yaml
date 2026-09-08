@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.16.0
+  version: 2.17.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -233,8 +233,9 @@ paths:
       summary: Delete a lead history event
       description: >
         Super admins may delete any event. Other roles may delete only events they authored,
-        and only while they still have access to the lead's office. Deletes the history row only;
-        does not roll back call/client status on the lead.
+        and only while they still have access to the lead's office. Deleting an office-work event
+        also deletes its linked office-work appointment from the calendar. Other event deletions
+        remove the history row only and do not roll back call/client status on the lead.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/LeadId' }

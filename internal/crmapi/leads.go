@@ -872,6 +872,30 @@ type eventUpdateRequest struct {
 	Comment string `json:"comment"`
 }
 
+type officeWorkHistoryValue struct {
+	AppointmentID string `json:"appointment_id"`
+}
+
+const deleteOfficeWorkAppointmentForHistoryEvent = `
+	delete from public.lead_showroom_visits
+	where id=$1 and lead_id=$2 and kind='office_work'
+`
+
+func linkedOfficeWorkAppointmentID(eventType string, newValue json.RawMessage) (uuid.UUID, bool, error) {
+	if eventType != "office_work_scheduled" && eventType != "office_work_updated" {
+		return uuid.Nil, false, nil
+	}
+	var value officeWorkHistoryValue
+	if err := json.Unmarshal(newValue, &value); err != nil {
+		return uuid.Nil, true, fmt.Errorf("decode office work history value: %w", err)
+	}
+	appointmentID, err := uuid.Parse(strings.TrimSpace(value.AppointmentID))
+	if err != nil {
+		return uuid.Nil, true, fmt.Errorf("parse office work appointment id: %w", err)
+	}
+	return appointmentID, true, nil
+}
+
 func (s *Server) authorizeLeadEventMutation(w http.ResponseWriter, r *http.Request, leadID, eventID uuid.UUID) (Actor, bool) {
 	actor, ok := actorFromContext(r.Context())
 	if !ok {
@@ -948,11 +972,55 @@ func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.authorizeLeadEventMutation(w, r, leadID, eventID); !ok {
 		return
 	}
-	command, err := s.pool.Exec(r.Context(), `
+	tx, err := s.pool.Begin(r.Context())
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete history event", nil)
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	var eventType string
+	var newValue json.RawMessage
+	err = tx.QueryRow(r.Context(), `
+		select event_type, new_value
+		from public.lead_events
+		where id=$1 and lead_id=$2
+		for update
+	`, eventID, leadID).Scan(&eventType, &newValue)
+	if errors.Is(err, pgx.ErrNoRows) {
+		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
+		return
+	}
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete history event", nil)
+		return
+	}
+
+	appointmentID, linkedOfficeWork, err := linkedOfficeWorkAppointmentID(eventType, newValue)
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete linked office work", nil)
+		return
+	}
+	if linkedOfficeWork {
+		if _, err := tx.Exec(r.Context(), deleteOfficeWorkAppointmentForHistoryEvent, appointmentID, leadID); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete linked office work", nil)
+			return
+		}
+	}
+
+	command, err := tx.Exec(r.Context(), `
 		delete from public.lead_events where id=$1 and lead_id=$2
 	`, eventID, leadID)
-	if err != nil || command.RowsAffected() == 0 {
+	if err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete history event", nil)
+		return
+	}
+	if command.RowsAffected() == 0 {
 		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "event_delete_failed", "Could not delete history event", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

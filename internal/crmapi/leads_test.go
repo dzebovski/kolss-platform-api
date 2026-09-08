@@ -114,6 +114,76 @@ func TestSplitQueryValues(t *testing.T) {
 	}
 }
 
+func TestLinkedOfficeWorkAppointmentID(t *testing.T) {
+	appointmentID := uuid.New()
+	tests := []struct {
+		name       string
+		eventType  string
+		newValue   json.RawMessage
+		wantID     uuid.UUID
+		wantLinked bool
+		wantErr    bool
+	}{
+		{
+			name:       "scheduled office work links the appointment",
+			eventType:  "office_work_scheduled",
+			newValue:   json.RawMessage(fmt.Sprintf(`{"appointment_id":%q}`, appointmentID)),
+			wantID:     appointmentID,
+			wantLinked: true,
+		},
+		{
+			name:       "updated office work links the appointment",
+			eventType:  "office_work_updated",
+			newValue:   json.RawMessage(fmt.Sprintf(`{"appointment_id":%q}`, appointmentID)),
+			wantID:     appointmentID,
+			wantLinked: true,
+		},
+		{
+			name:       "unrelated event does not inspect its payload",
+			eventType:  "comment_added",
+			newValue:   json.RawMessage(`not-json`),
+			wantID:     uuid.Nil,
+			wantLinked: false,
+		},
+		{
+			name:       "office work requires an appointment id",
+			eventType:  "office_work_scheduled",
+			newValue:   json.RawMessage(`{"kind":"office_work"}`),
+			wantID:     uuid.Nil,
+			wantLinked: true,
+			wantErr:    true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotID, gotLinked, err := linkedOfficeWorkAppointmentID(test.eventType, test.newValue)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error=%v, wantErr=%v", err, test.wantErr)
+			}
+			if gotLinked != test.wantLinked {
+				t.Fatalf("linked=%v, want %v", gotLinked, test.wantLinked)
+			}
+			if gotID != test.wantID {
+				t.Fatalf("appointment id=%s, want %s", gotID, test.wantID)
+			}
+		})
+	}
+}
+
+func TestDeleteOfficeWorkAppointmentForHistoryEventIsScoped(t *testing.T) {
+	for _, fragment := range []string{
+		"delete from public.lead_showroom_visits",
+		"id=$1",
+		"lead_id=$2",
+		"kind='office_work'",
+	} {
+		if !strings.Contains(deleteOfficeWorkAppointmentForHistoryEvent, fragment) {
+			t.Errorf("delete query missing %q", fragment)
+		}
+	}
+}
+
 func TestLeadSearchWhereIncludesPartialCaseInsensitiveReference(t *testing.T) {
 	for _, search := range []string{"02", "k02", "K0283"} {
 		t.Run(search, func(t *testing.T) {
