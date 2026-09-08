@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.17.0
+  version: 2.18.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -492,6 +492,81 @@ paths:
       operationId: getDashboardOverview
       security: [{ bearerAuth: [] }]
       responses: { '200': { description: Dashboard aggregates } }
+  /v1/tasks:
+    post:
+      tags: [Activities]
+      operationId: createTask
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTaskRequest' }
+      responses:
+        '201':
+          description: Standalone manual task created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskMutationResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/tasks/{taskId}:
+    patch:
+      tags: [Activities]
+      operationId: updateTask
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: taskId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IfMatch' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTaskRequest' }
+      responses:
+        '200':
+          description: Standalone manual task updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskMutationResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '428': { $ref: '#/components/responses/CRMError' }
+  /v1/dashboard/manager-tasks:
+    get:
+      tags: [Reports]
+      operationId: getDashboardManagerTasks
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: officeId
+          in: query
+          schema: { type: string, format: uuid }
+          description: Optional accessible office. Omit to include every office accessible to the actor.
+        - name: managerId
+          in: query
+          required: true
+          schema: { type: string }
+          description: Manager UUID, or `unassigned` for actions without an active office manager.
+        - name: section
+          in: query
+          required: true
+          schema: { type: string, enum: [important, current, future, done, canceled] }
+        - name: cursor
+          in: query
+          schema: { type: string }
+          description: Opaque cursor returned by the previous page. Page size is fixed at 50.
+      responses:
+        '200':
+          description: Manager dashboard task page
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DashboardTaskListResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
   /v1/reports/leads:
     get:
       tags: [Reports]
@@ -758,6 +833,70 @@ components:
       schema:
         $ref: '#/components/schemas/SiteCode'
   schemas:
+    CreateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [officeId, assigneeId, title, dueDate]
+      properties:
+        officeId: { type: string, format: uuid }
+        assigneeId: { type: string, format: uuid }
+        title: { type: string, minLength: 1, maxLength: 1000 }
+        dueDate: { type: [string, 'null'], format: date, description: Office-local date. }
+    UpdateTaskRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [open, done, canceled] }
+    TaskMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [id, version, status]
+      properties:
+        id: { type: string, format: uuid }
+        version: { type: integer, minimum: 1 }
+        status: { type: string, enum: [open, done, canceled] }
+    DashboardTaskOffice:
+      type: object
+      additionalProperties: false
+      required: [id, code, nameUk, namePl, timezoneName]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        nameUk: { type: string }
+        namePl: { type: string }
+        timezoneName: { type: string }
+    DashboardTask:
+      type: object
+      additionalProperties: false
+      required: [id, sourceId, source, kind, title, comment, dueAt, localDate, office, managerId, leadId, leadName, phone, status, version, updatedAt]
+      properties:
+        id: { type: string, description: Stable source-prefixed row identifier. }
+        sourceId: { type: string, format: uuid }
+        source: { type: string, enum: [manual, reminder, appointment, lead] }
+        kind: { type: string }
+        title: { type: string }
+        comment: { type: [string, 'null'] }
+        dueAt: { type: [string, 'null'], format: date-time }
+        localDate: { type: [string, 'null'], format: date }
+        office: { $ref: '#/components/schemas/DashboardTaskOffice' }
+        managerId: { type: [string, 'null'], format: uuid }
+        leadId: { type: [string, 'null'], format: uuid }
+        leadName: { type: [string, 'null'] }
+        phone: { type: [string, 'null'] }
+        status: { type: string, enum: [open, done, canceled] }
+        version: { type: [integer, 'null'], minimum: 1 }
+        updatedAt: { type: string, format: date-time }
+    DashboardTaskListResponse:
+      type: object
+      additionalProperties: false
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/DashboardTask' }
+        nextCursor: { type: [string, 'null'] }
     CRMErrorResponse:
       type: object
       additionalProperties: false
@@ -943,7 +1082,14 @@ components:
         userOffices: { type: array, items: { $ref: '#/components/schemas/Office' } }
         permissions:
           type: object
-          additionalProperties: { type: boolean }
+          additionalProperties: false
+          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks]
+          properties:
+            canManageUsers: { type: boolean }
+            canEditLeadFields: { type: boolean }
+            canArchiveLeads: { type: boolean }
+            canRestoreLeads: { type: boolean }
+            canManageTasks: { type: boolean }
     LossReason:
       type: object
       required: [code, label_uk, label_pl]

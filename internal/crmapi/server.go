@@ -113,6 +113,8 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/appointments", s.handleListAppointments)
 			r.Post("/v1/appointments", s.handleCreateAppointment)
 			r.Patch("/v1/appointments/{appointmentId}", s.handleUpdateAppointment)
+			r.Post("/v1/tasks", s.handleCreateTask)
+			r.Patch("/v1/tasks/{taskId}", s.handleUpdateTask)
 			r.Get("/v1/users", s.handleListUsers)
 			r.Get("/v1/managers", s.handleListManagers)
 			r.Post("/v1/users", s.handleCreateUser)
@@ -122,6 +124,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/users/{userId}/reactivate", s.handleReactivateUser)
 			r.Post("/v1/users/{userId}/delete", s.handleDeleteUser)
 			r.Get("/v1/dashboard/overview", s.handleDashboardOverview)
+			r.Get("/v1/dashboard/manager-tasks", s.handleDashboardManagerTasks)
 			r.Get("/v1/reports/leads", s.handleLeadReport)
 			r.Get("/v1/reports/sales-funnel", s.handleSalesFunnelReport)
 			r.Get("/v1/settings/currency-rates", s.handleGetCurrencyRates)
@@ -178,6 +181,8 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}/actions/{action}",
 	"/v1/appointments",
 	"/v1/appointments/{appointmentId}",
+	"/v1/tasks",
+	"/v1/tasks/{taskId}",
 	"/v1/users",
 	"/v1/managers",
 	"/v1/users/{userId}",
@@ -185,6 +190,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/users/{userId}/reactivate",
 	"/v1/users/{userId}/delete",
 	"/v1/dashboard/overview",
+	"/v1/dashboard/manager-tasks",
 	"/v1/reports/leads",
 	"/v1/reports/sales-funnel",
 	"/v1/settings/currency-rates",

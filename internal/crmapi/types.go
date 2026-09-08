@@ -32,6 +32,10 @@ func (a Actor) CanEditLead(id uuid.UUID) bool {
 	return a.CanAccessOffice(id)
 }
 
+func (a Actor) CanManageTasks(id uuid.UUID) bool {
+	return a.CanAccessOffice(id)
+}
+
 func (a Actor) CanArchiveLead(id uuid.UUID) bool {
 	return a.IsSuperAdmin() || (a.Role == "office_admin" && a.CanAccessOffice(id))
 }
@@ -74,6 +78,7 @@ type Profile struct {
 
 type Permissions struct {
 	CanManageUsers    bool `json:"canManageUsers"`
+	CanManageTasks    bool `json:"canManageTasks"`
 	CanEditLeadFields bool `json:"canEditLeadFields"`
 	CanArchiveLeads   bool `json:"canArchiveLeads"`
 	CanRestoreLeads   bool `json:"canRestoreLeads"`
