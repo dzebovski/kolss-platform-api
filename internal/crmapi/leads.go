@@ -134,6 +134,7 @@ const leadJSONExpression = `
 			)
 			from public.lead_events e
 			where e.lead_id = l.id
+				and e.event_category = 'comment'
 				and e.comment is not null
 				and btrim(e.comment) <> ''
 			order by e.created_at desc
@@ -869,7 +870,9 @@ func optionalFloatEqual(left, right *float64) bool {
 }
 
 type eventUpdateRequest struct {
-	Comment string `json:"comment"`
+	Comment      string            `json:"comment"`
+	AssigneeIDs  *[]uuid.UUID      `json:"assigneeIds,omitempty"`
+	Translations map[string]string `json:"translations,omitempty"`
 }
 
 type officeWorkHistoryValue struct {
@@ -935,6 +938,19 @@ func (s *Server) handleUpdateEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	actor, ok := s.authorizeLeadEventMutation(w, r, leadID, eventID)
 	if !ok {
+		return
+	}
+	var eventType string
+	if err := s.pool.QueryRow(r.Context(), `select event_type from public.lead_events where id=$1 and lead_id=$2`, eventID, leadID).Scan(&eventType); err != nil {
+		s.writeError(w, r, http.StatusNotFound, "event_not_found", "History event not found", nil)
+		return
+	}
+	if eventType == activityQuestion {
+		s.handleUpdateLeadQuestion(w, r, actor, leadID, eventID, req)
+		return
+	}
+	if req.AssigneeIDs != nil || len(req.Translations) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Question fields are only valid for question events", nil)
 		return
 	}
 	editedByName := ""

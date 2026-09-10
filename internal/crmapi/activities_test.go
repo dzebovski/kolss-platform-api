@@ -51,8 +51,11 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "clear reminder rejects unknown kind", request: leadActivityRequest{Type: activityClearReminder, Kind: "visit"}, field: "kind"},
 		{name: "clear reminder rejects dueAt", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindCallback, DueAt: &dueAt}, field: "dueAt"},
 		{name: "clear reminder rejects comment", request: leadActivityRequest{Type: activityClearReminder, Kind: reminderKindCallback, Comment: "nope"}, field: "comment"},
-		{name: "reopen", request: leadActivityRequest{Type: activityReopen}},
-		{name: "reopen rejects comment", request: leadActivityRequest{Type: activityReopen, Comment: "unexpected"}, field: "comment"},
+		{name: "question activity", request: leadActivityRequest{Type: activityQuestion, Comment: "Який розмір кухні?", AssigneeIDs: []uuid.UUID{assignee}}},
+		{name: "question requires comment", request: leadActivityRequest{Type: activityQuestion}, field: "comment"},
+		{name: "question rejects status", request: leadActivityRequest{Type: activityQuestion, Comment: "Питання", Status: "reached"}, field: "status"},
+		{name: "question rejects dueAt", request: leadActivityRequest{Type: activityQuestion, Comment: "Питання", DueAt: &dueAt}, field: "dueAt"},
+		{name: "comment rejects assigneeIds", request: leadActivityRequest{Type: activityComment, Comment: "Note", AssigneeIDs: []uuid.UUID{assignee}}, field: "assigneeIds"},
 		{name: "unknown type", request: leadActivityRequest{Type: "workflow"}, field: "type"},
 	}
 
@@ -146,6 +149,24 @@ func TestIsTerminalClientStatus(t *testing.T) {
 		if got := isTerminalClientStatus(status); got != want {
 			t.Errorf("isTerminalClientStatus(%q) = %v, want %v", status, got, want)
 		}
+	}
+}
+
+func TestQuestionTranslationsAndPermissions(t *testing.T) {
+	translations, fields := normalizeQuestionTranslations(map[string]string{"pl": "Pytanie", "EN": "Question"})
+	if len(fields) != 0 || translations["PL"] != "Pytanie" || translations["EN"] != "Question" {
+		t.Fatalf("normalizeQuestionTranslations valid = %#v, %#v", translations, fields)
+	}
+	if _, fields := normalizeQuestionTranslations(map[string]string{"DE": "Frage"}); fields["translations"] == "" {
+		t.Fatalf("unsupported language must be rejected: %#v", fields)
+	}
+	officeID := uuid.New()
+	for _, test := range []struct { role string; member, want bool }{
+		{"office_member", true, false}, {"office_admin", true, true}, {"curator", true, true}, {"super_admin", false, true}, {"curator", false, false},
+	} {
+		actor := Actor{Role: test.role, OfficeIDs: map[uuid.UUID]struct{}{}}
+		if test.member { actor.OfficeIDs[officeID] = struct{}{} }
+		if got := actor.CanAskLeadQuestions(officeID); got != test.want { t.Errorf("%s member=%v: got %v, want %v", test.role, test.member, got, test.want) }
 	}
 }
 

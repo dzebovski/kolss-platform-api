@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.18.0
+  version: 2.19.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -97,6 +97,40 @@ paths:
                 required: [items]
                 properties:
                   items: { type: array, items: { $ref: '#/components/schemas/LossReason' } }
+  /v1/translate:
+    post:
+      tags: [Context]
+      operationId: translateText
+      summary: Translate arbitrary text using configured translator
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [text, targetLanguage]
+              properties:
+                text: { type: string }
+                sourceLanguage: { type: string, enum: [UK, PL, EN] }
+                targetLanguage: { type: string, enum: [UK, PL, EN] }
+      responses:
+        '200':
+          description: Translation result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [translation, targetLanguage]
+                properties:
+                  translation: { type: string }
+                  sourceLanguage: { type: string, enum: [UK, PL, EN] }
+                  targetLanguage: { type: string, enum: [UK, PL, EN] }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '401': { $ref: '#/components/responses/CRMError' }
+        '429': { $ref: '#/components/responses/CRMError' }
+        '503': { $ref: '#/components/responses/CRMError' }
   /v1/leads:
     get:
       tags: [Leads]
@@ -222,7 +256,10 @@ paths:
             schema:
               type: object
               required: [comment]
-              properties: { comment: { type: string } }
+              properties:
+                comment: { type: string }
+                assigneeIds: { type: array, items: { type: string, format: uuid } }
+                translations: { type: object, additionalProperties: { type: string }, propertyNames: { enum: [UK, PL, EN] } }
       responses:
         '200': { description: Event updated }
         '403': { $ref: '#/components/responses/CRMError' }
@@ -265,6 +302,90 @@ paths:
         '422': { $ref: '#/components/responses/CRMError' }
         '429': { $ref: '#/components/responses/CRMError' }
         '503': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/events/{eventId}/answer:
+    post:
+      tags: [Leads]
+      operationId: answerLeadQuestion
+      summary: Answer a question timeline event on a lead
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [answer]
+              properties:
+                answer: { type: string, minLength: 1 }
+      responses:
+        '200':
+          description: Question answered
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnswerLeadQuestionResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '401': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [Leads]
+      operationId: updateLeadQuestionAnswer
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [answer]
+              properties: { answer: { type: string, minLength: 1 } }
+      responses:
+        '200':
+          description: Answer updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadEventMutationResponse' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/events/{eventId}/answer/translate:
+    post:
+      tags: [Leads]
+      operationId: translateLeadQuestionAnswer
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [targetLanguage]
+              properties:
+                targetLanguage: { type: string, enum: [UK, PL, EN] }
+      responses:
+        '200':
+          description: Answer translation saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QuestionAnswerTranslationResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/activities:
     post:
       tags: [Activities]
@@ -1083,13 +1204,14 @@ components:
         permissions:
           type: object
           additionalProperties: false
-          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks]
+          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks, canAskLeadQuestions]
           properties:
             canManageUsers: { type: boolean }
             canEditLeadFields: { type: boolean }
             canArchiveLeads: { type: boolean }
             canRestoreLeads: { type: boolean }
             canManageTasks: { type: boolean }
+            canAskLeadQuestions: { type: boolean }
     LossReason:
       type: object
       required: [code, label_uk, label_pl]
@@ -1285,6 +1407,47 @@ components:
         translation: { type: string, minLength: 1 }
         sourceLanguage: { type: string, enum: [UK, PL] }
         translatedAt: { type: string, format: date-time }
+    QuestionTranslations:
+      type: object
+      additionalProperties: false
+      properties:
+        UK: { type: string, minLength: 1 }
+        PL: { type: string, minLength: 1 }
+        EN: { type: string, minLength: 1 }
+    QuestionAnswer:
+      type: object
+      additionalProperties: false
+      required: [text, actor_id, actor_name, answered_at, translations]
+      properties:
+        text: { type: string, minLength: 1 }
+        actor_id: { type: string, format: uuid }
+        actor_name: { type: string }
+        answered_at: { type: string, format: date-time }
+        translations: { $ref: '#/components/schemas/QuestionTranslations' }
+    AnswerLeadQuestionResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, eventId, leadId, answer]
+      properties:
+        ok: { type: boolean, const: true }
+        eventId: { type: string, format: uuid }
+        leadId: { type: string, format: uuid }
+        answer: { $ref: '#/components/schemas/QuestionAnswer' }
+    LeadEventMutationResponse:
+      type: object
+      additionalProperties: false
+      required: [changedFields]
+      properties:
+        changedFields:
+          type: array
+          items: { type: string }
+    QuestionAnswerTranslationResponse:
+      type: object
+      additionalProperties: false
+      required: [translation, targetLanguage]
+      properties:
+        translation: { type: string, minLength: 1 }
+        targetLanguage: { type: string, enum: [UK, PL, EN] }
     LeadActivityRequest:
       oneOf:
         - $ref: '#/components/schemas/CallStatusActivityRequest'
@@ -1292,6 +1455,7 @@ components:
         - $ref: '#/components/schemas/CommentActivityRequest'
         - $ref: '#/components/schemas/ClearReminderActivityRequest'
         - $ref: '#/components/schemas/ReopenActivityRequest'
+        - $ref: '#/components/schemas/QuestionActivityRequest'
       discriminator:
         propertyName: type
     CallStatusActivityRequest:
@@ -1365,6 +1529,24 @@ components:
       required: [type]
       properties:
         type: { type: string, const: reopen }
+    QuestionActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, comment]
+      properties:
+        type: { type: string, const: question }
+        comment: { type: string, minLength: 1 }
+        assigneeIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Optional list of office members assigned to answer the question.
+        translations:
+          type: object
+          additionalProperties: { type: string }
+          propertyNames: { enum: [UK, PL, EN] }
+          description: Optional translated variants of the original question, keyed by target language.
     LeadFirstContactAttempt:
       type: object
       additionalProperties: false

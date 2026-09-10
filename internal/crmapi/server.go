@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -105,6 +106,10 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
 			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
 			r.Post("/v1/leads/{leadId}/events/{eventId}/translate", s.handleTranslateEvent)
+			r.Post("/v1/leads/{leadId}/events/{eventId}/answer", s.handleAnswerLeadQuestion)
+			r.Patch("/v1/leads/{leadId}/events/{eventId}/answer", s.handleUpdateLeadQuestionAnswer)
+			r.Post("/v1/leads/{leadId}/events/{eventId}/answer/translate", s.handleTranslateLeadQuestionAnswer)
+			r.Post("/v1/translate", s.handleTranslateText)
 			r.Post("/v1/leads/{leadId}/archive", s.handleArchiveLead)
 			r.Post("/v1/leads/{leadId}/restore", s.handleRestoreLead)
 			r.Post("/v1/leads/{leadId}/delete", s.handleDeleteLead)
@@ -174,6 +179,9 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}/markers/{kind}",
 	"/v1/leads/{leadId}/events/{eventId}",
 	"/v1/leads/{leadId}/events/{eventId}/translate",
+	"/v1/leads/{leadId}/events/{eventId}/answer",
+	"/v1/leads/{leadId}/events/{eventId}/answer/translate",
+	"/v1/translate",
 	"/v1/leads/{leadId}/archive",
 	"/v1/leads/{leadId}/restore",
 	"/v1/leads/{leadId}/delete",
@@ -304,7 +312,18 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, dst any) er
 	defer r.Body.Close()
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(dst)
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	// A second JSON value would otherwise be silently accepted, which is both
+	// surprising to callers and makes request hashing/validation ambiguous.
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

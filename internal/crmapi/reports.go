@@ -376,6 +376,7 @@ const leadReportSelectSQL = `
 			where e.lead_id=l.id
 			  and e.actor_id is not null
 			  and e.event_category is distinct from 'system'
+			  and e.event_category is distinct from 'question'
 			  and e.comment is not null
 			  and btrim(e.comment) <> ''
 			order by e.created_at desc
@@ -423,6 +424,7 @@ func buildLeadReportQuery(criteria reportCriteria, officeIDs []uuid.UUID) (strin
 					where period_event.lead_id=l.id
 					  and period_event.actor_id is not null
 					  and period_event.event_category is distinct from 'system'
+					  and period_event.event_category is distinct from 'question'
 					  and (period_event.created_at at time zone o.timezone_name)::date between `+fromArg+`::date and `+toArg+`::date
 				)
 			)`)

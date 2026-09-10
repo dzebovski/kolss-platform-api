@@ -21,3 +21,14 @@ func TestSourceLanguageForOffice(t *testing.T) {
 		})
 	}
 }
+func TestNormalizeLanguages(t *testing.T) {
+	if got := normalizeTargetLanguage("en"); got != "EN-GB" {
+		t.Fatalf("normalizeTargetLanguage('en') = %q, want 'EN-GB'", got)
+	}
+	if got := normalizeTargetLanguage("PL "); got != "PL" {
+		t.Fatalf("normalizeTargetLanguage('PL ') = %q, want 'PL'", got)
+	}
+	if got := normalizeSourceLanguage(" uk "); got != "UK" {
+		t.Fatalf("normalizeSourceLanguage(' uk ') = %q, want 'UK'", got)
+	}
+}

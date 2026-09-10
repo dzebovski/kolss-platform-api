@@ -40,6 +40,10 @@ func (a Actor) CanArchiveLead(id uuid.UUID) bool {
 	return a.IsSuperAdmin() || (a.Role == "office_admin" && a.CanAccessOffice(id))
 }
 
+func (a Actor) CanAskLeadQuestions(officeID uuid.UUID) bool {
+	return a.CanAccessOffice(officeID) && (a.IsSuperAdmin() || a.Role == "office_admin" || a.Role == "curator")
+}
+
 // CanMutateLeadEvent allows super_admin for any event, or the event author when they
 // still have access to the lead's office. Events with a missing actor are super_admin-only.
 func (a Actor) CanMutateLeadEvent(officeID uuid.UUID, eventActorID uuid.UUID) bool {
@@ -77,11 +81,12 @@ type Profile struct {
 }
 
 type Permissions struct {
-	CanManageUsers    bool `json:"canManageUsers"`
-	CanManageTasks    bool `json:"canManageTasks"`
-	CanEditLeadFields bool `json:"canEditLeadFields"`
-	CanArchiveLeads   bool `json:"canArchiveLeads"`
-	CanRestoreLeads   bool `json:"canRestoreLeads"`
+	CanManageUsers      bool `json:"canManageUsers"`
+	CanManageTasks      bool `json:"canManageTasks"`
+	CanEditLeadFields   bool `json:"canEditLeadFields"`
+	CanArchiveLeads     bool `json:"canArchiveLeads"`
+	CanRestoreLeads     bool `json:"canRestoreLeads"`
+	CanAskLeadQuestions bool `json:"canAskLeadQuestions"`
 }
 
 type MeResponse struct {

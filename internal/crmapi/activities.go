@@ -20,6 +20,7 @@ const (
 	activityComment       = "comment"
 	activityClearReminder = "clear_reminder"
 	activityReopen        = "reopen"
+	activityQuestion      = "question"
 
 	reminderKindCallback    = "callback"
 	reminderKindThinking    = "thinking"
@@ -29,16 +30,23 @@ const (
 )
 
 type leadActivityRequest struct {
-	Type           string     `json:"type"`
-	Status         string     `json:"status"`
-	Kind           string     `json:"kind"`
-	Comment        string     `json:"comment"`
-	DueAt          *time.Time `json:"dueAt"`
-	AssignedTo     *uuid.UUID `json:"assignedTo"`
-	Reason         string     `json:"reason"`
-	ContractNumber string     `json:"contractNumber"`
-	Amount         *float64   `json:"amount"`
-	Currency       string     `json:"currency"`
+	Type           string            `json:"type"`
+	Status         string            `json:"status"`
+	Kind           string            `json:"kind"`
+	Comment        string            `json:"comment"`
+	DueAt          *time.Time        `json:"dueAt"`
+	AssignedTo     *uuid.UUID        `json:"assignedTo"`
+	AssigneeIDs    []uuid.UUID       `json:"assigneeIds"`
+	Translations   map[string]string `json:"translations"`
+	Reason         string            `json:"reason"`
+	ContractNumber string            `json:"contractNumber"`
+	Amount         *float64          `json:"amount"`
+	Currency       string            `json:"currency"`
+}
+
+type questionAssigneeSnapshot struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // commentAssigneeExistsQuery verifies a comment task assignee is an active,
@@ -66,6 +74,66 @@ func validateCommentAssignee(r *http.Request, tx pgx.Tx, assigneeID, officeID uu
 		return errCommentAssigneeInvalid
 	}
 	return nil
+}
+
+// loadQuestionAssignees deliberately permits only office_member profiles. A
+// question is not a lead assignment and must never make an admin/curator into
+// a manager task owner.
+func loadQuestionAssignees(r *http.Request, tx pgx.Tx, assigneeIDs []uuid.UUID, officeID uuid.UUID) ([]questionAssigneeSnapshot, error) {
+	seen := make(map[uuid.UUID]struct{}, len(assigneeIDs))
+	items := make([]questionAssigneeSnapshot, 0, len(assigneeIDs))
+	for _, id := range assigneeIDs {
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		var name *string
+		err := tx.QueryRow(r.Context(), `
+			select p.display_name
+			from public.profiles p
+			join public.user_office_memberships m on m.user_id=p.id
+			where p.id=$1 and p.is_active=true and p.role='office_member' and m.office_id=$2
+		`, id, officeID).Scan(&name)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errCommentAssigneeInvalid
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, questionAssigneeSnapshot{ID: id.String(), Name: strings.TrimSpace(derefString(name))})
+	}
+	return items, nil
+}
+
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func normalizeQuestionTranslations(translations map[string]string) (map[string]string, map[string]string) {
+	if len(translations) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(translations))
+	fields := map[string]string{}
+	for language, text := range translations {
+		lang := strings.ToUpper(strings.TrimSpace(language))
+		if lang != "UK" && lang != "PL" && lang != "EN" {
+			fields["translations"] = "Languages must be UK, PL, or EN"
+			continue
+		}
+		if value := strings.TrimSpace(text); value == "" {
+			fields["translations"] = "Translations cannot be empty"
+		} else {
+			result[lang] = value
+		}
+	}
+	if len(fields) > 0 {
+		return nil, fields
+	}
+	return result, nil
 }
 
 // applyCommentActivityValues sets the comment-specific keys on the lead_events
@@ -125,6 +193,10 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid activity body", nil)
 		return
 	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid activity body", nil)
+		return
+	}
 	req.Type = strings.TrimSpace(req.Type)
 	req.Status = strings.TrimSpace(req.Status)
 	req.Kind = strings.TrimSpace(req.Kind)
@@ -135,6 +207,12 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	if fields := validateLeadActivity(req, actor.IsSuperAdmin()); len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
 		return
+	}
+	if req.Type == activityQuestion {
+		if _, fields := normalizeQuestionTranslations(req.Translations); len(fields) > 0 {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
+			return
+		}
 	}
 
 	tx, err := s.pool.Begin(r.Context())
@@ -195,13 +273,29 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	var questionAssignees []questionAssigneeSnapshot
+	if req.Type == activityQuestion {
+		if !actor.CanAskLeadQuestions(lead.OfficeID) {
+			s.writeError(w, r, http.StatusForbidden, "forbidden", "Only office admins, curators, and super admins can ask questions", nil)
+			return
+		}
+		questionAssignees, err = loadQuestionAssignees(r, tx, req.AssigneeIDs, lead.OfficeID)
+		if err != nil {
+			if errors.Is(err, errCommentAssigneeInvalid) {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", map[string]string{"assigneeIds": "All assigned managers must be active members of the lead's office"})
+				return
+			}
+			s.writeError(w, r, http.StatusInternalServerError, "activity_failed", "Could not update lead", nil)
+			return
+		}
+	}
 	terminal := isTerminalClientStatus(lead.ClientStatus)
 	if req.Type == activityReopen {
 		if !terminal {
 			s.writeError(w, r, http.StatusConflict, "invalid_transition", "Only terminal leads can be reopened", nil)
 			return
 		}
-	} else if terminal {
+	} else if terminal && req.Type != activityQuestion {
 		s.writeError(w, r, http.StatusConflict, "lead_terminal", "Terminal leads must be reopened before another activity", nil)
 		return
 	}
@@ -210,7 +304,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.applyLeadActivity(r, tx, actor, leadID, lead, req); err != nil {
+	if err := s.applyLeadActivity(r, tx, actor, leadID, lead, req, questionAssignees); err != nil {
 		if errors.Is(err, errLossReasonNotFound) {
 			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{"reason": "Unknown loss reason"})
 			return
@@ -398,19 +492,38 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		if req.Amount != nil {
 			fields["amount"] = "Not allowed for this activity type"
 		}
+	case activityQuestion:
+		rejectDueAt()
+		reject("status", req.Status)
+		reject("kind", req.Kind)
+		reject("reason", req.Reason)
+		reject("contractNumber", req.ContractNumber)
+		reject("currency", req.Currency)
+		if req.Amount != nil {
+			fields["amount"] = "Not allowed for this activity type"
+		}
+		if strings.TrimSpace(req.Comment) == "" {
+			fields["comment"] = "Required"
+		}
 	default:
 		fields["type"] = "Unknown activity type"
 	}
 	if req.Type != activityComment && req.AssignedTo != nil {
 		fields["assignedTo"] = "Not allowed for this activity type"
 	}
+	if req.Type != activityQuestion && len(req.AssigneeIDs) > 0 {
+		fields["assigneeIds"] = "Not allowed for this activity type"
+	}
+	if req.Type != activityQuestion && len(req.Translations) > 0 {
+		fields["translations"] = "Not allowed for this activity type"
+	}
 	return fields
 }
 
-func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, leadID uuid.UUID, lead activityLead, req leadActivityRequest) error {
+func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, leadID uuid.UUID, lead activityLead, req leadActivityRequest, questionAssignees []questionAssigneeSnapshot) error {
 	now := time.Now().UTC()
 	assignedTo := lead.AssignedTo
-	if req.Type != activityReopen && req.Type != activityClearReminder && assignedTo == nil {
+	if req.Type != activityReopen && req.Type != activityClearReminder && req.Type != activityQuestion && assignedTo == nil {
 		assignedTo = &actor.ID
 	}
 
@@ -576,6 +689,21 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		changeCall = true
 		changeClient = true
 		callbackDueAt = nil
+	case activityQuestion:
+		eventType = "question"
+		eventCategory = "question"
+		status := "status-question"
+		statusCode = &status
+		comment = &req.Comment
+		translations, _ := normalizeQuestionTranslations(req.Translations)
+		if translations == nil {
+			translations = map[string]string{}
+		}
+		newValue["question"] = map[string]any{
+			"assignees":    questionAssignees,
+			"translations": translations,
+			"status":       "pending",
+		}
 	}
 
 	_, err := tx.Exec(r.Context(), `
