@@ -134,7 +134,6 @@ const leadJSONExpression = `
 			)
 			from public.lead_events e
 			where e.lead_id = l.id
-				and e.event_category = 'comment'
 				and e.comment is not null
 				and btrim(e.comment) <> ''
 			order by e.created_at desc
