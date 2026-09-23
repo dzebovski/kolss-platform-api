@@ -147,9 +147,9 @@ func TestBuildTelegramNotificationMessage(t *testing.T) {
 		"product_interest":         "Кухня & шафа",
 		"project_stage":            "Потрібен <проєкт>",
 		"communication_preference": "Telegram",
-		"crm_url":                  "https://crm.example/crm/leads/1?a=1&b=2",
+		"crm_url":                  "https://crm.example/leads/1?a=1&b=2",
 	})
-	want := "🔔 Нова заявка! 13.07.2026, 15:15\n👤 Ім'я: Іван &lt;Менеджер&gt;\n🏠 Що цікавить?: Кухня &amp; шафа\n🪜 Етап проекту?: Потрібен &lt;проєкт&gt;\n💬 Як спілкуватися?: Telegram\n📞 Тел: +380501112233\n🌐 Джерело: Facebook Forms\n🔗 <a href=\"https://crm.example/crm/leads/1?a=1&amp;b=2\">Відкрити в CRM</a>"
+	want := "🔔 Нова заявка! 13.07.2026, 15:15\n👤 Ім'я: Іван &lt;Менеджер&gt;\n🏠 Що цікавить?: Кухня &amp; шафа\n🪜 Етап проекту?: Потрібен &lt;проєкт&gt;\n💬 Як спілкуватися?: Telegram\n📞 Тел: +380501112233\n🌐 Джерело: Facebook Forms\n🔗 <a href=\"https://crm.example/leads/1?a=1&amp;b=2\">Відкрити в CRM</a>"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}
@@ -178,9 +178,9 @@ func TestBuildTelegramNotificationMessageManualSource(t *testing.T) {
 		"office_code":      "kyiv",
 		"created_at":       "2026-07-14T10:00:00Z",
 		"product_interest": "Кухня",
-		"crm_url":          "https://crm.example/crm/leads/abc",
+		"crm_url":          "https://crm.example/leads/abc",
 	})
-	want := "🔔 Нова заявка! 14.07.2026, 13:00\n👤 Ім'я: Марія\n🏠 Що цікавить?: Кухня\n📞 Тел: +380671112233\n🌐 Джерело: Вручну\n🔗 <a href=\"https://crm.example/crm/leads/abc\">Відкрити в CRM</a>"
+	want := "🔔 Нова заявка! 14.07.2026, 13:00\n👤 Ім'я: Марія\n🏠 Що цікавить?: Кухня\n📞 Тел: +380671112233\n🌐 Джерело: Вручну\n🔗 <a href=\"https://crm.example/leads/abc\">Відкрити в CRM</a>"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}
@@ -197,9 +197,9 @@ func TestBuildSlackNotificationMessage(t *testing.T) {
 		"product_interest":         "Kuchnia & szafa",
 		"project_stage":            "Projekt <start>",
 		"communication_preference": "Telefon",
-		"crm_url":                  "https://crm.example/crm/leads/1?a=1&b=2",
+		"crm_url":                  "https://crm.example/leads/1?a=1&b=2",
 	})
-	want := "🔔 Nowe zgłoszenie! 13.07.2026, 14:15\n👤 Imię: Jan &lt;Admin&gt;\n🏠 Czego dotyczy?: Kuchnia &amp; szafa\n🪜 Etap projektu?: Projekt &lt;start&gt;\n💬 Preferowany kontakt: Telefon\n📞 Telefon: +48123123123\n✉️ E-mail: jan@example.pl\n🌐 Źródło: Ręcznie\n🔗 <https://crm.example/crm/leads/1?a=1&amp;b=2|Otwórz w CRM>"
+	want := "🔔 Nowe zgłoszenie! 13.07.2026, 14:15\n👤 Imię: Jan &lt;Admin&gt;\n🏠 Czego dotyczy?: Kuchnia &amp; szafa\n🪜 Etap projektu?: Projekt &lt;start&gt;\n💬 Preferowany kontakt: Telefon\n📞 Telefon: +48123123123\n✉️ E-mail: jan@example.pl\n🌐 Źródło: Ręcznie\n🔗 <https://crm.example/leads/1?a=1&amp;b=2|Otwórz w CRM>"
 	if msg != want {
 		t.Fatalf("message mismatch\n got: %q\nwant: %q", msg, want)
 	}

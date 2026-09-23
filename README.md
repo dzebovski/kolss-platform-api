@@ -84,10 +84,10 @@ is sent instead. Six groups, in display order (non-archived, not
    strictly before the office-local report date.
 
 Each line links into the CRM: groups 1-2 to the leads list
-(`/crm/leads?office=<code>&callStatus=…&clientStatus=…&days=all`), groups 3-5
-to that day's calendar (`/crm/calendar?office=<code>&date=<YYYY-MM-DD>&kind=…`),
+(`/leads?office=<code>&callStatus=…&clientStatus=…&days=all`), groups 3-5
+to that day's calendar (`/calendar?office=<code>&date=<YYYY-MM-DD>&kind=…`),
 and group 6 to the calendar filtered to overdue items
-(`/crm/calendar?office=<code>&due=overdue`). Set
+(`/calendar?office=<code>&due=overdue`). Set
 `CRM_SITE_URL_PUBLIC=https://crm.kolss.eu` without a path; an invalid or empty
 value degrades a line to plain text instead of emitting a broken link.
 

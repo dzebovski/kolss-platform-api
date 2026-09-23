@@ -389,7 +389,7 @@ func escapeSlackText(value string) string {
 // clientStatusFilterWhere in internal/crmapi/leads.go) and with the
 // calendar package implemented against the same contract in parallel.
 func crmLeadsListURL(base, officeCode, callStatus, clientStatus string) string {
-	return crmURL(base, "/crm/leads", [][2]string{
+	return crmURL(base, "/leads", [][2]string{
 		{"office", officeCode},
 		{"callStatus", callStatus},
 		{"clientStatus", clientStatus},
@@ -401,7 +401,7 @@ func crmLeadsListURL(base, officeCode, callStatus, clientStatus string) string {
 // groups (callback, visit, reminder), scoped to office and the office-local
 // report date.
 func crmCalendarURL(base, officeCode, localDate, kind string) string {
-	return crmURL(base, "/crm/calendar", [][2]string{
+	return crmURL(base, "/calendar", [][2]string{
 		{"office", officeCode},
 		{"date", localDate},
 		{"kind", kind},
@@ -412,7 +412,7 @@ func crmCalendarURL(base, officeCode, localDate, kind string) string {
 // group. It has no "kind" or "date" — due=overdue spans every kind and every
 // date strictly before today.
 func crmOverdueCalendarURL(base, officeCode string) string {
-	return crmURL(base, "/crm/calendar", [][2]string{
+	return crmURL(base, "/calendar", [][2]string{
 		{"office", officeCode},
 		{"due", "overdue"},
 	})

@@ -44,7 +44,7 @@ func TestDeliveryDestinationsRouteKyivToTelegramAndWarsawToSlack(t *testing.T) {
 
 func TestCRMLeadURLUsesCRMDomainRoot(t *testing.T) {
 	leadID := uuid.MustParse("ceaf7ee5-28fe-4133-8a54-84dda27d0f8b")
-	if got := crmLeadURL("https://crm.kolss.eu/crm/leads/:id?stale=true", leadID); got == nil || *got != "https://crm.kolss.eu/crm/leads/ceaf7ee5-28fe-4133-8a54-84dda27d0f8b" {
+	if got := crmLeadURL("https://crm.kolss.eu/crm/leads/:id?stale=true", leadID); got == nil || *got != "https://crm.kolss.eu/leads/ceaf7ee5-28fe-4133-8a54-84dda27d0f8b" {
 		t.Fatalf("crmLeadURL() = %v", got)
 	}
 }

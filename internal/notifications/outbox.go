@@ -149,7 +149,7 @@ func crmLeadURL(base string, leadID uuid.UUID) *string {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return nil
 	}
-	parsed.Path = fmt.Sprintf("/crm/leads/%s", leadID.String())
+	parsed.Path = fmt.Sprintf("/leads/%s", leadID.String())
 	parsed.RawPath = ""
 	parsed.RawQuery = ""
 	parsed.Fragment = ""

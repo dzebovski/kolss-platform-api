@@ -30,7 +30,7 @@ func warsawLoc(t *testing.T) *time.Location {
 
 func TestCrmLeadsListURLBuildsFixedQueryContract(t *testing.T) {
 	got := crmLeadsListURL("https://crm.kolss.eu", "warsaw", "none", "active")
-	want := "https://crm.kolss.eu/crm/leads?office=warsaw&callStatus=none&clientStatus=active&days=all"
+	want := "https://crm.kolss.eu/leads?office=warsaw&callStatus=none&clientStatus=active&days=all"
 	if got != want {
 		t.Fatalf("crmLeadsListURL() = %q, want %q", got, want)
 	}
@@ -38,7 +38,7 @@ func TestCrmLeadsListURLBuildsFixedQueryContract(t *testing.T) {
 
 func TestCrmLeadsListURLEncodesCommaSeparatedCallStatus(t *testing.T) {
 	got := crmLeadsListURL("https://crm.kolss.eu", "warsaw", "no_answer,callback_undated", "active")
-	want := "https://crm.kolss.eu/crm/leads?office=warsaw&callStatus=no_answer%2Ccallback_undated&clientStatus=active&days=all"
+	want := "https://crm.kolss.eu/leads?office=warsaw&callStatus=no_answer%2Ccallback_undated&clientStatus=active&days=all"
 	if got != want {
 		t.Fatalf("crmLeadsListURL() = %q, want %q", got, want)
 	}
@@ -46,7 +46,7 @@ func TestCrmLeadsListURLEncodesCommaSeparatedCallStatus(t *testing.T) {
 
 func TestCrmCalendarURLBuildsFixedQueryContract(t *testing.T) {
 	got := crmCalendarURL("https://crm.kolss.eu", "warsaw", "2026-08-17", "callback")
-	want := "https://crm.kolss.eu/crm/calendar?office=warsaw&date=2026-08-17&kind=callback"
+	want := "https://crm.kolss.eu/calendar?office=warsaw&date=2026-08-17&kind=callback"
 	if got != want {
 		t.Fatalf("crmCalendarURL() = %q, want %q", got, want)
 	}
@@ -60,7 +60,7 @@ func TestCrmCalendarURLBuildsFixedQueryContract(t *testing.T) {
 
 func TestCrmOverdueCalendarURLHasNoDateOrKind(t *testing.T) {
 	got := crmOverdueCalendarURL("https://crm.kolss.eu", "kyiv")
-	want := "https://crm.kolss.eu/crm/calendar?office=kyiv&due=overdue"
+	want := "https://crm.kolss.eu/calendar?office=kyiv&due=overdue"
 	if got != want {
 		t.Fatalf("crmOverdueCalendarURL() = %q, want %q", got, want)
 	}
@@ -102,12 +102,12 @@ func TestFormatTelegramMessageAllGroups(t *testing.T) {
 	}
 
 	wants := []string{
-		`🆕 <b>Нові заявки</b> — 12 · <a href="https://crm.kolss.eu/crm/leads?office=warsaw&amp;callStatus=none&amp;clientStatus=active&amp;days=all">відкрити</a>`,
-		`📵 <b>Недозвон + перезвон</b> — 8 · <a href="https://crm.kolss.eu/crm/leads?office=warsaw&amp;callStatus=no_answer%2Ccallback_undated&amp;clientStatus=active&amp;days=all">відкрити</a>`,
-		`⏰ <b>Перезвони на сьогодні</b> — 3 · <a href="https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=callback">відкрити</a>`,
-		`🏠 <b>Візити в салон</b> — 2 · <a href="https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=visit">відкрити</a>`,
-		`💬 <b>Інші нагадування</b> — 5 · <a href="https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=reminder">відкрити</a>`,
-		`⚠️ <b>Прострочені нагадування</b> — 1 · <a href="https://crm.kolss.eu/crm/calendar?office=warsaw&amp;due=overdue">відкрити</a>`,
+		`🆕 <b>Нові заявки</b> — 12 · <a href="https://crm.kolss.eu/leads?office=warsaw&amp;callStatus=none&amp;clientStatus=active&amp;days=all">відкрити</a>`,
+		`📵 <b>Недозвон + перезвон</b> — 8 · <a href="https://crm.kolss.eu/leads?office=warsaw&amp;callStatus=no_answer%2Ccallback_undated&amp;clientStatus=active&amp;days=all">відкрити</a>`,
+		`⏰ <b>Перезвони на сьогодні</b> — 3 · <a href="https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=callback">відкрити</a>`,
+		`🏠 <b>Візити в салон</b> — 2 · <a href="https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=visit">відкрити</a>`,
+		`💬 <b>Інші нагадування</b> — 5 · <a href="https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=reminder">відкрити</a>`,
+		`⚠️ <b>Прострочені нагадування</b> — 1 · <a href="https://crm.kolss.eu/calendar?office=warsaw&amp;due=overdue">відкрити</a>`,
 	}
 	lastIdx := -1
 	for _, want := range wants {
@@ -174,12 +174,12 @@ func TestFormatSlackMessageAllGroups(t *testing.T) {
 	}
 
 	wants := []string{
-		`🆕 *Nowe zgłoszenia* — 12 · <https://crm.kolss.eu/crm/leads?office=warsaw&amp;callStatus=none&amp;clientStatus=active&amp;days=all|otwórz>`,
-		`📵 *Nieodebrane i do oddzwonienia* — 8 · <https://crm.kolss.eu/crm/leads?office=warsaw&amp;callStatus=no_answer%2Ccallback_undated&amp;clientStatus=active&amp;days=all|otwórz>`,
-		`⏰ *Oddzwonienia na dziś* — 3 · <https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=callback|otwórz>`,
-		`🏠 *Wizyty w salonie* — 2 · <https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=visit|otwórz>`,
-		`💬 *Pozostałe przypomnienia* — 5 · <https://crm.kolss.eu/crm/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=reminder|otwórz>`,
-		`⚠️ *Zaległe przypomnienia* — 1 · <https://crm.kolss.eu/crm/calendar?office=warsaw&amp;due=overdue|otwórz>`,
+		`🆕 *Nowe zgłoszenia* — 12 · <https://crm.kolss.eu/leads?office=warsaw&amp;callStatus=none&amp;clientStatus=active&amp;days=all|otwórz>`,
+		`📵 *Nieodebrane i do oddzwonienia* — 8 · <https://crm.kolss.eu/leads?office=warsaw&amp;callStatus=no_answer%2Ccallback_undated&amp;clientStatus=active&amp;days=all|otwórz>`,
+		`⏰ *Oddzwonienia na dziś* — 3 · <https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=callback|otwórz>`,
+		`🏠 *Wizyty w salonie* — 2 · <https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=visit|otwórz>`,
+		`💬 *Pozostałe przypomnienia* — 5 · <https://crm.kolss.eu/calendar?office=warsaw&amp;date=2026-08-17&amp;kind=reminder|otwórz>`,
+		`⚠️ *Zaległe przypomnienia* — 1 · <https://crm.kolss.eu/calendar?office=warsaw&amp;due=overdue|otwórz>`,
 	}
 	for _, want := range wants {
 		if !strings.Contains(msg, want) {
