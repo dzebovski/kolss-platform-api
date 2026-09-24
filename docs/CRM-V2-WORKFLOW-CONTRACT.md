@@ -279,12 +279,13 @@ default comes from the office (Warsaw PLN, Kyiv UAH).
 
 ## 5. Rollout per task
 
-- **W2** rating: migration → API (`rating` activity, list filter, facets) → CRM.
+- **W2** rating: v1 fallback (`rating_changed` title) → migration → API (`rating` activity, list filter) → CRM.
 - **W3** channel: migration + backfill → API (`channel` read, PATCH field) → CRM.
 - **W4 + W5** `v2_status` activity, attempts, loss reasons, invite appointment: v1 fallbacks (§4) →
   migration + backfill → API → CRM.
 - **W6** schema-only documentation of the existing `Lead` fields (no behaviour change).
-- Every step: OpenAPI 2.20.x bump, Go tests, regenerated CRM client, `check-api-boundary.mjs` pins (X1).
+- **W7** lead info fields + `PATCH /v1/leads/{leadId}/info`.
+- Every step: OpenAPI minor bump, Go tests, regenerated CRM client, `check-api-boundary.mjs` pins (X1).
 
 ## 6. User decisions (2026-09-24)
 
@@ -298,8 +299,18 @@ default comes from the office (Warsaw PLN, Kyiv UAH).
 6. The showroom is the lead's office showroom, with no picker.
 7. First name + Last name are joined into `name`.
 
-Still open on review: the uk/pl labels of the new loss reasons; the lower bound of a range going to
-v1 `estimated_budget`.
+Implementation decisions (user, 2026-09-24, before W2):
+
+8. The uk/pl labels of the new loss reasons stay as in §2; a budget range writes its lower bound to v1
+   `estimated_budget` (§3.7).
+9. The v1 fallbacks (§4) ship as a separate CRM v1 change deployed before the API that writes the new
+   values (`rating_changed` before W2, the loss reason labels before W5).
+10. `GET /v1/leads/facets` (§3.4) ships with W5, because the status counts need `v2_status`. W2 adds only
+    the `rating` list filter.
+11. W3: the API sets `channel` when a lead is created, from its source (Meta Lead Ads → `meta_ads`, site
+    form → `website`, manual create → `office`). `referral`, `phone` and `google_ads` are set by hand.
+12. The "Lead info" fields (§2 "C2 Lead info") and `PATCH /v1/leads/{leadId}/info` (§3.3) are task W7.
+13. Every W task bumps the OpenAPI minor version (2.20.0, 2.21.0, …).
 
 ## 7. Design gaps found (lead card v1.3, 2026-09-24)
 
