@@ -274,8 +274,12 @@ default comes from the office (Warsaw PLN, Kyiv UAH).
    event types fall back to a comment with the raw type as the title.
 2. CRM v1: `closeReason.*` labels (uk/pl/en) for `bought_elsewhere`, `out_of_budget`,
    `not_relevant`, `cant_reach_client`. v1 shows unknown loss reason codes as the raw code.
-3. Verify that v1 reminders render `callback_due_at` with `call_status = no_answer` / `reached`
-   correctly (today v1 never produces that combination).
+3. v1 reminders for `callback_due_at` with `call_status = no_answer` / `reached` (v1 never produced
+   that combination, so the date was invisible). Decided 2026-09-24 (user, option A): both are
+   ordinary v1 callback reminders. API `leadcohorts` treats a callback_due_at whose latest call event
+   is no_answer / reached as a `callback` candidate (manager tasks, digest "due today" / "overdue"),
+   and a no_answer lead with its own next attempt date leaves the "no answer or undated callback"
+   group. CRM v1 shows the same reminder, calendar entry and due-date badge as for a callback.
 
 ## 5. Rollout per task
 
@@ -311,6 +315,9 @@ Implementation decisions (user, 2026-09-24, before W2):
     form → `website`, manual create → `office`). `referral`, `phone` and `google_ads` are set by hand.
 12. The "Lead info" fields (§2 "C2 Lead info") and `PATCH /v1/leads/{leadId}/info` (§3.3) are task W7.
 13. Every W task bumps the OpenAPI minor version (2.20.0, 2.21.0, …).
+14. Invited: the designer must be an active member of the lead's office (the showroom's office);
+    otherwise 400 on `designerId` (user, 2026-09-24). This narrows D4 "any active user".
+15. The v1 reminder rule for dated no_answer / reached calls is option A in §4.3 (user, 2026-09-24).
 
 ## 7. Design gaps found (lead card v1.3, 2026-09-24)
 

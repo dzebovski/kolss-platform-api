@@ -117,6 +117,16 @@ const latestCallbackActionAtSQL = `(
 	limit 1
 )`
 
+// CallbackReminderStatusCodesSQL are the call results whose callback_due_at is a callback
+// reminder: callback_requested (v1) and, from the CRM v2 workflow, no_answer (next attempt) and
+// reached (follow-up date). v1 never dates no_answer / reached, so for v1 data this is unchanged.
+const CallbackReminderStatusCodesSQL = `'callback_requested', 'no_answer', 'reached'`
+
+// DatedNoAnswerSQL is true for a no_answer lead whose callback_due_at came from the no_answer
+// call itself (CRM v2 next attempt). Such a lead is a dated callback, not an undated one. A
+// no_answer lead that keeps a thinking / postponed date is not matched.
+const DatedNoAnswerSQL = `(l.call_status = 'no_answer' and l.callback_due_at is not null and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'no_answer')`
+
 // ActiveReminderCandidatesSQL is the canonical correlated SQL source for all
 // active dated actions on the lead aliased `l`: callback, thinking, comment,
 // showroom, and measurement. It yields one row per active action with both its
@@ -138,7 +148,7 @@ const ActiveReminderCandidatesSQL = `(
 			coalesce(` + latestCallbackActionAtSQL + `, l.updated_at, l.created_at) as action_at,
 			l.id::text as source_id
 		where l.callback_due_at is not null
-			and (` + CallbackDueContextSQL + `) ->> 'status_code' = 'callback_requested'
+			and (` + CallbackDueContextSQL + `) ->> 'status_code' in (` + CallbackReminderStatusCodesSQL + `)
 
 		union all
 
