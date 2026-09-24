@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.20.0
+  version: 2.21.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1238,6 +1238,14 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/CallStatus'
         call_status_changed_at: { type: [string, 'null'], format: date-time }
+        channel:
+          description: >
+            CRM v2 lead channel. Set on insert from the source (meta_lead_ads → meta_ads, site_form →
+            website, google_ads → google_ads, manual → office, google_sheet_backfill → other); changed by
+            hand through updateLead. source_system / source_channel are unchanged.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadChannel'
         rating:
           description: CRM v2 lead rating (separate from lead_quality); null until someone sets it.
           oneOf:
@@ -1321,6 +1329,10 @@ components:
     LeadRating:
       type: string
       enum: [cold, medium, hot]
+    LeadChannel:
+      type: string
+      description: CRM v2 channel. `other` marks the old Google Sheet import and is not offered for new leads.
+      enum: [referral, phone, office, website, meta_ads, google_ads, other]
     CallStatusFilter:
       type: string
       description: >
@@ -1853,6 +1865,9 @@ components:
         editedFields:
           type: array
           items: { type: string }
+        channel:
+          $ref: '#/components/schemas/LeadChannel'
+          description: CRM v2 channel. When omitted, the lead's channel is preserved. Add `channel` to editedFields to audit the change.
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]

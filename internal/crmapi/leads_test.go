@@ -915,3 +915,16 @@ func TestRatingFilterWhere(t *testing.T) {
 		t.Fatal("unknown rating must be rejected")
 	}
 }
+
+func TestIsLeadChannel(t *testing.T) {
+	for _, value := range []string{"referral", "phone", "office", "website", "meta_ads", "google_ads", "other"} {
+		if !isLeadChannel(value) {
+			t.Errorf("%q must be a channel", value)
+		}
+	}
+	for _, value := range []string{"", "facebook", "manual", "Meta_ads"} {
+		if isLeadChannel(value) {
+			t.Errorf("%q must not be a channel", value)
+		}
+	}
+}

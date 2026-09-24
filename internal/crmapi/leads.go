@@ -766,6 +766,16 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, json.RawMessage(raw))
 }
 
+// isLeadChannel reports whether value is a CRM v2 lead channel (leads_channel_check).
+func isLeadChannel(value string) bool {
+	switch value {
+	case "referral", "phone", "office", "website", "meta_ads", "google_ads", "other":
+		return true
+	default:
+		return false
+	}
+}
+
 type updateLeadRequest struct {
 	Name                    string   `json:"name"`
 	Phone                   string   `json:"phone"`
@@ -777,6 +787,8 @@ type updateLeadRequest struct {
 	InitialMessage          string   `json:"initialMessage"`
 	AssignedToID            *string  `json:"assignedToId"`
 	EditedFields            []string `json:"editedFields"`
+	// Channel is the CRM v2 lead channel; omitted keeps the current one.
+	Channel *string `json:"channel"`
 }
 
 func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
@@ -821,6 +833,12 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+	if req.Channel != nil && !isLeadChannel(*req.Channel) {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+			"channel": "Must be referral, phone, office, website, meta_ads, google_ads, or other",
+		})
+		return
 	}
 	if !actor.CanEditLead(officeID) {
 		s.writeError(w, r, http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil)
@@ -869,10 +887,11 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		update public.leads set name=$3, phone=$4, email=$5, city_region=$6,
 		product_interest=$7, estimated_budget=$8, estimated_budget_currency=$9,
 		estimated_budget_rate_set_id=$10, order_comment=$11, assigned_to=$12,
+		channel=coalesce($13::text, channel),
 		updated_at=now(), version=version+1
 		where id=$1 and version=$2 and archived_at is null
 		returning version
-	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, budgetCurrency, budgetRateSetID, clean(req.InitialMessage), assignedTo).Scan(&nextVersion)
+	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, budgetCurrency, budgetRateSetID, clean(req.InitialMessage), assignedTo, req.Channel).Scan(&nextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
 		return
