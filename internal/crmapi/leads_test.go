@@ -900,3 +900,43 @@ func TestManualLeadCreationUsesSelectedSourceTimestamp(t *testing.T) {
 		t.Fatalf("notification Name = %#v", notification.Name)
 	}
 }
+
+func TestRatingFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+	if sql, ok := ratingFilterWhere([]string{"hot"}, addArg); !ok || sql != `l.rating = "hot"` {
+		t.Fatalf("single rating = %q, %v", sql, ok)
+	}
+	if sql, ok := ratingFilterWhere([]string{"cold", "medium"}, addArg); !ok || sql != `l.rating in ("cold", "medium")` {
+		t.Fatalf("two ratings = %q, %v", sql, ok)
+	}
+	if _, ok := ratingFilterWhere([]string{"hot", "warm"}, addArg); ok {
+		t.Fatal("unknown rating must be rejected")
+	}
+}
+
+func TestIsLeadChannel(t *testing.T) {
+	for _, value := range []string{"referral", "phone", "office", "website", "meta_ads", "google_ads", "other"} {
+		if !isLeadChannel(value) {
+			t.Errorf("%q must be a channel", value)
+		}
+	}
+	for _, value := range []string{"", "facebook", "manual", "Meta_ads"} {
+		if isLeadChannel(value) {
+			t.Errorf("%q must not be a channel", value)
+		}
+	}
+}
+
+func TestV2StatusFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+	if sql, ok := v2StatusFilterWhere([]string{"new", "later"}, addArg); !ok || sql != `l.v2_status in ("new", "later")` {
+		t.Fatalf("two statuses = %q, %v", sql, ok)
+	}
+	if _, ok := v2StatusFilterWhere([]string{"reached"}, addArg); ok {
+		t.Fatal("v1 status codes must be rejected")
+	}
+}

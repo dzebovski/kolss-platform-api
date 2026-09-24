@@ -38,6 +38,10 @@ func TestValidateLeadActivity(t *testing.T) {
 		{name: "close requires comment", request: leadActivityRequest{Type: activityClientStatus, Status: "closed_lost", Reason: "other"}, field: "comment"},
 		{name: "contract", request: leadActivityRequest{Type: activityClientStatus, Status: "contract_signed", ContractNumber: "K-42", Amount: &amount, Currency: "EUR"}},
 		{name: "comment", request: leadActivityRequest{Type: activityComment, Comment: "Customer sent measurements"}},
+		{name: "rating", request: leadActivityRequest{Type: activityRating, Rating: "hot"}},
+		{name: "rating must be known", request: leadActivityRequest{Type: activityRating, Rating: "warm"}, field: "rating"},
+		{name: "rating rejects comment", request: leadActivityRequest{Type: activityRating, Rating: "cold", Comment: "note"}, field: "comment"},
+		{name: "rating only on rating activity", request: leadActivityRequest{Type: activityComment, Comment: "x", Rating: "hot"}, field: "rating"},
 		{name: "comment with due date", request: leadActivityRequest{Type: activityComment, Comment: "Call back tomorrow", DueAt: &dueAt}},
 		{name: "comment with assignee and date", request: leadActivityRequest{Type: activityComment, Comment: "Task for manager", DueAt: &dueAt, AssignedTo: &assignee}},
 		{name: "comment assignee requires date", request: leadActivityRequest{Type: activityComment, Comment: "Task for manager", AssignedTo: &assignee}, field: "dueAt"},
@@ -220,6 +224,94 @@ func TestCommentAssigneeExistsQueryRestrictsToOfficeStaff(t *testing.T) {
 	} {
 		if !strings.Contains(commentAssigneeExistsQuery, fragment) {
 			t.Fatalf("commentAssigneeExistsQuery missing %q\n%s", fragment, commentAssigneeExistsQuery)
+		}
+	}
+}
+
+func TestValidateV2StatusActivity(t *testing.T) {
+	dueAt := time.Date(2026, time.September, 25, 11, 0, 0, 0, time.UTC)
+	budget := "20 000 – 25 000"
+	badBudget := "about 20k"
+	city := "Mokotów"
+	designer := uuid.MustParse("55555555-5555-5555-5555-555555555555")
+	tests := []struct {
+		name    string
+		request leadActivityRequest
+		field   string
+	}{
+		{name: "successful call without answers", request: leadActivityRequest{Type: activityV2Status, Status: "success"}},
+		{name: "successful call with answers", request: leadActivityRequest{Type: activityV2Status, Status: "success", DueAt: &dueAt, EstimatedBudgetText: &budget, EstimatedBudgetCurrency: "PLN", CityRegion: &city, Products: []string{"kitchen", "wardrobe"}, NextAction: "Send a quote"}},
+		{name: "budget must parse", request: leadActivityRequest{Type: activityV2Status, Status: "success", EstimatedBudgetText: &badBudget}, field: "estimatedBudgetText"},
+		{name: "unknown product", request: leadActivityRequest{Type: activityV2Status, Status: "success", Products: []string{"garage"}}, field: "products"},
+		{name: "call later requires date", request: leadActivityRequest{Type: activityV2Status, Status: "later"}, field: "dueAt"},
+		{name: "no answer requires next attempt", request: leadActivityRequest{Type: activityV2Status, Status: "noanswer"}, field: "dueAt"},
+		{name: "no answer rejects budget", request: leadActivityRequest{Type: activityV2Status, Status: "noanswer", DueAt: &dueAt, EstimatedBudgetText: &budget}, field: "estimatedBudgetText"},
+		{name: "unknown v2 status", request: leadActivityRequest{Type: activityV2Status, Status: "reached"}, field: "status"},
+		{name: "thinking requires follow-up", request: leadActivityRequest{Type: activityV2Status, Status: "thinking"}, field: "dueAt"},
+		{name: "thinking", request: leadActivityRequest{Type: activityV2Status, Status: "thinking", DueAt: &dueAt}},
+		{name: "invited requires designer", request: leadActivityRequest{Type: activityV2Status, Status: "invited", DueAt: &dueAt}, field: "designerId"},
+		{name: "invited", request: leadActivityRequest{Type: activityV2Status, Status: "invited", DueAt: &dueAt, DesignerID: &designer}},
+		{name: "designer only for invited", request: leadActivityRequest{Type: activityV2Status, Status: "later", DueAt: &dueAt, DesignerID: &designer}, field: "designerId"},
+		{name: "lost requires a v2 reason", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "expensive"}, field: "lossReason"},
+		{name: "lost rejects date", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "out_of_budget", DueAt: &dueAt}, field: "dueAt"},
+		{name: "lost", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "bought_elsewhere", Comment: "Chose a cheaper studio"}},
+		{name: "v1 activity rejects v2 fields", request: leadActivityRequest{Type: activityComment, Comment: "x", Products: []string{"kitchen"}}, field: "products"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fields := validateLeadActivity(test.request, false)
+			if test.field == "" && len(fields) > 0 {
+				t.Fatalf("unexpected errors: %#v", fields)
+			}
+			if test.field != "" && fields[test.field] == "" {
+				t.Fatalf("expected %s error, got %#v", test.field, fields)
+			}
+		})
+	}
+}
+
+func TestParseBudgetText(t *testing.T) {
+	for text, want := range map[string]float64{
+		"20000":             20000,
+		"20 000":            20000,
+		"20 000,50":    20000.5,
+		"20 000 – 25 000":   20000,
+		"20000-25000":       20000,
+		" 15 000 — 18 000 ": 15000,
+	} {
+		got, ok := parseBudgetText(text)
+		if !ok || got != want {
+			t.Errorf("parseBudgetText(%q) = %v, %v; want %v", text, got, ok, want)
+		}
+	}
+	for _, text := range []string{"", "20k", "25 000 – 20 000", "2 00", "-5", "20 000 – 25 000 – 30 000"} {
+		if _, ok := parseBudgetText(text); ok {
+			t.Errorf("parseBudgetText(%q) must fail", text)
+		}
+	}
+}
+
+func TestDeriveV2LeadStatus(t *testing.T) {
+	str := func(value string) *string { return &value }
+	tests := []struct {
+		client string
+		call   *string
+		want   *string
+	}{
+		{"new_lead", nil, str("new")},
+		{"new_lead", str("callback_requested"), str("later")},
+		{"new_lead", str("no_answer"), str("noanswer")},
+		{"new_lead", str("reached"), str("success")},
+		{"thinking", str("reached"), str("thinking")},
+		{"showroom_invited", nil, str("invited")},
+		{"closed_lost", str("no_answer"), str("lost")},
+		{"measurement_scheduled", str("reached"), nil},
+		{"postponed", nil, nil},
+	}
+	for _, test := range tests {
+		got := deriveV2LeadStatus(test.client, test.call)
+		if !equalStringPtr(got, test.want) {
+			t.Errorf("deriveV2LeadStatus(%s, %v) = %v, want %v", test.client, test.call, got, test.want)
 		}
 	}
 }

@@ -21,6 +21,8 @@ const (
 	activityClearReminder = "clear_reminder"
 	activityReopen        = "reopen"
 	activityQuestion      = "question"
+	// activityRating sets the CRM v2 lead rating (Cold / Medium / Hot).
+	activityRating = "rating"
 
 	reminderKindCallback    = "callback"
 	reminderKindThinking    = "thinking"
@@ -42,6 +44,16 @@ type leadActivityRequest struct {
 	ContractNumber string            `json:"contractNumber"`
 	Amount         *float64          `json:"amount"`
 	Currency       string            `json:"currency"`
+	Rating         string            `json:"rating"`
+	// v2_status (Successful call answers); rejected by the other activity types.
+	EstimatedBudgetText     *string  `json:"estimatedBudgetText"`
+	EstimatedBudgetCurrency string   `json:"estimatedBudgetCurrency"`
+	CityRegion              *string  `json:"cityRegion"`
+	Products                []string `json:"products"`
+	NextAction              string   `json:"nextAction"`
+	// v2_status invited / lost
+	DesignerID *uuid.UUID `json:"designerId"`
+	LossReason string     `json:"lossReason"`
 }
 
 type questionAssigneeSnapshot struct {
@@ -155,6 +167,13 @@ type activityLead struct {
 	CallbackDueAt  *time.Time
 	ArchivedAt     *time.Time
 	CurrentVersion int64
+	Rating         *string
+	// CRM v2 workflow
+	V2Status         *string
+	NoAnswerAttempts int
+	Budget           *float64
+	BudgetCurrency   string
+	OfficeCode       string
 }
 
 func (s *Server) handleDeprecatedLeadAction(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +223,10 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.ContractNumber = strings.TrimSpace(req.ContractNumber)
 	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	req.Rating = strings.TrimSpace(req.Rating)
+	req.EstimatedBudgetCurrency = strings.ToUpper(strings.TrimSpace(req.EstimatedBudgetCurrency))
+	req.NextAction = strings.TrimSpace(req.NextAction)
+	req.LossReason = strings.TrimSpace(req.LossReason)
 	if fields := validateLeadActivity(req, actor.IsSuperAdmin()); len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
 		return
@@ -240,8 +263,11 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 	var lead activityLead
 	err = tx.QueryRow(r.Context(), `
-		select office_id, assigned_to, call_status, client_status, callback_due_at, archived_at, version
-		from public.leads where id=$1 for update
+		select l.office_id, l.assigned_to, l.call_status, l.client_status, l.callback_due_at, l.archived_at,
+		  l.version, l.rating, l.v2_status, l.no_answer_attempts, l.estimated_budget,
+		  l.estimated_budget_currency, o.code
+		from public.leads l join public.offices o on o.id = l.office_id
+		where l.id=$1 for update of l
 	`, leadID).Scan(
 		&lead.OfficeID,
 		&lead.AssignedTo,
@@ -250,6 +276,12 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		&lead.CallbackDueAt,
 		&lead.ArchivedAt,
 		&lead.CurrentVersion,
+		&lead.Rating,
+		&lead.V2Status,
+		&lead.NoAnswerAttempts,
+		&lead.Budget,
+		&lead.BudgetCurrency,
+		&lead.OfficeCode,
 	)
 	if errors.Is(err, pgx.ErrNoRows) || lead.ArchivedAt != nil {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
@@ -299,6 +331,10 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, "lead_terminal", "Terminal leads must be reopened before another activity", nil)
 		return
 	}
+	if req.Type == activityRating && lead.Rating != nil && *lead.Rating == req.Rating {
+		s.writeError(w, r, http.StatusConflict, "rating_unchanged", "Rating is already selected", nil)
+		return
+	}
 	if clientStatusUnchanged(lead.ClientStatus, req) {
 		s.writeError(w, r, http.StatusConflict, "status_unchanged", "Client status is already selected", nil)
 		return
@@ -306,7 +342,15 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.applyLeadActivity(r, tx, actor, leadID, lead, req, questionAssignees); err != nil {
 		if errors.Is(err, errLossReasonNotFound) {
-			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{"reason": "Unknown loss reason"})
+			field := "reason"
+			if req.Type == activityV2Status {
+				field = "lossReason"
+			}
+			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{field: "Unknown loss reason"})
+			return
+		}
+		if errors.Is(err, errDesignerInvalid) {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", map[string]string{"designerId": "Designer must be an active member of the lead's office"})
 			return
 		}
 		s.writeError(w, r, http.StatusInternalServerError, "activity_failed", "Could not update lead", nil)
@@ -332,6 +376,16 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 func clientStatusUnchanged(current string, req leadActivityRequest) bool {
 	return req.Type == activityClientStatus && req.Status == current && req.Status != "showroom_invited"
+}
+
+// isLeadRating reports whether value is a CRM v2 lead rating (leads_rating_check).
+func isLeadRating(value string) bool {
+	switch value {
+	case "cold", "medium", "hot":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string]string {
@@ -505,8 +559,39 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		if strings.TrimSpace(req.Comment) == "" {
 			fields["comment"] = "Required"
 		}
+	case activityRating:
+		rejectDueAt()
+		reject("status", req.Status)
+		reject("kind", req.Kind)
+		reject("comment", req.Comment)
+		reject("reason", req.Reason)
+		reject("contractNumber", req.ContractNumber)
+		reject("currency", req.Currency)
+		if req.Amount != nil {
+			fields["amount"] = "Not allowed for this activity type"
+		}
+		if !isLeadRating(req.Rating) {
+			fields["rating"] = "Must be cold, medium, or hot"
+		}
+	case activityV2Status:
+		reject("kind", req.Kind)
+		reject("reason", req.Reason)
+		reject("contractNumber", req.ContractNumber)
+		reject("currency", req.Currency)
+		if req.Amount != nil {
+			fields["amount"] = "Not allowed for this activity type"
+		}
+		validateV2StatusActivity(req, fields)
 	default:
 		fields["type"] = "Unknown activity type"
+	}
+	if req.Type != activityRating {
+		reject("rating", req.Rating)
+	}
+	if req.Type != activityV2Status {
+		for _, name := range v2ActivityFieldsSent(req) {
+			fields[name] = "Not allowed for this activity type"
+		}
 	}
 	if req.Type != activityComment && req.AssignedTo != nil {
 		fields["assignedTo"] = "Not allowed for this activity type"
@@ -523,7 +608,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, leadID uuid.UUID, lead activityLead, req leadActivityRequest, questionAssignees []questionAssigneeSnapshot) error {
 	now := time.Now().UTC()
 	assignedTo := lead.AssignedTo
-	if req.Type != activityReopen && req.Type != activityClearReminder && req.Type != activityQuestion && assignedTo == nil {
+	if req.Type != activityReopen && req.Type != activityClearReminder && req.Type != activityQuestion && req.Type != activityRating && assignedTo == nil {
 		assignedTo = &actor.ID
 	}
 
@@ -539,6 +624,9 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	changeCall := false
 	changeClient := false
 	lossReason := (*string)(nil)
+	rating := lead.Rating
+	v2Status := lead.V2Status
+	noAnswerAttempts := lead.NoAnswerAttempts
 
 	switch req.Type {
 	case activityCallStatus:
@@ -704,7 +792,96 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			"translations": translations,
 			"status":       "pending",
 		}
+	case activityV2Status:
+		// One v2 action = one v1 event: call results write call_status_changed and lead statuses
+		// client_status_changed like v1, with the v2 details in new_value (contract §3.2).
+		oldValue["v2_status"] = lead.V2Status
+		newValue["v2_status"] = req.Status
+		newValue["due_at"] = req.DueAt
+		v2Status = &req.Status
+		if callCode, ok := v2CallResultStatuses[req.Status]; ok {
+			eventType = "call_status_changed"
+			eventCategory = activityCallStatus
+			statusCode = &callCode
+			oldValue["call_status"] = lead.CallStatus
+			newValue["call_status"] = callCode
+			newValue["callback_due_at"] = req.DueAt
+			callStatus = &callCode
+			changeCall = true
+			callbackDueAt = req.DueAt
+			switch req.Status {
+			case v2StatusNoAnswer:
+				noAnswerAttempts++
+				newValue["attempt"] = noAnswerAttempts
+			case v2StatusSuccess:
+				noAnswerAttempts = 0
+				if err := applySuccessfulCallInfo(r.Context(), tx, leadID, lead, req, now, newValue); err != nil {
+					return err
+				}
+			}
+			break
+		}
+		clientCode := v2LeadStatusChanges[req.Status]
+		eventType = "client_status_changed"
+		eventCategory = activityClientStatus
+		statusCode = &clientCode
+		oldValue["client_status"] = lead.ClientStatus
+		newValue["client_status"] = clientCode
+		clientStatus = clientCode
+		changeClient = true
+		switch req.Status {
+		case v2StatusThinking:
+			callbackDueAt = req.DueAt
+			newValue["callback_due_at"] = req.DueAt
+		case v2StatusInvited:
+			// A 1-hour visit at the lead's office showroom with the chosen designer (decision D4:
+			// any active user of that office). The lead keeps its manager.
+			if err := validateAppointmentManager(r, tx, *req.DesignerID, lead.OfficeID); err != nil {
+				if errors.Is(err, errAppointmentManagerInvalid) {
+					return errDesignerInvalid
+				}
+				return err
+			}
+			appointmentID, _, err := scheduleLegacyAppointment(r, tx, leadID, lead.OfficeID, actor.ID, *req.DesignerID, *req.DueAt)
+			if err != nil {
+				return err
+			}
+			newValue["appointment_id"] = appointmentID
+			newValue["designer_id"] = *req.DesignerID
+			newValue["responsible_manager_id"] = *req.DesignerID
+			newValue["starts_at"] = req.DueAt.UTC()
+			newValue["ends_at"] = req.DueAt.UTC().Add(time.Hour)
+			callbackDueAt = nextClientStatusCallbackDue(lead.CallStatus, callbackDueAt, clientCode, req.DueAt)
+		case v2StatusLost:
+			var exists bool
+			if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.LossReason).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return errLossReasonNotFound
+			}
+			lossReason = &req.LossReason
+			newValue["reason"] = req.LossReason
+			newValue["loss_reason"] = req.LossReason
+			callbackDueAt = nil
+		}
+	case activityRating:
+		eventType = "rating_changed"
+		eventCategory = "system"
+		oldValue["rating"] = lead.Rating
+		newValue["from"] = lead.Rating
+		newValue["to"] = req.Rating
+		rating = &req.Rating
 	}
+	// v1 status changes keep v2_status in step (contract §3.6); reopen starts over as new.
+	switch req.Type {
+	case activityCallStatus, activityClientStatus:
+		v2Status = deriveV2LeadStatus(clientStatus, callStatus)
+	case activityReopen:
+		status := v2StatusNew
+		v2Status = &status
+	}
+	v2Changed := !equalStringPtr(v2Status, lead.V2Status) || req.Type == activityV2Status
 
 	_, err := tx.Exec(r.Context(), `
 		update public.leads set
@@ -715,10 +892,14 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		  assigned_to=$7,
 		  loss_reason=case when $8::text is null then loss_reason else $8 end,
 		  callback_due_at=$9,
+		  rating=$10,
+		  v2_status=$11,
+		  v2_status_changed_at=case when $12 then $6 else v2_status_changed_at end,
+		  no_answer_attempts=$13,
 		  updated_at=$6,
 		  version=version+1
 		where id=$1
-	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt)
+	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt, rating, v2Status, v2Changed, noAnswerAttempts)
 	if err != nil {
 		return err
 	}
@@ -730,7 +911,8 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	if err != nil {
 		return err
 	}
-	if req.Type == activityClientStatus && isTerminalClientStatus(req.Status) {
+	if (req.Type == activityClientStatus && isTerminalClientStatus(req.Status)) ||
+		(req.Type == activityV2Status && req.Status == v2StatusLost) {
 		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
 	}
 	if req.Type == activityClearReminder && req.Kind == reminderKindShowroom {

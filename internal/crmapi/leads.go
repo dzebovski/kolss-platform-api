@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -297,6 +298,25 @@ func callStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool)
 	}
 }
 
+// ratingFilterWhere matches any of the selected CRM v2 ratings; leads without a rating never match.
+func ratingFilterWhere(values []string, addArg func(any) string) (string, bool) {
+	placeholders := make([]string, 0, len(values))
+	for _, v := range values {
+		if !isLeadRating(v) {
+			return "", false
+		}
+		placeholders = append(placeholders, addArg(v))
+	}
+	switch len(placeholders) {
+	case 0:
+		return "", true
+	case 1:
+		return "l.rating = " + placeholders[0], true
+	default:
+		return "l.rating in (" + strings.Join(placeholders, ", ") + ")", true
+	}
+}
+
 // callStatusFilterWhereMulti OR's together the clause group for each selected
 // value (each group's own clauses stay AND'd), e.g. ["no_answer", "callback_undated"] ->
 // "(l.call_status = $1 or (l.call_status = $2 and l.callback_due_at is null))".
@@ -323,18 +343,18 @@ func callStatusFilterWhereMulti(values []string, addArg func(any) string) (strin
 	}
 }
 
-func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
-	actor, _ := actorFromContext(r.Context())
-	limit := 50
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-	if limit > 100 {
-		limit = 100
-	}
+// leadListFilterError is a rejected listLeads / leadFacets query parameter.
+type leadListFilterError struct {
+	status  int
+	code    string
+	message string
+	fields  map[string]string
+}
 
+// leadListWhere builds the WHERE clauses (over leads l joined with offices o) shared by
+// listLeads and leadFacets. skip leaves one chip filter out ("v2Status" or "rating"): each chip
+// group is counted without its own selection, as on the leads list design.
+func leadListWhere(actor Actor, query url.Values, skip string) ([]string, []any, *leadListFilterError) {
 	where := []string{"true"}
 	args := []any{}
 	addArg := func(value any) string {
@@ -348,19 +368,17 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 		where = append(where, "l.office_id = any("+addArg(ids)+"::uuid[])")
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("officeId")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("officeId")); raw != "" {
 		id, err := uuid.Parse(raw)
 		if err != nil || !actor.CanAccessOffice(id) {
-			s.writeError(w, r, http.StatusForbidden, "office_forbidden", "Office access denied", nil)
-			return
+			return nil, nil, &leadListFilterError{http.StatusForbidden, "office_forbidden", "Office access denied", nil}
 		}
 		where = append(where, "l.office_id = "+addArg(id))
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("assignedTo")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("assignedTo")); raw != "" {
 		id, err := uuid.Parse(raw)
 		if err != nil {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil)
-			return
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil}
 		}
 		where = append(where, "l.assigned_to = "+addArg(id))
 	}
@@ -371,47 +389,77 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		{"source", "l.source_system"},
 		{"workflow", "l.workflow_status"},
 	} {
-		if raw := strings.TrimSpace(r.URL.Query().Get(filter.query)); raw != "" {
+		if raw := strings.TrimSpace(query.Get(filter.query)); raw != "" {
 			where = append(where, filter.column+" = "+addArg(raw))
 		}
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("callStatus")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("callStatus")); raw != "" {
 		group, ok := callStatusFilterWhereMulti(splitQueryValues(raw), addArg)
 		if !ok {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"})
-			return
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"callStatus": "Unknown status"}}
 		}
 		if group != "" {
 			where = append(where, group)
 		}
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("clientStatus")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("rating")); raw != "" && skip != "rating" {
+		clause, ok := ratingFilterWhere(splitQueryValues(raw), addArg)
+		if !ok {
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid rating filter", map[string]string{"rating": "Unknown rating"}}
+		}
+		if clause != "" {
+			where = append(where, clause)
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("clientStatus")); raw != "" {
 		group, ok := clientStatusFilterWhereMulti(splitQueryValues(raw), addArg)
 		if !ok {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"clientStatus": "Unknown status"})
-			return
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"clientStatus": "Unknown status"}}
 		}
 		if group != "" {
 			where = append(where, group)
 		}
 	}
-	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+	if raw := strings.TrimSpace(query.Get("v2Status")); raw != "" && skip != "v2Status" {
+		clause, ok := v2StatusFilterWhere(splitQueryValues(raw), addArg)
+		if !ok {
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"v2Status": "Unknown status"}}
+		}
+		if clause != "" {
+			where = append(where, clause)
+		}
+	}
+	for _, bound := range []struct {
+		query string
+		op    string
+	}{
+		{"createdFrom", ">="},
+		{"createdTo", "<="},
+	} {
+		if raw := strings.TrimSpace(query.Get(bound.query)); raw != "" {
+			day, err := time.Parse(time.DateOnly, raw)
+			if err != nil {
+				return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid date filter", map[string]string{bound.query: "Must be a date (YYYY-MM-DD)"}}
+			}
+			// Calendar day in the lead's office time zone, like the list date column.
+			where = append(where, "(coalesce(l.source_created_at, l.created_at) at time zone o.timezone_name)::date "+bound.op+" "+addArg(day.Format(time.DateOnly))+"::date")
+		}
+	}
+	if search := strings.TrimSpace(query.Get("search")); search != "" {
 		where = append(where, leadSearchWhere(search, addArg))
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("days")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 3660 {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid days filter", map[string]string{"days": "Must be an integer from 1 to 3660"})
-			return
+			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid days filter", map[string]string{"days": "Must be an integer from 1 to 3660"}}
 		}
 		where = append(where, "coalesce(l.source_created_at, l.created_at) >= now() - make_interval(days => "+addArg(parsed)+")")
 	}
-	archived := strings.TrimSpace(r.URL.Query().Get("archived"))
+	archived := strings.TrimSpace(query.Get("archived"))
 	switch archived {
 	case "only":
 		if !actor.IsSuperAdmin() {
-			s.writeError(w, r, http.StatusForbidden, "archive_forbidden", "Archived leads are restricted", nil)
-			return
+			return nil, nil, &leadListFilterError{http.StatusForbidden, "archive_forbidden", "Archived leads are restricted", nil}
 		}
 		where = append(where, "l.archived_at is not null")
 	case "all":
@@ -420,6 +468,30 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 	default:
 		where = append(where, "l.archived_at is null")
+	}
+	return where, args, nil
+}
+
+func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
+	actor, _ := actorFromContext(r.Context())
+	limit := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	where, args, filterErr := leadListWhere(actor, r.URL.Query(), "")
+	if filterErr != nil {
+		s.writeError(w, r, filterErr.status, filterErr.code, filterErr.message, filterErr.fields)
+		return
+	}
+	addArg := func(value any) string {
+		args = append(args, value)
+		return fmt.Sprintf("$%d", len(args))
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
 		cursor, err := decodeLeadCursor(raw)
@@ -737,6 +809,16 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, json.RawMessage(raw))
 }
 
+// isLeadChannel reports whether value is a CRM v2 lead channel (leads_channel_check).
+func isLeadChannel(value string) bool {
+	switch value {
+	case "referral", "phone", "office", "website", "meta_ads", "google_ads", "other":
+		return true
+	default:
+		return false
+	}
+}
+
 type updateLeadRequest struct {
 	Name                    string   `json:"name"`
 	Phone                   string   `json:"phone"`
@@ -748,6 +830,8 @@ type updateLeadRequest struct {
 	InitialMessage          string   `json:"initialMessage"`
 	AssignedToID            *string  `json:"assignedToId"`
 	EditedFields            []string `json:"editedFields"`
+	// Channel is the CRM v2 lead channel; omitted keeps the current one.
+	Channel *string `json:"channel"`
 }
 
 func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
@@ -792,6 +876,12 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
+	}
+	if req.Channel != nil && !isLeadChannel(*req.Channel) {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+			"channel": "Must be referral, phone, office, website, meta_ads, google_ads, or other",
+		})
+		return
 	}
 	if !actor.CanEditLead(officeID) {
 		s.writeError(w, r, http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil)
@@ -840,10 +930,11 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		update public.leads set name=$3, phone=$4, email=$5, city_region=$6,
 		product_interest=$7, estimated_budget=$8, estimated_budget_currency=$9,
 		estimated_budget_rate_set_id=$10, order_comment=$11, assigned_to=$12,
+		channel=coalesce($13::text, channel),
 		updated_at=now(), version=version+1
 		where id=$1 and version=$2 and archived_at is null
 		returning version
-	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, budgetCurrency, budgetRateSetID, clean(req.InitialMessage), assignedTo).Scan(&nextVersion)
+	`, leadID, version, strings.TrimSpace(req.Name), strings.TrimSpace(req.Phone), cleanPtr(req.Email), clean(req.CityRegion), clean(req.ProductInterest), req.EstimatedBudget, budgetCurrency, budgetRateSetID, clean(req.InitialMessage), assignedTo, req.Channel).Scan(&nextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
 		return

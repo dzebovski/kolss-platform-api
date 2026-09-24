@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.19.0
+  version: 2.24.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -145,9 +145,13 @@ paths:
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
         - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
         - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: rating, in: query, style: form, explode: false, description: CRM v2 rating, OR'd together when multiple are given; leads without a rating never match, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 }, description: When set, only leads created within the last N days }
+        - { name: v2Status, in: query, style: form, explode: false, description: CRM v2 status, OR'd together; leads with a legacy v1 status (v2_status null) never match, schema: { type: array, items: { $ref: '#/components/schemas/V2LeadStatus' } } }
+        - { name: createdFrom, in: query, schema: { type: string, format: date }, description: 'First arrival day (inclusive), in the office time zone ("Custom" period).' }
+        - { name: createdTo, in: query, schema: { type: string, format: date }, description: 'Last arrival day (inclusive), in the office time zone.' }
       responses:
         '200':
           description: Cursor-paginated leads
@@ -172,6 +176,37 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Lead' }
         '400': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/facets:
+    get:
+      tags: [Leads]
+      operationId: getLeadFacets
+      description: >
+        Chip counts for the CRM v2 leads list. Takes the listLeads filters (cursor and limit are
+        ignored): total counts with every filter; v2Status counts ignore the v2Status filter and
+        rating counts ignore the rating filter. Leads without a v2 status or a rating are left
+        out of that group.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: source, in: query, schema: { type: string } }
+        - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
+        - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: rating, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
+        - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
+        - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 } }
+        - { name: v2Status, in: query, style: form, explode: false, description: CRM v2 status, OR'd together; leads with a legacy v1 status (v2_status null) never match, schema: { type: array, items: { $ref: '#/components/schemas/V2LeadStatus' } } }
+        - { name: createdFrom, in: query, schema: { type: string, format: date }, description: 'First arrival day (inclusive), in the office time zone ("Custom" period).' }
+        - { name: createdTo, in: query, schema: { type: string, format: date }, description: 'Last arrival day (inclusive), in the office time zone.' }
+      responses:
+        '200':
+          description: Chip counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadFacetsResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}:
     parameters: [{ $ref: '#/components/parameters/LeadId' }]
     get:
@@ -1219,6 +1254,21 @@ components:
         code: { type: string }
         label_uk: { type: string }
         label_pl: { type: string }
+        label_en: { type: [string, 'null'], description: Set for the codes of the CRM v2 Lost list. }
+    LeadFacetsResponse:
+      type: object
+      additionalProperties: false
+      required: [total, v2Status, rating]
+      properties:
+        total: { type: integer, minimum: 0 }
+        v2Status:
+          type: object
+          description: Count per V2LeadStatus value; values without leads are omitted.
+          additionalProperties: { type: integer, minimum: 0 }
+        rating:
+          type: object
+          description: Count per LeadRating value; values without leads are omitted.
+          additionalProperties: { type: integer, minimum: 0 }
     Lead:
       type: object
       additionalProperties: true
@@ -1230,6 +1280,34 @@ components:
         source_system: { type: string }
         source_channel: { type: [string, 'null'] }
         external_lead_id: { type: string }
+        # W6: columns the API already returns through to_jsonb(leads), declared for typed clients.
+        # Nullable as in the table.
+        name: { type: [string, 'null'] }
+        phone: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        assigned_to: { type: [string, 'null'], format: uuid, description: Assigned manager (profiles.id). }
+        city_region: { type: [string, 'null'] }
+        product_interest: { type: [string, 'null'] }
+        order_comment: { type: [string, 'null'], description: "The client's first message; source_note is the fallback." }
+        source_note: { type: [string, 'null'] }
+        source_created_at: { type: [string, 'null'], format: date-time, description: When the lead arrived (list date column). }
+        loss_reason: { type: [string, 'null'], description: loss_reasons.code of a closed_lost lead. }
+        offices:
+          description: The lead's office row (joined).
+          type: [object, 'null']
+          additionalProperties: true
+          properties:
+            id: { type: string, format: uuid }
+            code: { type: string }
+            name_uk: { type: string }
+            name_pl: { type: string }
+            timezone_name: { type: string }
+        profiles:
+          description: Display name of the assigned manager (joined); null when unassigned.
+          type: [object, 'null']
+          additionalProperties: true
+          properties:
+            display_name: { type: [string, 'null'] }
         lead_status: { type: string }
         workflow_status: { type: string }
         call_status:
@@ -1237,6 +1315,31 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/CallStatus'
         call_status_changed_at: { type: [string, 'null'], format: date-time }
+        channel:
+          description: >
+            CRM v2 lead channel. Set on insert from the source (meta_lead_ads → meta_ads, site_form →
+            website, google_ads → google_ads, manual → office, google_sheet_backfill → other); changed by
+            hand through updateLead. source_system / source_channel are unchanged.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadChannel'
+        v2_status:
+          description: >
+            CRM v2 lead status, including the call result. Kept in step with the v1 fields; null
+            for leads whose v1 client status is measurement_scheduled, calculation_in_progress,
+            postponed or contract_signed (shown read-only from v1).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/V2LeadStatus'
+        v2_status_changed_at: { type: [string, 'null'], format: date-time }
+        no_answer_attempts: { type: integer, minimum: 0, description: No answer results since the last successful call (v2 only). }
+        estimated_budget_text: { type: [string, 'null'], maxLength: 60, description: 'Budget as typed: a number or a range. estimated_budget holds its lower bound.' }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
+        rating:
+          description: CRM v2 lead rating (separate from lead_quality); null until someone sets it.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadRating'
         call_status_actor:
           description: >
             Manager who recorded the current call status. Null when no call status is recorded
@@ -1312,6 +1415,19 @@ components:
     CallStatus:
       type: string
       enum: [reached, no_answer, callback_requested]
+    LeadRating:
+      type: string
+      enum: [cold, medium, hot]
+    V2LeadStatus:
+      type: string
+      enum: [new, later, noanswer, success, thinking, invited, lost, project]
+    LeadProduct:
+      type: string
+      enum: [kitchen, wardrobe, furniture, bathroom, hallway, other]
+    LeadChannel:
+      type: string
+      description: CRM v2 channel. `other` marks the old Google Sheet import and is not offered for new leads.
+      enum: [referral, phone, office, website, meta_ads, google_ads, other]
     CallStatusFilter:
       type: string
       description: >
@@ -1456,8 +1572,67 @@ components:
         - $ref: '#/components/schemas/ClearReminderActivityRequest'
         - $ref: '#/components/schemas/ReopenActivityRequest'
         - $ref: '#/components/schemas/QuestionActivityRequest'
+        - $ref: '#/components/schemas/RatingActivityRequest'
+        - $ref: '#/components/schemas/V2StatusActivityRequest'
       discriminator:
         propertyName: type
+    V2StatusActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, status]
+      description: >
+        CRM v2 call result. Mirrors into the v1 fields (success → call_status reached, later →
+        callback_requested, noanswer → no_answer; callback_due_at = dueAt, cleared when a
+        successful call has no follow-up date) and writes one call_status_changed event with the
+        v2 details in new_value (v2_status, due_at, attempt, budget, city_region, products,
+        next_action). noanswer adds 1 to no_answer_attempts, success resets it. Lead statuses
+        write client_status_changed instead: thinking → thinking (callback_due_at = dueAt),
+        invited → showroom_invited plus a 60-minute showroom visit at the lead's office with the
+        designer as responsible manager (the lead keeps its manager), lost → closed_lost with
+        loss_reason, reminders cleared and scheduled visits cancelled.
+      properties:
+        type: { type: string, const: v2_status }
+        status: { type: string, enum: [success, later, noanswer, thinking, invited, lost] }
+        comment: { type: string }
+        dueAt:
+          type: string
+          format: date-time
+          description: >
+            later: call back on (required). noanswer: next attempt (required). thinking: follow-up
+            on (required). invited: visit start (required). success: follow-up date (optional).
+            lost: not allowed.
+        estimatedBudgetText:
+          type: string
+          maxLength: 60
+          description: >
+            success only. One number ("20 000") or a range ("20 000 – 25 000"); the lower bound
+            also goes to estimated_budget. Anything else → 400 validation_error.
+        estimatedBudgetCurrency:
+          type: string
+          enum: [UAH, USD, EUR, PLN]
+          description: success only. Defaults to the lead's currency, or the office currency (Warsaw PLN, Kyiv UAH) when the lead has no budget yet.
+        cityRegion: { type: string, description: success only. }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' }, description: success only; replaces the list. }
+        nextAction: { type: string, maxLength: 500, description: success only; stored in the event. }
+        designerId:
+          type: string
+          format: uuid
+          description: invited only, required. An active member of the lead's office (decision D4); otherwise 400 validation_error on designerId.
+        lossReason:
+          type: string
+          enum: [bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, other]
+          description: lost only, required. The v2 list; v1 keeps its own list and validation.
+    RatingActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, rating]
+      description: >
+        Sets the CRM v2 rating. Writes leads.rating and one rating_changed event (category system,
+        new_value {from, to}). Does not assign the lead. 409 rating_unchanged when the lead already
+        has this rating; 409 lead_terminal on terminal leads, as the other activities.
+      properties:
+        type: { type: string, const: rating }
+        rating: { $ref: '#/components/schemas/LeadRating' }
     CallStatusActivityRequest:
       type: object
       additionalProperties: false
@@ -1832,6 +2007,9 @@ components:
         editedFields:
           type: array
           items: { type: string }
+        channel:
+          $ref: '#/components/schemas/LeadChannel'
+          description: CRM v2 channel. When omitted, the lead's channel is preserved. Add `channel` to editedFields to audit the change.
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]
