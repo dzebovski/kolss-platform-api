@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.22.0
+  version: 2.23.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1274,6 +1274,18 @@ components:
           oneOf:
             - type: 'null'
             - $ref: '#/components/schemas/LeadChannel'
+        v2_status:
+          description: >
+            CRM v2 lead status, including the call result. Kept in step with the v1 fields; null
+            for leads whose v1 client status is measurement_scheduled, calculation_in_progress,
+            postponed or contract_signed (shown read-only from v1).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/V2LeadStatus'
+        v2_status_changed_at: { type: [string, 'null'], format: date-time }
+        no_answer_attempts: { type: integer, minimum: 0, description: No answer results since the last successful call (v2 only). }
+        estimated_budget_text: { type: [string, 'null'], maxLength: 60, description: 'Budget as typed: a number or a range. estimated_budget holds its lower bound.' }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
         rating:
           description: CRM v2 lead rating (separate from lead_quality); null until someone sets it.
           oneOf:
@@ -1357,6 +1369,12 @@ components:
     LeadRating:
       type: string
       enum: [cold, medium, hot]
+    V2LeadStatus:
+      type: string
+      enum: [new, later, noanswer, success, thinking, invited, lost, project]
+    LeadProduct:
+      type: string
+      enum: [kitchen, wardrobe, furniture, bathroom, hallway, other]
     LeadChannel:
       type: string
       description: CRM v2 channel. `other` marks the old Google Sheet import and is not offered for new leads.
@@ -1506,8 +1524,41 @@ components:
         - $ref: '#/components/schemas/ReopenActivityRequest'
         - $ref: '#/components/schemas/QuestionActivityRequest'
         - $ref: '#/components/schemas/RatingActivityRequest'
+        - $ref: '#/components/schemas/V2StatusActivityRequest'
       discriminator:
         propertyName: type
+    V2StatusActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, status]
+      description: >
+        CRM v2 call result. Mirrors into the v1 fields (success → call_status reached, later →
+        callback_requested, noanswer → no_answer; callback_due_at = dueAt, cleared when a
+        successful call has no follow-up date) and writes one call_status_changed event with the
+        v2 details in new_value (v2_status, due_at, attempt, budget, city_region, products,
+        next_action). noanswer adds 1 to no_answer_attempts, success resets it. Lead statuses
+        (thinking, invited, lost) come in a later version.
+      properties:
+        type: { type: string, const: v2_status }
+        status: { type: string, enum: [success, later, noanswer] }
+        comment: { type: string }
+        dueAt:
+          type: string
+          format: date-time
+          description: 'later: call back on (required). noanswer: next attempt (required). success: follow-up date (optional).'
+        estimatedBudgetText:
+          type: string
+          maxLength: 60
+          description: >
+            success only. One number ("20 000") or a range ("20 000 – 25 000"); the lower bound
+            also goes to estimated_budget. Anything else → 400 validation_error.
+        estimatedBudgetCurrency:
+          type: string
+          enum: [UAH, USD, EUR, PLN]
+          description: success only. Defaults to the lead's currency, or the office currency (Warsaw PLN, Kyiv UAH) when the lead has no budget yet.
+        cityRegion: { type: string, description: success only. }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' }, description: success only; replaces the list. }
+        nextAction: { type: string, maxLength: 500, description: success only; stored in the event. }
     RatingActivityRequest:
       type: object
       additionalProperties: false
