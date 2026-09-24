@@ -51,6 +51,9 @@ type leadActivityRequest struct {
 	CityRegion              *string  `json:"cityRegion"`
 	Products                []string `json:"products"`
 	NextAction              string   `json:"nextAction"`
+	// v2_status invited / lost
+	DesignerID *uuid.UUID `json:"designerId"`
+	LossReason string     `json:"lossReason"`
 }
 
 type questionAssigneeSnapshot struct {
@@ -223,6 +226,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	req.Rating = strings.TrimSpace(req.Rating)
 	req.EstimatedBudgetCurrency = strings.ToUpper(strings.TrimSpace(req.EstimatedBudgetCurrency))
 	req.NextAction = strings.TrimSpace(req.NextAction)
+	req.LossReason = strings.TrimSpace(req.LossReason)
 	if fields := validateLeadActivity(req, actor.IsSuperAdmin()); len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
 		return
@@ -338,7 +342,15 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.applyLeadActivity(r, tx, actor, leadID, lead, req, questionAssignees); err != nil {
 		if errors.Is(err, errLossReasonNotFound) {
-			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{"reason": "Unknown loss reason"})
+			field := "reason"
+			if req.Type == activityV2Status {
+				field = "lossReason"
+			}
+			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{field: "Unknown loss reason"})
+			return
+		}
+		if errors.Is(err, errDesignerInvalid) {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", map[string]string{"designerId": "Designer must be an active member of the lead's office"})
 			return
 		}
 		s.writeError(w, r, http.StatusInternalServerError, "activity_failed", "Could not update lead", nil)
@@ -781,31 +793,77 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			"status":       "pending",
 		}
 	case activityV2Status:
-		// One v2 action = one v1 event: call results write call_status_changed like v1, with the
-		// v2 details in new_value (contract §3.2).
-		callCode := v2CallResultStatuses[req.Status]
-		eventType = "call_status_changed"
-		eventCategory = activityCallStatus
-		statusCode = &callCode
-		oldValue["call_status"] = lead.CallStatus
+		// One v2 action = one v1 event: call results write call_status_changed and lead statuses
+		// client_status_changed like v1, with the v2 details in new_value (contract §3.2).
 		oldValue["v2_status"] = lead.V2Status
-		newValue["call_status"] = callCode
 		newValue["v2_status"] = req.Status
 		newValue["due_at"] = req.DueAt
-		newValue["callback_due_at"] = req.DueAt
-		callStatus = &callCode
-		changeCall = true
-		callbackDueAt = req.DueAt
 		v2Status = &req.Status
+		if callCode, ok := v2CallResultStatuses[req.Status]; ok {
+			eventType = "call_status_changed"
+			eventCategory = activityCallStatus
+			statusCode = &callCode
+			oldValue["call_status"] = lead.CallStatus
+			newValue["call_status"] = callCode
+			newValue["callback_due_at"] = req.DueAt
+			callStatus = &callCode
+			changeCall = true
+			callbackDueAt = req.DueAt
+			switch req.Status {
+			case v2StatusNoAnswer:
+				noAnswerAttempts++
+				newValue["attempt"] = noAnswerAttempts
+			case v2StatusSuccess:
+				noAnswerAttempts = 0
+				if err := applySuccessfulCallInfo(r.Context(), tx, leadID, lead, req, now, newValue); err != nil {
+					return err
+				}
+			}
+			break
+		}
+		clientCode := v2LeadStatusChanges[req.Status]
+		eventType = "client_status_changed"
+		eventCategory = activityClientStatus
+		statusCode = &clientCode
+		oldValue["client_status"] = lead.ClientStatus
+		newValue["client_status"] = clientCode
+		clientStatus = clientCode
+		changeClient = true
 		switch req.Status {
-		case v2StatusNoAnswer:
-			noAnswerAttempts++
-			newValue["attempt"] = noAnswerAttempts
-		case v2StatusSuccess:
-			noAnswerAttempts = 0
-			if err := applySuccessfulCallInfo(r.Context(), tx, leadID, lead, req, now, newValue); err != nil {
+		case v2StatusThinking:
+			callbackDueAt = req.DueAt
+			newValue["callback_due_at"] = req.DueAt
+		case v2StatusInvited:
+			// A 1-hour visit at the lead's office showroom with the chosen designer (decision D4:
+			// any active user of that office). The lead keeps its manager.
+			if err := validateAppointmentManager(r, tx, *req.DesignerID, lead.OfficeID); err != nil {
+				if errors.Is(err, errAppointmentManagerInvalid) {
+					return errDesignerInvalid
+				}
 				return err
 			}
+			appointmentID, _, err := scheduleLegacyAppointment(r, tx, leadID, lead.OfficeID, actor.ID, *req.DesignerID, *req.DueAt)
+			if err != nil {
+				return err
+			}
+			newValue["appointment_id"] = appointmentID
+			newValue["designer_id"] = *req.DesignerID
+			newValue["responsible_manager_id"] = *req.DesignerID
+			newValue["starts_at"] = req.DueAt.UTC()
+			newValue["ends_at"] = req.DueAt.UTC().Add(time.Hour)
+			callbackDueAt = nextClientStatusCallbackDue(lead.CallStatus, callbackDueAt, clientCode, req.DueAt)
+		case v2StatusLost:
+			var exists bool
+			if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.LossReason).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				return errLossReasonNotFound
+			}
+			lossReason = &req.LossReason
+			newValue["reason"] = req.LossReason
+			newValue["loss_reason"] = req.LossReason
+			callbackDueAt = nil
 		}
 	case activityRating:
 		eventType = "rating_changed"
@@ -853,7 +911,8 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	if err != nil {
 		return err
 	}
-	if req.Type == activityClientStatus && isTerminalClientStatus(req.Status) {
+	if (req.Type == activityClientStatus && isTerminalClientStatus(req.Status)) ||
+		(req.Type == activityV2Status && req.Status == v2StatusLost) {
 		return cancelScheduledAppointmentsForLead(r.Context(), tx, actor.ID, leadID)
 	}
 	if req.Type == activityClearReminder && req.Kind == reminderKindShowroom {

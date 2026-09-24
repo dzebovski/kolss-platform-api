@@ -233,6 +233,7 @@ func TestValidateV2StatusActivity(t *testing.T) {
 	budget := "20 000 – 25 000"
 	badBudget := "about 20k"
 	city := "Mokotów"
+	designer := uuid.MustParse("55555555-5555-5555-5555-555555555555")
 	tests := []struct {
 		name    string
 		request leadActivityRequest
@@ -246,6 +247,14 @@ func TestValidateV2StatusActivity(t *testing.T) {
 		{name: "no answer requires next attempt", request: leadActivityRequest{Type: activityV2Status, Status: "noanswer"}, field: "dueAt"},
 		{name: "no answer rejects budget", request: leadActivityRequest{Type: activityV2Status, Status: "noanswer", DueAt: &dueAt, EstimatedBudgetText: &budget}, field: "estimatedBudgetText"},
 		{name: "unknown v2 status", request: leadActivityRequest{Type: activityV2Status, Status: "reached"}, field: "status"},
+		{name: "thinking requires follow-up", request: leadActivityRequest{Type: activityV2Status, Status: "thinking"}, field: "dueAt"},
+		{name: "thinking", request: leadActivityRequest{Type: activityV2Status, Status: "thinking", DueAt: &dueAt}},
+		{name: "invited requires designer", request: leadActivityRequest{Type: activityV2Status, Status: "invited", DueAt: &dueAt}, field: "designerId"},
+		{name: "invited", request: leadActivityRequest{Type: activityV2Status, Status: "invited", DueAt: &dueAt, DesignerID: &designer}},
+		{name: "designer only for invited", request: leadActivityRequest{Type: activityV2Status, Status: "later", DueAt: &dueAt, DesignerID: &designer}, field: "designerId"},
+		{name: "lost requires a v2 reason", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "expensive"}, field: "lossReason"},
+		{name: "lost rejects date", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "out_of_budget", DueAt: &dueAt}, field: "dueAt"},
+		{name: "lost", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "bought_elsewhere", Comment: "Chose a cheaper studio"}},
 		{name: "v1 activity rejects v2 fields", request: leadActivityRequest{Type: activityComment, Comment: "x", Products: []string{"kitchen"}}, field: "products"},
 	}
 	for _, test := range tests {

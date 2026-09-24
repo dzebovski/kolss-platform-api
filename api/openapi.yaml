@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.23.0
+  version: 2.24.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -149,6 +149,9 @@ paths:
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 }, description: When set, only leads created within the last N days }
+        - { name: v2Status, in: query, style: form, explode: false, description: CRM v2 status, OR'd together; leads with a legacy v1 status (v2_status null) never match, schema: { type: array, items: { $ref: '#/components/schemas/V2LeadStatus' } } }
+        - { name: createdFrom, in: query, schema: { type: string, format: date }, description: 'First arrival day (inclusive), in the office time zone ("Custom" period).' }
+        - { name: createdTo, in: query, schema: { type: string, format: date }, description: 'Last arrival day (inclusive), in the office time zone.' }
       responses:
         '200':
           description: Cursor-paginated leads
@@ -173,6 +176,37 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Lead' }
         '400': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/facets:
+    get:
+      tags: [Leads]
+      operationId: getLeadFacets
+      description: >
+        Chip counts for the CRM v2 leads list. Takes the listLeads filters (cursor and limit are
+        ignored): total counts with every filter; v2Status counts ignore the v2Status filter and
+        rating counts ignore the rating filter. Leads without a v2 status or a rating are left
+        out of that group.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: search, in: query, schema: { type: string } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: source, in: query, schema: { type: string } }
+        - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
+        - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: rating, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
+        - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
+        - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
+        - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 } }
+        - { name: v2Status, in: query, style: form, explode: false, description: CRM v2 status, OR'd together; leads with a legacy v1 status (v2_status null) never match, schema: { type: array, items: { $ref: '#/components/schemas/V2LeadStatus' } } }
+        - { name: createdFrom, in: query, schema: { type: string, format: date }, description: 'First arrival day (inclusive), in the office time zone ("Custom" period).' }
+        - { name: createdTo, in: query, schema: { type: string, format: date }, description: 'Last arrival day (inclusive), in the office time zone.' }
+      responses:
+        '200':
+          description: Chip counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadFacetsResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}:
     parameters: [{ $ref: '#/components/parameters/LeadId' }]
     get:
@@ -1220,6 +1254,21 @@ components:
         code: { type: string }
         label_uk: { type: string }
         label_pl: { type: string }
+        label_en: { type: [string, 'null'], description: Set for the codes of the CRM v2 Lost list. }
+    LeadFacetsResponse:
+      type: object
+      additionalProperties: false
+      required: [total, v2Status, rating]
+      properties:
+        total: { type: integer, minimum: 0 }
+        v2Status:
+          type: object
+          description: Count per V2LeadStatus value; values without leads are omitted.
+          additionalProperties: { type: integer, minimum: 0 }
+        rating:
+          type: object
+          description: Count per LeadRating value; values without leads are omitted.
+          additionalProperties: { type: integer, minimum: 0 }
     Lead:
       type: object
       additionalProperties: true
@@ -1537,15 +1586,21 @@ components:
         successful call has no follow-up date) and writes one call_status_changed event with the
         v2 details in new_value (v2_status, due_at, attempt, budget, city_region, products,
         next_action). noanswer adds 1 to no_answer_attempts, success resets it. Lead statuses
-        (thinking, invited, lost) come in a later version.
+        write client_status_changed instead: thinking → thinking (callback_due_at = dueAt),
+        invited → showroom_invited plus a 60-minute showroom visit at the lead's office with the
+        designer as responsible manager (the lead keeps its manager), lost → closed_lost with
+        loss_reason, reminders cleared and scheduled visits cancelled.
       properties:
         type: { type: string, const: v2_status }
-        status: { type: string, enum: [success, later, noanswer] }
+        status: { type: string, enum: [success, later, noanswer, thinking, invited, lost] }
         comment: { type: string }
         dueAt:
           type: string
           format: date-time
-          description: 'later: call back on (required). noanswer: next attempt (required). success: follow-up date (optional).'
+          description: >
+            later: call back on (required). noanswer: next attempt (required). thinking: follow-up
+            on (required). invited: visit start (required). success: follow-up date (optional).
+            lost: not allowed.
         estimatedBudgetText:
           type: string
           maxLength: 60
@@ -1559,6 +1614,14 @@ components:
         cityRegion: { type: string, description: success only. }
         products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' }, description: success only; replaces the list. }
         nextAction: { type: string, maxLength: 500, description: success only; stored in the event. }
+        designerId:
+          type: string
+          format: uuid
+          description: invited only, required. An active member of the lead's office (decision D4); otherwise 400 validation_error on designerId.
+        lossReason:
+          type: string
+          enum: [bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, other]
+          description: lost only, required. The v2 list; v1 keeps its own list and validation.
     RatingActivityRequest:
       type: object
       additionalProperties: false

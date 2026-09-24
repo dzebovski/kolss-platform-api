@@ -2,6 +2,7 @@ package crmapi
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"strconv"
 	"strings"
@@ -34,6 +35,20 @@ var v2CallResultStatuses = map[string]string{
 	v2StatusSuccess:  "reached",
 	v2StatusLater:    "callback_requested",
 	v2StatusNoAnswer: "no_answer",
+}
+
+var errDesignerInvalid = errors.New("designer is not an active member of the lead's office")
+
+// v2LeadStatusChanges are the v2 statuses that are lead statuses: they write client_status.
+var v2LeadStatusChanges = map[string]string{
+	v2StatusThinking: "thinking",
+	v2StatusInvited:  "showroom_invited",
+	v2StatusLost:     "closed_lost",
+}
+
+// v2LossReasons is the design's Lost list (contract §3.5). v1 keeps its own four codes.
+var v2LossReasons = map[string]struct{}{
+	"bought_elsewhere": {}, "out_of_budget": {}, "not_relevant": {}, "cant_reach_client": {}, "other": {},
 }
 
 var leadProducts = map[string]struct{}{
@@ -74,12 +89,33 @@ func deriveV2LeadStatus(clientStatus string, callStatus *string) *string {
 // validateV2StatusActivity adds field errors for a v2_status activity (contract §3.2).
 func validateV2StatusActivity(req leadActivityRequest, fields map[string]string) {
 	notAllowed := "Not allowed for this status"
-	if _, ok := v2CallResultStatuses[req.Status]; !ok {
-		fields["status"] = "Must be success, later, or noanswer"
+	_, callResult := v2CallResultStatuses[req.Status]
+	_, leadStatus := v2LeadStatusChanges[req.Status]
+	if !callResult && !leadStatus {
+		fields["status"] = "Must be success, later, noanswer, thinking, invited, or lost"
 		return
 	}
-	if req.DueAt == nil && req.Status != v2StatusSuccess {
+	switch {
+	case req.Status == v2StatusLost:
+		if req.DueAt != nil {
+			fields["dueAt"] = notAllowed
+		}
+	case req.DueAt == nil && req.Status != v2StatusSuccess:
 		fields["dueAt"] = "Required for this status"
+	}
+	if req.Status == v2StatusInvited {
+		if req.DesignerID == nil {
+			fields["designerId"] = "Required for an invitation"
+		}
+	} else if req.DesignerID != nil {
+		fields["designerId"] = notAllowed
+	}
+	if req.Status == v2StatusLost {
+		if _, ok := v2LossReasons[req.LossReason]; !ok {
+			fields["lossReason"] = "Must be bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, or other"
+		}
+	} else if req.LossReason != "" {
+		fields["lossReason"] = notAllowed
 	}
 	if req.Status != v2StatusSuccess {
 		if req.EstimatedBudgetText != nil {
@@ -137,6 +173,12 @@ func v2ActivityFieldsSent(req leadActivityRequest) []string {
 	}
 	if req.NextAction != "" {
 		sent = append(sent, "nextAction")
+	}
+	if req.DesignerID != nil {
+		sent = append(sent, "designerId")
+	}
+	if req.LossReason != "" {
+		sent = append(sent, "lossReason")
 	}
 	return sent
 }
@@ -255,4 +297,28 @@ func equalStringPtr(a, b *string) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+var v2LeadStatuses = map[string]struct{}{
+	v2StatusNew: {}, v2StatusLater: {}, v2StatusNoAnswer: {}, v2StatusSuccess: {},
+	v2StatusThinking: {}, v2StatusInvited: {}, v2StatusLost: {}, "project": {},
+}
+
+// v2StatusFilterWhere matches any of the selected v2 statuses; legacy leads (null) never match.
+func v2StatusFilterWhere(values []string, addArg func(any) string) (string, bool) {
+	placeholders := make([]string, 0, len(values))
+	for _, v := range values {
+		if _, ok := v2LeadStatuses[v]; !ok {
+			return "", false
+		}
+		placeholders = append(placeholders, addArg(v))
+	}
+	switch len(placeholders) {
+	case 0:
+		return "", true
+	case 1:
+		return "l.v2_status = " + placeholders[0], true
+	default:
+		return "l.v2_status in (" + strings.Join(placeholders, ", ") + ")", true
+	}
 }

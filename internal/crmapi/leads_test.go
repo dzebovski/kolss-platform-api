@@ -928,3 +928,15 @@ func TestIsLeadChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestV2StatusFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+	if sql, ok := v2StatusFilterWhere([]string{"new", "later"}, addArg); !ok || sql != `l.v2_status in ("new", "later")` {
+		t.Fatalf("two statuses = %q, %v", sql, ok)
+	}
+	if _, ok := v2StatusFilterWhere([]string{"reached"}, addArg); ok {
+		t.Fatal("v1 status codes must be rejected")
+	}
+}
