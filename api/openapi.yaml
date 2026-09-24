@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.21.0
+  version: 2.22.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1231,6 +1231,34 @@ components:
         source_system: { type: string }
         source_channel: { type: [string, 'null'] }
         external_lead_id: { type: string }
+        # W6: columns the API already returns through to_jsonb(leads), declared for typed clients.
+        # Nullable as in the table.
+        name: { type: [string, 'null'] }
+        phone: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        assigned_to: { type: [string, 'null'], format: uuid, description: Assigned manager (profiles.id). }
+        city_region: { type: [string, 'null'] }
+        product_interest: { type: [string, 'null'] }
+        order_comment: { type: [string, 'null'], description: "The client's first message; source_note is the fallback." }
+        source_note: { type: [string, 'null'] }
+        source_created_at: { type: [string, 'null'], format: date-time, description: When the lead arrived (list date column). }
+        loss_reason: { type: [string, 'null'], description: loss_reasons.code of a closed_lost lead. }
+        offices:
+          description: The lead's office row (joined).
+          type: [object, 'null']
+          additionalProperties: true
+          properties:
+            id: { type: string, format: uuid }
+            code: { type: string }
+            name_uk: { type: string }
+            name_pl: { type: string }
+            timezone_name: { type: string }
+        profiles:
+          description: Display name of the assigned manager (joined); null when unassigned.
+          type: [object, 'null']
+          additionalProperties: true
+          properties:
+            display_name: { type: [string, 'null'] }
         lead_status: { type: string }
         workflow_status: { type: string }
         call_status:
