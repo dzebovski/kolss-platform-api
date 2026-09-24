@@ -21,6 +21,8 @@ const (
 	activityClearReminder = "clear_reminder"
 	activityReopen        = "reopen"
 	activityQuestion      = "question"
+	// activityRating sets the CRM v2 lead rating (Cold / Medium / Hot).
+	activityRating = "rating"
 
 	reminderKindCallback    = "callback"
 	reminderKindThinking    = "thinking"
@@ -42,6 +44,7 @@ type leadActivityRequest struct {
 	ContractNumber string            `json:"contractNumber"`
 	Amount         *float64          `json:"amount"`
 	Currency       string            `json:"currency"`
+	Rating         string            `json:"rating"`
 }
 
 type questionAssigneeSnapshot struct {
@@ -155,6 +158,7 @@ type activityLead struct {
 	CallbackDueAt  *time.Time
 	ArchivedAt     *time.Time
 	CurrentVersion int64
+	Rating         *string
 }
 
 func (s *Server) handleDeprecatedLeadAction(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +208,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 	req.Reason = strings.TrimSpace(req.Reason)
 	req.ContractNumber = strings.TrimSpace(req.ContractNumber)
 	req.Currency = strings.ToUpper(strings.TrimSpace(req.Currency))
+	req.Rating = strings.TrimSpace(req.Rating)
 	if fields := validateLeadActivity(req, actor.IsSuperAdmin()); len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Activity validation failed", fields)
 		return
@@ -240,7 +245,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 	var lead activityLead
 	err = tx.QueryRow(r.Context(), `
-		select office_id, assigned_to, call_status, client_status, callback_due_at, archived_at, version
+		select office_id, assigned_to, call_status, client_status, callback_due_at, archived_at, version, rating
 		from public.leads where id=$1 for update
 	`, leadID).Scan(
 		&lead.OfficeID,
@@ -250,6 +255,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		&lead.CallbackDueAt,
 		&lead.ArchivedAt,
 		&lead.CurrentVersion,
+		&lead.Rating,
 	)
 	if errors.Is(err, pgx.ErrNoRows) || lead.ArchivedAt != nil {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
@@ -299,6 +305,10 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, "lead_terminal", "Terminal leads must be reopened before another activity", nil)
 		return
 	}
+	if req.Type == activityRating && lead.Rating != nil && *lead.Rating == req.Rating {
+		s.writeError(w, r, http.StatusConflict, "rating_unchanged", "Rating is already selected", nil)
+		return
+	}
 	if clientStatusUnchanged(lead.ClientStatus, req) {
 		s.writeError(w, r, http.StatusConflict, "status_unchanged", "Client status is already selected", nil)
 		return
@@ -332,6 +342,16 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 
 func clientStatusUnchanged(current string, req leadActivityRequest) bool {
 	return req.Type == activityClientStatus && req.Status == current && req.Status != "showroom_invited"
+}
+
+// isLeadRating reports whether value is a CRM v2 lead rating (leads_rating_check).
+func isLeadRating(value string) bool {
+	switch value {
+	case "cold", "medium", "hot":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string]string {
@@ -505,8 +525,25 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 		if strings.TrimSpace(req.Comment) == "" {
 			fields["comment"] = "Required"
 		}
+	case activityRating:
+		rejectDueAt()
+		reject("status", req.Status)
+		reject("kind", req.Kind)
+		reject("comment", req.Comment)
+		reject("reason", req.Reason)
+		reject("contractNumber", req.ContractNumber)
+		reject("currency", req.Currency)
+		if req.Amount != nil {
+			fields["amount"] = "Not allowed for this activity type"
+		}
+		if !isLeadRating(req.Rating) {
+			fields["rating"] = "Must be cold, medium, or hot"
+		}
 	default:
 		fields["type"] = "Unknown activity type"
+	}
+	if req.Type != activityRating {
+		reject("rating", req.Rating)
 	}
 	if req.Type != activityComment && req.AssignedTo != nil {
 		fields["assignedTo"] = "Not allowed for this activity type"
@@ -523,7 +560,7 @@ func validateLeadActivity(req leadActivityRequest, isSuperAdmin bool) map[string
 func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, leadID uuid.UUID, lead activityLead, req leadActivityRequest, questionAssignees []questionAssigneeSnapshot) error {
 	now := time.Now().UTC()
 	assignedTo := lead.AssignedTo
-	if req.Type != activityReopen && req.Type != activityClearReminder && req.Type != activityQuestion && assignedTo == nil {
+	if req.Type != activityReopen && req.Type != activityClearReminder && req.Type != activityQuestion && req.Type != activityRating && assignedTo == nil {
 		assignedTo = &actor.ID
 	}
 
@@ -539,6 +576,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	changeCall := false
 	changeClient := false
 	lossReason := (*string)(nil)
+	rating := lead.Rating
 
 	switch req.Type {
 	case activityCallStatus:
@@ -704,6 +742,13 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			"translations": translations,
 			"status":       "pending",
 		}
+	case activityRating:
+		eventType = "rating_changed"
+		eventCategory = "system"
+		oldValue["rating"] = lead.Rating
+		newValue["from"] = lead.Rating
+		newValue["to"] = req.Rating
+		rating = &req.Rating
 	}
 
 	_, err := tx.Exec(r.Context(), `
@@ -715,10 +760,11 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		  assigned_to=$7,
 		  loss_reason=case when $8::text is null then loss_reason else $8 end,
 		  callback_due_at=$9,
+		  rating=$10,
 		  updated_at=$6,
 		  version=version+1
 		where id=$1
-	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt)
+	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt, rating)
 	if err != nil {
 		return err
 	}

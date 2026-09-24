@@ -900,3 +900,18 @@ func TestManualLeadCreationUsesSelectedSourceTimestamp(t *testing.T) {
 		t.Fatalf("notification Name = %#v", notification.Name)
 	}
 }
+
+func TestRatingFilterWhere(t *testing.T) {
+	addArg := func(value any) string {
+		return fmt.Sprintf("%q", value)
+	}
+	if sql, ok := ratingFilterWhere([]string{"hot"}, addArg); !ok || sql != `l.rating = "hot"` {
+		t.Fatalf("single rating = %q, %v", sql, ok)
+	}
+	if sql, ok := ratingFilterWhere([]string{"cold", "medium"}, addArg); !ok || sql != `l.rating in ("cold", "medium")` {
+		t.Fatalf("two ratings = %q, %v", sql, ok)
+	}
+	if _, ok := ratingFilterWhere([]string{"hot", "warm"}, addArg); ok {
+		t.Fatal("unknown rating must be rejected")
+	}
+}

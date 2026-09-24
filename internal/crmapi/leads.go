@@ -297,6 +297,25 @@ func callStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool)
 	}
 }
 
+// ratingFilterWhere matches any of the selected CRM v2 ratings; leads without a rating never match.
+func ratingFilterWhere(values []string, addArg func(any) string) (string, bool) {
+	placeholders := make([]string, 0, len(values))
+	for _, v := range values {
+		if !isLeadRating(v) {
+			return "", false
+		}
+		placeholders = append(placeholders, addArg(v))
+	}
+	switch len(placeholders) {
+	case 0:
+		return "", true
+	case 1:
+		return "l.rating = " + placeholders[0], true
+	default:
+		return "l.rating in (" + strings.Join(placeholders, ", ") + ")", true
+	}
+}
+
 // callStatusFilterWhereMulti OR's together the clause group for each selected
 // value (each group's own clauses stay AND'd), e.g. ["no_answer", "callback_undated"] ->
 // "(l.call_status = $1 or (l.call_status = $2 and l.callback_due_at is null))".
@@ -383,6 +402,16 @@ func (s *Server) handleListLeads(w http.ResponseWriter, r *http.Request) {
 		}
 		if group != "" {
 			where = append(where, group)
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("rating")); raw != "" {
+		clause, ok := ratingFilterWhere(splitQueryValues(raw), addArg)
+		if !ok {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid rating filter", map[string]string{"rating": "Unknown rating"})
+			return
+		}
+		if clause != "" {
+			where = append(where, clause)
 		}
 	}
 	if raw := strings.TrimSpace(r.URL.Query().Get("clientStatus")); raw != "" {

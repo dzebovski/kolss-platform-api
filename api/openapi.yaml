@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.19.0
+  version: 2.20.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -145,6 +145,7 @@ paths:
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
         - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
         - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: rating, in: query, style: form, explode: false, description: CRM v2 rating, OR'd together when multiple are given; leads without a rating never match, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
         - { name: days, in: query, schema: { type: integer, minimum: 1, maximum: 3660 }, description: When set, only leads created within the last N days }
@@ -1237,6 +1238,11 @@ components:
             - type: 'null'
             - $ref: '#/components/schemas/CallStatus'
         call_status_changed_at: { type: [string, 'null'], format: date-time }
+        rating:
+          description: CRM v2 lead rating (separate from lead_quality); null until someone sets it.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LeadRating'
         call_status_actor:
           description: >
             Manager who recorded the current call status. Null when no call status is recorded
@@ -1312,6 +1318,9 @@ components:
     CallStatus:
       type: string
       enum: [reached, no_answer, callback_requested]
+    LeadRating:
+      type: string
+      enum: [cold, medium, hot]
     CallStatusFilter:
       type: string
       description: >
@@ -1456,8 +1465,20 @@ components:
         - $ref: '#/components/schemas/ClearReminderActivityRequest'
         - $ref: '#/components/schemas/ReopenActivityRequest'
         - $ref: '#/components/schemas/QuestionActivityRequest'
+        - $ref: '#/components/schemas/RatingActivityRequest'
       discriminator:
         propertyName: type
+    RatingActivityRequest:
+      type: object
+      additionalProperties: false
+      required: [type, rating]
+      description: >
+        Sets the CRM v2 rating. Writes leads.rating and one rating_changed event (category system,
+        new_value {from, to}). Does not assign the lead. 409 rating_unchanged when the lead already
+        has this rating; 409 lead_terminal on terminal leads, as the other activities.
+      properties:
+        type: { type: string, const: rating }
+        rating: { $ref: '#/components/schemas/LeadRating' }
     CallStatusActivityRequest:
       type: object
       additionalProperties: false
