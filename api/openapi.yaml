@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.24.0
+  version: 2.25.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -240,6 +240,40 @@ paths:
                 required: [version]
                 properties: { version: { type: integer } }
         '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/info:
+    parameters: [{ $ref: '#/components/parameters/LeadId' }]
+    patch:
+      tags: [Leads]
+      operationId: updateLeadInfo
+      summary: CRM v2 "Lead info" popup (partial update)
+      description: >
+        Changes only the sent fields. An omitted field stays as it is; an empty string clears a text,
+        an empty list clears products and null clears the measurement date. A budget typed for a lead
+        without one takes the office currency (Warsaw PLN, Kyiv UAH) unless a currency is sent; its
+        lower bound also goes to v1 estimated_budget. Writes one lead_edited event with the changed
+        field keys (budget, cityRegion, product, materials, expectedLeadTime, preferredMeasurement) and
+        the new values under new_value.info. No change returns the current version without an event.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateLeadInfoRequest' }
+      responses:
+        '200':
+          description: Current version
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [version]
+                properties: { version: { type: integer } }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '428': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/markers/{kind}:
     parameters:
       - { $ref: '#/components/parameters/LeadId' }
@@ -1335,6 +1369,11 @@ components:
         no_answer_attempts: { type: integer, minimum: 0, description: No answer results since the last successful call (v2 only). }
         estimated_budget_text: { type: [string, 'null'], maxLength: 60, description: 'Budget as typed: a number or a range. estimated_budget holds its lower bound.' }
         products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
+        material_fronts: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
+        material_worktop: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
+        material_appliances: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
+        expected_lead_time: { type: [string, 'null'], maxLength: 60, description: 'CRM v2 lead info, free text, e.g. "8–12 weeks".' }
+        preferred_measurement_at: { type: [string, 'null'], format: date-time, description: CRM v2 lead info. }
         rating:
           description: CRM v2 lead rating (separate from lead_quality); null until someone sets it.
           oneOf:
@@ -2010,6 +2049,19 @@ components:
         channel:
           $ref: '#/components/schemas/LeadChannel'
           description: CRM v2 channel. When omitted, the lead's channel is preserved. Add `channel` to editedFields to audit the change.
+    UpdateLeadInfoRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        estimatedBudgetText: { type: string, maxLength: 60, description: 'A number or a range ("20 000 – 25 000"); empty clears the budget.' }
+        estimatedBudgetCurrency: { type: string, enum: [UAH, USD, EUR, PLN] }
+        cityRegion: { type: string }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
+        materialFronts: { type: string, maxLength: 200 }
+        materialWorktop: { type: string, maxLength: 200 }
+        materialAppliances: { type: string, maxLength: 200 }
+        expectedLeadTime: { type: string, maxLength: 60 }
+        preferredMeasurementAt: { type: [string, 'null'], format: date-time }
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]

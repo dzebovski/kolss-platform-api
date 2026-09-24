@@ -212,8 +212,12 @@ The lead card uses them for the Current status card and the timeline detail rows
 - New `PATCH /v1/leads/{leadId}/info` (`If-Match` required), partial update for the "Lead info" popup:
   `estimatedBudgetText`, `estimatedBudgetCurrency`, `cityRegion`, `products`, `materialFronts`,
   `materialWorktop`, `materialAppliances`, `expectedLeadTime`, `preferredMeasurementAt`. Only the sent
-  fields change. It writes one `lead_updated` event with the changed fields (the same audit shape v1
-  already renders). Response `{ version }`.
+  fields change. It writes one `lead_edited` event (the type `PATCH /v1/leads/{leadId}` already
+  writes; the CRM maps it to `lead_updated`) with the changed field keys in `fields` (`budget`,
+  `cityRegion`, `product`, `materials`, `expectedLeadTime`, `preferredMeasurement`) and the new values
+  in `info`. Response `{ version }`. Implemented in W7 (OpenAPI 2.25.0, migration
+  `20260924160000_lead_info`): texts ≤ 200 (materials) / 60 (lead time) characters, empty string
+  clears, `null` clears the date; the CRM needs v1 labels for the three new audit keys first.
 
 ### 3.4 Leads list
 
