@@ -1,7 +1,7 @@
-# CRM v2 workflow — contract draft (W1)
+# CRM v2 workflow — contract (W1)
 
-Status: **draft for user review**, 2026-09-24. Nothing here is implemented; `api/openapi.yaml`
-stays at 2.19.0 until this draft is approved. Implementation tasks: W2–W6 in the CRM v2 roadmap
+Status: **approved by the user 2026-09-24** (answers in §6). Nothing here is implemented yet;
+`api/openapi.yaml` stays at 2.19.0 until the W tasks land. Implementation tasks: W2–W6 in the CRM v2 roadmap
 (`web/.agents/skills/how-to-dev-kolss/references/crm-v2-roadmap.md`).
 
 Sources: lead card v1.3 design (popups, JS state model), leads list design, the KOLSS CRM design
@@ -16,9 +16,10 @@ system README, decisions D1–D6 in the roadmap, and the current code (`internal
 2. **One v2 action = one timeline event.** v2 status changes write the same `call_status_changed` /
    `client_status_changed` events v1 already renders, with v2 details added to `new_value`. No
    duplicate v1 + v2 events.
-3. **Mirror 1:1 into v1 fields** (decision D1b): the v2 handler also sets `call_status` /
-   `client_status` / `callback_due_at` / `loss_reason` / the showroom appointment, so v1 screens stay
-   correct for leads worked in v2.
+3. **Mirror 1:1 both ways.** The v2 handler also sets `call_status` / `client_status` /
+   `callback_due_at` / `loss_reason` / the showroom appointment, so v1 screens stay correct for leads
+   worked in v2. The v1 activity handler also sets `v2_status` through the same map in the same
+   transaction (user, 2026-09-24; see §3.6), so v2 never shows a stale status.
 4. **v2 has its own activity type.** v1 rules differ from the design (v1 requires a comment for
    `reached` and `closed_lost`, forbids a date for `no_answer`, and has another loss reason set). One new
    `v2_status` activity with its own validation keeps the v1 activities unchanged.
@@ -56,7 +57,15 @@ alter table public.leads
 -- Backfill: meta_lead_ads / facebook → meta_ads; site_form / website → website;
 -- manual → office; source_channel 'other' (Google Sheet import) → other.
 
--- C2 "Lead info" (design popup "Lead info") — needs user confirmation, see Q3/Q4
+-- Budget as free input: a number or a range, e.g. "20 000" or "20 000 – 25 000" (user, 2026-09-24).
+-- The currency stays in the existing estimated_budget_currency (UAH, USD, EUR, PLN).
+alter table public.leads
+  add column if not exists estimated_budget_text text,
+  add constraint leads_estimated_budget_text_check check (
+    estimated_budget_text is null or char_length(estimated_budget_text) <= 60
+  );
+
+-- C2 "Lead info" (design popup "Lead info")
 alter table public.leads
   add column if not exists products text[] not null default '{}',
   add column if not exists material_fronts text,
@@ -68,12 +77,16 @@ alter table public.leads
     products <@ array['kitchen', 'wardrobe', 'furniture', 'bathroom', 'hallway', 'other']
   );
 
--- W5: loss reasons for v2 (design list) + English labels for the en UI
+-- W5: new loss reasons for the v2 design list; existing codes and the v1 list stay as they are
+-- (user, 2026-09-24). "Other" reuses the existing `other` code. Labels: uk/pl to confirm on review.
 alter table public.loss_reasons add column if not exists label_en text;
-insert into public.loss_reasons (code, label_uk, label_pl, label_en)
-values ('not_relevant', 'Вже неактуально', 'Już nieaktualne', 'Not relevant anymore')
+insert into public.loss_reasons (code, label_uk, label_pl, label_en) values
+  ('bought_elsewhere', 'Купив деінде', 'Kupił gdzie indziej', 'Bought elsewhere'),
+  ('out_of_budget', 'Поза бюджетом', 'Poza budżetem', 'Out of budget'),
+  ('not_relevant', 'Вже неактуально', 'Już nieaktualne', 'Not relevant anymore'),
+  ('cant_reach_client', 'Не вдається зв''язатися', 'Brak kontaktu z klientem', 'Can''t reach client')
 on conflict (code) do nothing;
--- + fill label_en for expensive, no_contact, lost_client, other.
+update public.loss_reasons set label_en = 'Other' where code = 'other' and label_en is null;
 
 -- Rating and v2 events use the existing event categories; no CHECK change on lead_events.
 ```
@@ -95,6 +108,7 @@ rating:
 channel:
   oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/LeadChannel' }]
 # C2 lead info
+estimated_budget_text: { type: [string, 'null'], maxLength: 60 }
 products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
 material_fronts: { type: [string, 'null'] }
 material_worktop: { type: [string, 'null'] }
@@ -143,8 +157,11 @@ V2StatusActivityRequest:
         thinking: follow-up on (required). invited: visit start (required).
         success: follow-up date (optional). lost: not allowed.
     # success only (all optional)
-    estimatedBudget: { type: [number, 'null'], minimum: 0 }
-    estimatedBudgetCurrency: { type: string, enum: [UAH, USD, EUR, PLN] }
+    estimatedBudgetText: { type: string, maxLength: 60, description: A number or a range, see §3.7. }
+    estimatedBudgetCurrency:
+      type: string
+      enum: [UAH, USD, EUR, PLN]
+      description: Defaults to the office currency (Warsaw PLN, Kyiv UAH) when the lead has none.
     cityRegion: { type: string }
     products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
     nextAction: { type: string, maxLength: 500 }
@@ -153,8 +170,8 @@ V2StatusActivityRequest:
     # lost only
     lossReason:
       type: string
-      enum: [lost_client, expensive, not_relevant, no_contact, other]
-      description: Required for lost.
+      enum: [bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, other]
+      description: Required for lost. The v2 list only; v1 keeps its own list and validation.
 
 RatingActivityRequest:
   type: object
@@ -173,9 +190,9 @@ Response stays `{ ok, version }`. `Idempotency-Key` is required as for the other
 |---|---|---|---|
 | `success` | `v2_status`, `no_answer_attempts = 0`; budget / city / products when sent | `call_status = reached`; `callback_due_at = dueAt` (or cleared) | `call_status_changed` / `call_status` / `reached` |
 | `later` | `v2_status` | `call_status = callback_requested`, `callback_due_at = dueAt` | `call_status_changed` / `call_status` / `callback_requested` |
-| `noanswer` | `v2_status`, `no_answer_attempts + 1` | `call_status = no_answer`, `callback_due_at = dueAt` (see Q5) | `call_status_changed` / `call_status` / `no_answer` |
+| `noanswer` | `v2_status`, `no_answer_attempts + 1` | `call_status = no_answer`, `callback_due_at = dueAt` (also shows in v1 reminders; user OK) | `call_status_changed` / `call_status` / `no_answer` |
 | `thinking` | `v2_status` | `client_status = thinking`, `callback_due_at = dueAt` | `client_status_changed` / `client_status` / `thinking` |
-| `invited` | `v2_status` | `client_status = showroom_invited`; creates a `lead_showroom_visits` row, `kind = showroom`, `responsible_manager_id = designerId`, 60 min | `client_status_changed` / `client_status` / `showroom_invited` |
+| `invited` | `v2_status` | `client_status = showroom_invited`; creates a `lead_showroom_visits` row, `kind = showroom`, `responsible_manager_id = designerId`, 60 min, at the showroom of the lead's office (no picker) | `client_status_changed` / `client_status` / `showroom_invited` |
 | `lost` | `v2_status` | `client_status = closed_lost`, `loss_reason = lossReason`, reminders cleared, scheduled visits cancelled (as in v1) | `client_status_changed` / `client_status` / `closed_lost` |
 
 `new_value` of the event gets the v2 details: `v2_status`, `due_at`, `attempt` (noanswer),
@@ -187,11 +204,13 @@ The lead card uses them for the Current status card and the timeline detail rows
 
 ### 3.3 Contact and lead info
 
+- The contact popup has First name + Last name; they are joined with one space into the existing
+  `name` (user, 2026-09-24). No new name columns.
 - `PATCH /v1/leads/{leadId}` (`UpdateLeadRequest`): add an optional `channel` (`LeadChannel`).
   Existing required fields stay required; the v2 contact popup sends the current values for fields
   it does not show.
 - New `PATCH /v1/leads/{leadId}/info` (`If-Match` required), partial update for the "Lead info" popup:
-  `estimatedBudget`, `estimatedBudgetCurrency`, `cityRegion`, `products`, `materialFronts`,
+  `estimatedBudgetText`, `estimatedBudgetCurrency`, `cityRegion`, `products`, `materialFronts`,
   `materialWorktop`, `materialAppliances`, `expectedLeadTime`, `preferredMeasurementAt`. Only the sent
   fields change. It writes one `lead_updated` event with the changed fields (the same audit shape v1
   already renders). Response `{ version }`.
@@ -226,14 +245,35 @@ the other way round for rating.
 
 ### 3.5 Loss reasons
 
-`LossReason` gets an optional `label_en`. `GET /v1/loss-reasons` is unchanged otherwise.
+`LossReason` gets an optional `label_en`. `GET /v1/loss-reasons` is unchanged otherwise. v2 offers
+only the five codes of the design list. v1 keeps offering and accepting its own four.
+
+### 3.6 v1 activities also set `v2_status`
+
+`call_status` / `client_status` / `reopen` activities from v1 update `v2_status` and
+`v2_status_changed_at` with the D1b map:
+- `callback_requested` → later, `no_answer` → noanswer, `reached` → success
+- `thinking` → thinking, `showroom_invited` → invited, `closed_lost` → lost, `reopen` → new
+- `measurement_scheduled` / `calculation_in_progress` / `postponed` / `contract_signed` → NULL (legacy)
+
+A v1 call status on a lead whose client status is beyond `new_lead` keeps the client-status mapping,
+the same precedence as the backfill. `no_answer_attempts` changes only through v2.
+
+### 3.7 Budget input
+
+The UI sends the text as typed: one number (`20000`, `20 000`) or a range (`20 000 – 25 000`, a hyphen
+or en dash). The API stores it in `estimated_budget_text` after trimming. When the text holds one
+number, that number also goes to v1 `estimated_budget`; for a range, the lower bound goes there
+(default choice, change on review), so v1 and the reports keep a numeric value. Text the API cannot
+parse returns `400 invalid_budget`. Currency: `estimated_budget_currency` (PLN shown as `zł`); the
+default comes from the office (Warsaw PLN, Kyiv UAH).
 
 ## 4. v1 fallbacks that must ship first (Rule zero)
 
 1. CRM v1: i18n titles for event `rating_changed`. v1 otherwise shows the raw key, because unknown
    event types fall back to a comment with the raw type as the title.
-2. CRM v1: `closeReason.not_relevant` label (uk/pl/en). v1 shows unknown loss reason codes as the raw
-   code.
+2. CRM v1: `closeReason.*` labels (uk/pl/en) for `bought_elsewhere`, `out_of_budget`,
+   `not_relevant`, `cant_reach_client`. v1 shows unknown loss reason codes as the raw code.
 3. Verify that v1 reminders render `callback_due_at` with `call_status = no_answer` / `reached`
    correctly (today v1 never produces that combination).
 
@@ -246,26 +286,20 @@ the other way round for rating.
 - **W6** schema-only documentation of the existing `Lead` fields (no behaviour change).
 - Every step: OpenAPI 2.20.x bump, Go tests, regenerated CRM client, `check-api-boundary.mjs` pins (X1).
 
-## 6. Questions for the user
+## 6. User decisions (2026-09-24)
 
-- **Q1 — v1 changes and `v2_status`.** D1b says no two-way sync. Should v1 activities still set
-  `v2_status` through the same 1:1 map in the same transaction? It is cheap and avoids stale v2
-  statuses on leads worked in v1. Recommended: yes.
-- **Q2 — Loss reasons.** Design → DB mapping: Bought elsewhere → `lost_client`, Out of budget →
-  `expensive`, Not relevant anymore → new `not_relevant`, Can't reach client → `no_contact`,
-  Other → `other`. Is that right?
-- **Q3 — Budget.** The design uses free text ("20 000 – 25 000 zł"), the DB a number + currency
-  (reports use it). Recommended: keep number + currency (optionally a max value later). Free text would
-  need a new column.
-- **Q4 — Products.** The design uses chips (Kitchen, Wardrobe, …), v1 free text `product_interest`
-  (from Meta forms). Recommended: a new `products` list; `product_interest` stays as it is.
-- **Q5 — No answer date in v1.** v2 requires a next attempt date and stores it in `callback_due_at`,
-  so it also appears in v1 reminders. OK?
-- **Q6 — Showroom choice.** The invite popup carries the lead's office (`f.office`), and each office
-  has one showroom (Kyiv, Legionowo). Recommended: the showroom = the lead's office, no picker; changing
-  the office would change the client code prefix and access.
-- **Q7 — Name.** The contact popup has First name + Last name; the DB has one `name`. Recommended: keep
-  one column; the UI joins the two fields with a space.
+1. v1 activities also set `v2_status` (§3.6).
+2. Add new loss reasons for the v2 design list; the choice lives in the new design; the old list and
+   v1 are not touched (§2, §3.5).
+3. Budget is free input (a number or a range). The currency is selectable among PLN (`zł`), EUR,
+   USD, UAH. The default is PLN for Warsaw and UAH for Kyiv (§3.7).
+4. Products: a new `products` list; `product_interest` stays as it is.
+5. The No answer next attempt date goes to `callback_due_at` and shows in v1 reminders.
+6. The showroom is the lead's office showroom, with no picker.
+7. First name + Last name are joined into `name`.
+
+Still open on review: the uk/pl labels of the new loss reasons; the lower bound of a range going to
+v1 `estimated_budget`.
 
 ## 7. Design gaps found (lead card v1.3, 2026-09-24)
 
