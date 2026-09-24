@@ -577,3 +577,18 @@ func TestRemindersCTEShowroomBranchReadsVisitsTableDirectly(t *testing.T) {
 		}
 	}
 }
+
+// CRM v2 dates a no_answer (next attempt) or a reached (follow-up) call; both are callback
+// reminders, and a dated no_answer leaves the "no answer or undated callback" group.
+func TestV2DatedCallResultsAreCallbackReminders(t *testing.T) {
+	if !strings.Contains(ActiveReminderCandidatesSQL, "->> 'status_code' in ('callback_requested', 'no_answer', 'reached')") {
+		t.Fatal("callback reminder candidates must include dated no_answer and reached calls")
+	}
+	query, _, ok := leadIDsQuery(GroupNoAnswerOrCallbackUndated, validParams())
+	if !ok || !strings.Contains(query, "(l.call_status = 'no_answer' and not "+DatedNoAnswerSQL+")") {
+		t.Fatal("the no-answer group must leave out a no_answer lead with its own next attempt date")
+	}
+	if !strings.Contains(countsQuery, "(l.call_status = 'no_answer' and not "+DatedNoAnswerSQL+")") {
+		t.Fatal("the no-answer count must leave out a no_answer lead with its own next attempt date")
+	}
+}

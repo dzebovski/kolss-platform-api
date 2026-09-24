@@ -100,7 +100,7 @@ select
 		where o.code = $1
 			and l.archived_at is null
 			and (
-				l.call_status = 'no_answer'
+				(l.call_status = 'no_answer' and not ` + DatedNoAnswerSQL + `)
 				or (l.call_status = 'callback_requested' and l.callback_due_at is null)
 			)
 			and l.client_status not in (` + TerminalClientStatusesSQL + `)
@@ -160,7 +160,7 @@ func leadIDsQuery(group Group, params Params) (query string, args []any, ok bool
 			where o.code = $1
 				and l.archived_at is null
 				and (
-					l.call_status = 'no_answer'
+					(l.call_status = 'no_answer' and not ` + DatedNoAnswerSQL + `)
 					or (l.call_status = 'callback_requested' and l.callback_due_at is null)
 				)
 				and l.client_status not in (` + TerminalClientStatusesSQL + `)
