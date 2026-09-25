@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +47,16 @@ var v2LeadStatusChanges = map[string]string{
 	v2StatusLost:     "closed_lost",
 }
 
-// v2LossReasons is the design's Lost list (contract §3.5). v1 keeps its own four codes.
+// v2LossReasons is the fast, pure pre-check for the original single-reason lossReason field
+// (contract §3.5); it must keep validating exactly these 5 codes, unchanged (task W10). It also
+// doubles as the "CRM v1/v2 static closeReason.* dictionary already has a label for this code"
+// set used by the lossReasons (plural, W10) legacy-mirror fallback below — today those are the
+// same 5 codes, because that is exactly why they were enabled in W5. v1 keeps its own four codes
+// entirely separately (activityClientStatus "closed_lost", unaffected by this task).
+//
+// The new lossReasons (plural) field does NOT reuse this hardcoded set for membership: its valid
+// codes are the data-driven public.loss_reasons.is_v2 = true rows (checked with a query in
+// applyLeadActivity), per D12 ("codes and labels must be data, easy to add/rename").
 var v2LossReasons = map[string]struct{}{
 	"bought_elsewhere": {}, "out_of_budget": {}, "not_relevant": {}, "cant_reach_client": {}, "other": {},
 }
@@ -111,11 +121,27 @@ func validateV2StatusActivity(req leadActivityRequest, fields map[string]string)
 		fields["designerId"] = notAllowed
 	}
 	if req.Status == v2StatusLost {
-		if _, ok := v2LossReasons[req.LossReason]; !ok {
+		if req.LossReasons != nil {
+			// The plural field (W10): its own rule, does not touch the singular field's
+			// validation above (must not change how the existing single-reason request works).
+			if req.LossReason != "" {
+				fields["lossReason"] = "Not allowed together with lossReasons"
+			}
+			if len(req.LossReasons) == 0 {
+				fields["lossReasons"] = "Pick at least one reason"
+			} else if slices.Contains(req.LossReasons, "other") && strings.TrimSpace(req.Comment) == "" {
+				fields["comment"] = "Describe the reason in a few words"
+			}
+		} else if _, ok := v2LossReasons[req.LossReason]; !ok {
 			fields["lossReason"] = "Must be bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, or other"
 		}
-	} else if req.LossReason != "" {
-		fields["lossReason"] = notAllowed
+	} else {
+		if req.LossReason != "" {
+			fields["lossReason"] = notAllowed
+		}
+		if req.LossReasons != nil {
+			fields["lossReasons"] = notAllowed
+		}
 	}
 	if req.Status != v2StatusSuccess {
 		if req.EstimatedBudgetText != nil {
@@ -179,6 +205,9 @@ func v2ActivityFieldsSent(req leadActivityRequest) []string {
 	}
 	if req.LossReason != "" {
 		sent = append(sent, "lossReason")
+	}
+	if req.LossReasons != nil {
+		sent = append(sent, "lossReasons")
 	}
 	return sent
 }
@@ -297,6 +326,54 @@ func equalStringPtr(a, b *string) bool {
 		return a == b
 	}
 	return *a == *b
+}
+
+// resolveLossReasons validates the v2 "lost" lossReasons (plural, task W10) against the
+// data-driven public.loss_reasons.is_v2 = true rows (D12: codes and labels are data, no Go
+// redeploy needed to add or retire one) and returns the deduplicated, valid list plus the value
+// to mirror into the legacy singular leads.loss_reason column so v1 (and any v2 screen that
+// still calls i18n.closeReasonLabel(code) without a DB fallback, which today is every call site)
+// keeps showing a reason it can label: the first sent reason in v2LossReasons (the set with a
+// CRM closeReason.* key), or "other" when none of them has one yet.
+func resolveLossReasons(ctx context.Context, tx pgx.Tx, reasons []string) (valid []string, mirrored string, err error) {
+	valid = uniqueStrings(reasons)
+	rows, err := tx.Query(ctx, `select code from public.loss_reasons where code = any($1) and is_v2 = true`, valid)
+	if err != nil {
+		return nil, "", err
+	}
+	found := make(map[string]struct{}, len(valid))
+	for rows.Next() {
+		var code string
+		if err := rows.Scan(&code); err != nil {
+			rows.Close()
+			return nil, "", err
+		}
+		found[code] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, "", err
+	}
+	rows.Close()
+	for _, reason := range valid {
+		if _, ok := found[reason]; !ok {
+			return nil, "", errLossReasonNotFound
+		}
+	}
+	return valid, pickMirroredLossReason(valid), nil
+}
+
+// pickMirroredLossReason picks the value the legacy singular leads.loss_reason column gets when
+// several reasons are sent (task W10): the first one in v2LossReasons — the set with a CRM
+// v1/v2 closeReason.* fallback label — or "other" (always labelled) when none of them has one
+// yet. Pure logic (no DB), so it is unit-testable on its own (see TestPickMirroredLossReason).
+func pickMirroredLossReason(reasons []string) string {
+	for _, reason := range reasons {
+		if _, ok := v2LossReasons[reason]; ok {
+			return reason
+		}
+	}
+	return "other"
 }
 
 var v2LeadStatuses = map[string]struct{}{

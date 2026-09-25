@@ -255,7 +255,14 @@ func TestValidateV2StatusActivity(t *testing.T) {
 		{name: "lost requires a v2 reason", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "expensive"}, field: "lossReason"},
 		{name: "lost rejects date", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "out_of_budget", DueAt: &dueAt}, field: "dueAt"},
 		{name: "lost", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "bought_elsewhere", Comment: "Chose a cheaper studio"}},
+		{name: "lost reasons (plural) requires at least one", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReasons: []string{}}, field: "lossReasons"},
+		{name: "lost reasons not allowed with lossReason", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReason: "other", LossReasons: []string{"price_too_high"}}, field: "lossReason"},
+		{name: "lost reasons with other requires a comment", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReasons: []string{"price_too_high", "other"}}, field: "comment"},
+		{name: "lost reasons with other and a comment", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReasons: []string{"price_too_high", "other"}, Comment: "Went with a competitor, price was the deciding factor"}},
+		{name: "lost reasons without other needs no comment", request: leadActivityRequest{Type: activityV2Status, Status: "lost", LossReasons: []string{"price_too_high", "project_postponed"}}},
+		{name: "lost reasons only allowed for lost", request: leadActivityRequest{Type: activityV2Status, Status: "thinking", DueAt: &dueAt, LossReasons: []string{"other"}}, field: "lossReasons"},
 		{name: "v1 activity rejects v2 fields", request: leadActivityRequest{Type: activityComment, Comment: "x", Products: []string{"kitchen"}}, field: "products"},
+		{name: "v1 activity rejects lossReasons", request: leadActivityRequest{Type: activityComment, Comment: "x", LossReasons: []string{"other"}}, field: "lossReasons"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -313,5 +320,26 @@ func TestDeriveV2LeadStatus(t *testing.T) {
 		if !equalStringPtr(got, test.want) {
 			t.Errorf("deriveV2LeadStatus(%s, %v) = %v, want %v", test.client, test.call, got, test.want)
 		}
+	}
+}
+
+func TestPickMirroredLossReason(t *testing.T) {
+	tests := []struct {
+		name    string
+		reasons []string
+		want    string
+	}{
+		{name: "a v1/v2-labelled reason first", reasons: []string{"bought_elsewhere", "price_too_high"}, want: "bought_elsewhere"},
+		{name: "a labelled reason later in the list", reasons: []string{"price_too_high", "project_postponed", "cant_reach_client"}, want: "cant_reach_client"},
+		{name: "none labelled falls back to other", reasons: []string{"price_too_high", "project_postponed", "quote_only"}, want: "other"},
+		{name: "other itself", reasons: []string{"other"}, want: "other"},
+		{name: "empty falls back to other", reasons: []string{}, want: "other"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := pickMirroredLossReason(test.reasons); got != test.want {
+				t.Fatalf("pickMirroredLossReason(%v) = %q, want %q", test.reasons, got, test.want)
+			}
+		})
 	}
 }

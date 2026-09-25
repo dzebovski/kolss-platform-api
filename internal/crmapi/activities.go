@@ -54,6 +54,10 @@ type leadActivityRequest struct {
 	// v2_status invited / lost
 	DesignerID *uuid.UUID `json:"designerId"`
 	LossReason string     `json:"lossReason"`
+	// v2_status lost only (task W10): several reasons. Alternative to LossReason — send exactly
+	// one of the two. nil (the JSON field omitted) keeps the existing single-reason behaviour
+	// working unchanged; a non-nil (possibly empty, which fails validation) slice switches to it.
+	LossReasons []string `json:"lossReasons"`
 }
 
 type questionAssigneeSnapshot struct {
@@ -345,6 +349,9 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 			field := "reason"
 			if req.Type == activityV2Status {
 				field = "lossReason"
+				if req.LossReasons != nil {
+					field = "lossReasons"
+				}
 			}
 			s.writeError(w, r, http.StatusBadRequest, "invalid_loss_reason", "Unknown loss reason", map[string]string{field: "Unknown loss reason"})
 			return
@@ -624,6 +631,7 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	changeCall := false
 	changeClient := false
 	lossReason := (*string)(nil)
+	lossReasons := ([]string)(nil)
 	rating := lead.Rating
 	v2Status := lead.V2Status
 	noAnswerAttempts := lead.NoAnswerAttempts
@@ -853,16 +861,28 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 			newValue["ends_at"] = req.DueAt.UTC().Add(time.Hour)
 			callbackDueAt = nextClientStatusCallbackDue(lead.CallStatus, callbackDueAt, clientCode, req.DueAt)
 		case v2StatusLost:
-			var exists bool
-			if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.LossReason).Scan(&exists); err != nil {
-				return err
+			if req.LossReasons != nil {
+				reasons, mirrored, err := resolveLossReasons(r.Context(), tx, req.LossReasons)
+				if err != nil {
+					return err
+				}
+				lossReason = &mirrored
+				lossReasons = reasons
+				newValue["reasons"] = reasons
+				newValue["reason"] = mirrored
+				newValue["loss_reason"] = mirrored
+			} else {
+				var exists bool
+				if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.loss_reasons where code=$1)`, req.LossReason).Scan(&exists); err != nil {
+					return err
+				}
+				if !exists {
+					return errLossReasonNotFound
+				}
+				lossReason = &req.LossReason
+				newValue["reason"] = req.LossReason
+				newValue["loss_reason"] = req.LossReason
 			}
-			if !exists {
-				return errLossReasonNotFound
-			}
-			lossReason = &req.LossReason
-			newValue["reason"] = req.LossReason
-			newValue["loss_reason"] = req.LossReason
 			callbackDueAt = nil
 		}
 	case activityRating:
@@ -896,10 +916,11 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 		  v2_status=$11,
 		  v2_status_changed_at=case when $12 then $6 else v2_status_changed_at end,
 		  no_answer_attempts=$13,
+		  loss_reasons=case when $14::text[] is null then loss_reasons else $14 end,
 		  updated_at=$6,
 		  version=version+1
 		where id=$1
-	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt, rating, v2Status, v2Changed, noAnswerAttempts)
+	`, leadID, callStatus, changeCall, clientStatus, changeClient, now, assignedTo, lossReason, callbackDueAt, rating, v2Status, v2Changed, noAnswerAttempts, lossReasons)
 	if err != nil {
 		return err
 	}

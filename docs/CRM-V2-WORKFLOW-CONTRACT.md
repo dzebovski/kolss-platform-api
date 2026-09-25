@@ -341,6 +341,54 @@ the other way round for rating.
 `LossReason` gets an optional `label_en`. `GET /v1/loss-reasons` is unchanged otherwise. v2 offers
 only the five codes of the design list. v1 keeps offering and accepting its own four.
 
+### 3.5a Several loss reasons per lead (task W10, decision D12)
+
+`leads.loss_reasons text[] not null default '{}'` sits next to the existing singular
+`leads.loss_reason`, which v1 keeps reading and writing exactly as before. The v2 `lost` activity
+(`V2StatusActivityRequest`) accepts an optional `lossReasons: string[]`, an alternative to the
+existing `lossReason` — send exactly one of the two; sending both is `400 validation_error` on
+`lossReason`. `lossReasons` requires at least one code (board error "Pick at least one reason");
+a comment is required only when `other` is among them (board error "Describe the reason in a few
+words") — **this rule applies to `lossReasons` only**, the existing single-`lossReason` request is
+validated exactly as before.
+
+**Data-driven codes (D12).** `public.loss_reasons` gains `is_v2 boolean not null default false`:
+which codes the v2 "Lost" popup may offer/accept, so the provisional list can be revised by data
+alone (flip the flag), no deploy. The 5 codes already offered since W5 keep `is_v2 = true`. The
+Lost board's other 3 codes (`Lost.dc.html` `REASONS`, board order: Bought elsewhere, **Price too
+high**, Out of budget, **Project postponed**, Not relevant anymore, Can't reach client, **Only
+wanted a price**, Other → `price_too_high`, `project_postponed`, `quote_only`) are inserted with
+uk/pl/en labels but **`is_v2 = false`** — see the fallback gap below. `lossReasons` is validated
+against `is_v2 = true` rows only (`resolveLossReasons`), replacing what would otherwise be a
+second hardcoded Go list; the original single `lossReason` keeps its existing fast, pure,
+hardcoded-set pre-check unchanged (`v2LossReasons`, still exactly the same 5 codes as before this
+task — required to keep its own validation unchanged, per this task's brief). `GET
+/v1/loss-reasons` now also returns `is_v2` per row.
+
+**v1/v2 fallback-label gap (found while implementing, per this task's explicit check).** Every
+`kolss-crm-angular` call site of `i18n.closeReasonLabel(code)` — v1's `lead-actions-panel.ts`,
+`lead-summary-panel.ts`, `lead-detail-page.presenter.ts`, `lead-activity-dialogs.ts`,
+`reports/report-lead-block.ts`, **and** v2's `v2-status-dialog.ts`, `v2-lead-timeline.ts`,
+`v2-current-status-card.ts` — passes the code only, with no DB-label fallback wired up (the
+service method supports one via a second `reasons` argument, but nothing calls it that way). A
+code without a static `closeReason.<code>` key in `messages.{uk,pl,en}.ts` therefore renders raw
+and untranslated in **both** v1 and today's v2 screens, not just v1. `price_too_high`,
+`project_postponed` and `quote_only` have no such key yet, so per this task's instruction ("if it
+doesn't [cover it], STOP and report, because a CRM v1 fallback would have to ship first") they
+start `is_v2 = false`: the v2 API accepts and stores them once enabled, but the popup should not
+offer them, and no lead can be given one, until the fallback labels ship in the CRM (any repo —
+this is not v1-specific) and someone flips `is_v2 = true` for each. This also means: **do not
+enable `resolveLossReasons`'s corresponding v2 UI chips** in the C10 task before that.
+
+Even once enabled, mirroring several reasons into the legacy singular `loss_reason` risks writing
+a code v1 cannot label. `resolveLossReasons` therefore mirrors the **first sent reason that is in
+the original 5-code `v2LossReasons` set** (i.e. already has a fallback label), or `other`
+(universally labelled) when none of the sent reasons does — never the literal first reason
+regardless of label coverage. `leads.loss_reasons` always stores the full list regardless; only
+the singular mirror is protected this way. The `lost` timeline event's `new_value.reasons` holds
+the full list; `new_value.reason` / `new_value.loss_reason` hold the mirrored value, same keys as
+the existing single-reason event.
+
 ### 3.6 v1 activities also set `v2_status`
 
 `call_status` / `client_status` / `reopen` activities from v1 update `v2_status` and

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.28.0
+  version: 2.29.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1305,12 +1305,20 @@ components:
                 v1 behaviour is unchanged. Only the CRM v2 UI is meant to use this flag.
     LossReason:
       type: object
-      required: [code, label_uk, label_pl]
+      required: [code, label_uk, label_pl, is_v2]
       properties:
         code: { type: string }
         label_uk: { type: string }
         label_pl: { type: string }
         label_en: { type: [string, 'null'], description: Set for the codes of the CRM v2 Lost list. }
+        is_v2:
+          type: boolean
+          description: >
+            Task W10, decision D12: whether the CRM v2 "Lost" popup may offer/accept this code —
+            data-driven so the provisional 8-code list can be revised without a deploy. Not every
+            row in this table is a v1 code either; is_v2 = false covers both v1-only codes and
+            board codes not yet enabled (see the lossReasons description on the v2_status
+            activity for why some board codes start disabled).
     LeadFacetsResponse:
       type: object
       additionalProperties: false
@@ -1348,6 +1356,14 @@ components:
         source_note: { type: [string, 'null'] }
         source_created_at: { type: [string, 'null'], format: date-time, description: When the lead arrived (list date column). }
         loss_reason: { type: [string, 'null'], description: loss_reasons.code of a closed_lost lead. }
+        loss_reasons:
+          type: array
+          items: { type: string }
+          description: >
+            CRM v2 several loss reasons per lead (task W10). Set together with loss_reason (its
+            first entry with a v1/v2 fallback label, or "other") by the v2_status "lost" activity
+            when it is sent the plural lossReasons; empty when the lead was lost with the
+            original singular lossReason, or never lost.
         offices:
           description: The lead's office row (joined).
           type: [object, 'null']
@@ -1680,7 +1696,8 @@ components:
         write client_status_changed instead: thinking → thinking (callback_due_at = dueAt),
         invited → showroom_invited plus a 60-minute showroom visit at the lead's office with the
         designer as responsible manager (the lead keeps its manager), lost → closed_lost with
-        loss_reason, reminders cleared and scheduled visits cancelled.
+        loss_reason (and, task W10, loss_reasons when lossReasons is sent), reminders cleared and
+        scheduled visits cancelled.
       properties:
         type: { type: string, const: v2_status }
         status: { type: string, enum: [success, later, noanswer, thinking, invited, lost] }
@@ -1712,7 +1729,23 @@ components:
         lossReason:
           type: string
           enum: [bought_elsewhere, out_of_budget, not_relevant, cant_reach_client, other]
-          description: lost only, required. The v2 list; v1 keeps its own list and validation.
+          description: >
+            lost only. Required unless lossReasons is sent instead (send exactly one of the two).
+            The v2 list; v1 keeps its own list and validation.
+        lossReasons:
+          type: array
+          items: { type: string }
+          minItems: 1
+          description: >
+            Task W10 (decision D12): lost only, an alternative to lossReason for several reasons.
+            Not allowed together with lossReason. Each code must be a public.loss_reasons row with
+            is_v2 = true (400 validation_error on lossReasons otherwise, matching lossReason's
+            "unknown loss reason" behaviour) — the valid set is data, not a fixed enum here, so it
+            can grow without an OpenAPI change. comment is required only when "other" is among the
+            reasons. leads.loss_reasons stores the full list; the legacy loss_reason gets the
+            first sent reason that already has a CRM v1/v2 fallback label (falling back to
+            "other" when none of them does), so v1 (and any v2 screen not yet updated for several
+            reasons) keeps showing a reason it can label.
     RatingActivityRequest:
       type: object
       additionalProperties: false
