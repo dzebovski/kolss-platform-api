@@ -265,6 +265,49 @@ read `/v1/me` permissions for this feature at all — it gates itself on the cli
 `isSuperAdminRole(profile.role)`, so v1 keeps showing that control to super admin only and its
 behaviour is unchanged by this task.
 
+### 3.3c Lead info fields from the new popups (task W9)
+
+`PATCH /v1/leads/{leadId}/info` (`UpdateLeadInfoRequest`, W7) gains fields from the "Fill lead
+info" and "Create project" boards; only the sent fields change, same as every other field on this
+endpoint. `aboutClient` and `referredBy` reuse the `about_client` / `referred_by` columns already
+added in W8 (they were unused by any endpoint until now); everything else below is new
+(migration `20260925130000_lead_info_checklist_project_type`):
+
+- **Clarification checklist** — five independent booleans, one per board item (`CHECKS` in
+  `Fill-lead-info.dc.html`): `checklistBudget` ("Approximate budget"), `checklistLocation`
+  ("Project location"), `checklistPeriod` ("Production and installation period"),
+  `checklistMaterials` ("Materials"), `checklistProduct` ("Product type") →
+  `checklist_budget/location/period/materials/product` columns. Each just takes the sent
+  `true`/`false`; there is no "clear" state (a checkbox has no third value). All five changing in
+  one request write a single `checklist` audit key.
+- **`clientInformed`** → `client_informed` column ("Client is informed about the next steps").
+  The board marks it required with `*` and blocks Save without it (`Fill-lead-info.dc.html` line
+  263), but that is a popup rule, not an API rule: Rule zero forbids a required PATCH field, so
+  `clientInformed` stays optional here and nullable in the database.
+- **`projectType`** → `project_type` column, the board's `PTYPES` ids: `express` ("Paid express
+  evaluation" — estimate from the client's plans and photos), `measure` ("Paid measurement and
+  project design" — site visit, measurements and a design project), `contract` ("Contract
+  signing" — client is ready to sign and pay the prepayment). Empty string clears it, same as the
+  other optional enums on this endpoint.
+- **`responsibleManagerId`** → `responsible_manager_id` (nullable FK to `profiles(id)`,
+  `on delete set null`). This is **not** `assigned_to` — it is the manager the popup names for the
+  planned project, distinct from the lead's owner (task G4). Validated with the same active,
+  non-`super_admin`, office-member rule as `assignedToId` and the comment "Assign to"
+  (`validateCommentAssignee` / `commentAssigneeExistsQuery`), else `400 validation_error` on
+  `responsibleManagerId`. Empty string clears it.
+
+What the boards show, for the record: `Fill-lead-info.dc.html`'s `CFG` marks
+`fillInfo: { checklist: true, ptype: true, manager: true }` — the checklist, project type and
+responsible manager all belong to "Fill lead info". `Successful-call.dc.html`'s `CFG` marks
+`success: { checklist: true }` only — the clarification checklist appears there too (so both
+popups can write it through this same `PATCH .../info` endpoint), but **no board shows
+`projectType` or a manager select in Successful call**, and `Create-lead.dc.html`'s `CFG`
+(`{ contact: 'full', created: true, request: true, docs: true }`) has neither. So `projectType`
+and `responsibleManagerId` are `PATCH .../info` only, not part of the `v2_status` "success"
+activity payload (§3.2) and not part of `POST /v1/leads` (§3.3a, W8). `createProject` in the same
+`CFG` also marks `checklist/ptype/manager: true`, matching a future Create project popup — out of
+scope for W9 (Block 3, not yet built).
+
 ### 3.4 Leads list
 
 `GET /v1/leads`, new optional query parameters (comma-separated, as the existing filters):

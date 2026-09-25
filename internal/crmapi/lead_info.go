@@ -29,7 +29,19 @@ const (
 	leadInfoFieldMaterials   = "materials"
 	leadInfoFieldLeadTime    = "expectedLeadTime"
 	leadInfoFieldMeasurement = "preferredMeasurement"
+	// W9: fields from the Fill lead info / Create project boards.
+	leadInfoFieldAboutClient        = "aboutClient"
+	leadInfoFieldReferredBy         = "referredBy"
+	leadInfoFieldChecklist          = "checklist"
+	leadInfoFieldClientInformed     = "clientInformed"
+	leadInfoFieldProjectType        = "projectType"
+	leadInfoFieldResponsibleManager = "responsibleManager"
 )
+
+// leadProjectTypes are the Fill lead info / Create project board's PTYPES ids (task W9).
+var leadProjectTypes = map[string]struct{}{
+	"express": {}, "measure": {}, "contract": {},
+}
 
 // nullableTime tells an omitted field (Set=false) from an explicit null (Set=true, Value=nil).
 type nullableTime struct {
@@ -63,6 +75,20 @@ type leadInfoRequest struct {
 	MaterialAppliances      *string      `json:"materialAppliances"`
 	ExpectedLeadTime        *string      `json:"expectedLeadTime"`
 	PreferredMeasurementAt  nullableTime `json:"preferredMeasurementAt"`
+	// W9 (Fill lead info / Create project boards). aboutClient/referredBy already exist as lead
+	// columns (W8); everything else here is new. "" clears projectType/responsibleManagerId;
+	// the five checklist booleans and clientInformed just take the sent value (no clear needed,
+	// a checkbox is only ever true or false).
+	AboutClient          *string `json:"aboutClient"`
+	ReferredBy           *string `json:"referredBy"`
+	ChecklistBudget      *bool   `json:"checklistBudget"`
+	ChecklistLocation    *bool   `json:"checklistLocation"`
+	ChecklistPeriod      *bool   `json:"checklistPeriod"`
+	ChecklistMaterials   *bool   `json:"checklistMaterials"`
+	ChecklistProduct     *bool   `json:"checklistProduct"`
+	ClientInformed       *bool   `json:"clientInformed"`
+	ProjectType          *string `json:"projectType"`
+	ResponsibleManagerID *string `json:"responsibleManagerId"`
 }
 
 func validateLeadInfo(req leadInfoRequest) map[string]string {
@@ -99,6 +125,26 @@ func validateLeadInfo(req leadInfoRequest) map[string]string {
 	if req.ExpectedLeadTime != nil && len([]rune(strings.TrimSpace(*req.ExpectedLeadTime))) > maxLeadTimeLength {
 		fields["expectedLeadTime"] = "Must be at most 60 characters"
 	}
+	if req.AboutClient != nil && len([]rune(strings.TrimSpace(*req.AboutClient))) > maxAboutClientLength {
+		fields["aboutClient"] = "Must be at most 2000 characters"
+	}
+	if req.ReferredBy != nil && len([]rune(strings.TrimSpace(*req.ReferredBy))) > maxReferredByLength {
+		fields["referredBy"] = "Must be at most 200 characters"
+	}
+	if req.ProjectType != nil {
+		if text := strings.TrimSpace(*req.ProjectType); text != "" {
+			if _, ok := leadProjectTypes[text]; !ok {
+				fields["projectType"] = "Must be express, measure, or contract"
+			}
+		}
+	}
+	if req.ResponsibleManagerID != nil {
+		if text := strings.TrimSpace(*req.ResponsibleManagerID); text != "" {
+			if _, err := uuid.Parse(text); err != nil {
+				fields["responsibleManagerId"] = "Must be a valid manager id"
+			}
+		}
+	}
 	return fields
 }
 
@@ -116,6 +162,24 @@ type leadInfo struct {
 	MeasurementAt     *time.Time
 	OfficeCode        string
 	BudgetRateChanged bool
+	// W9
+	AboutClient          *string
+	ReferredBy           *string
+	ChecklistBudget      *bool
+	ChecklistLocation    *bool
+	ChecklistPeriod      *bool
+	ChecklistMaterials   *bool
+	ChecklistProduct     *bool
+	ClientInformed       *bool
+	ProjectType          *string
+	ResponsibleManagerID *uuid.UUID
+}
+
+func equalBoolPtr(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // applyLeadInfo returns the new state, the changed audit field keys and the event values.
@@ -198,6 +262,74 @@ func applyLeadInfo(current leadInfo, req leadInfoRequest) (leadInfo, []string, m
 			values["preferred_measurement_at"] = next.MeasurementAt
 		}
 	}
+	if req.AboutClient != nil {
+		next.AboutClient = clean(*req.AboutClient)
+		if !equalStringPtr(current.AboutClient, next.AboutClient) {
+			changed = append(changed, leadInfoFieldAboutClient)
+			values["about_client"] = next.AboutClient
+		}
+	}
+	if req.ReferredBy != nil {
+		next.ReferredBy = clean(*req.ReferredBy)
+		if !equalStringPtr(current.ReferredBy, next.ReferredBy) {
+			changed = append(changed, leadInfoFieldReferredBy)
+			values["referred_by"] = next.ReferredBy
+		}
+	}
+	checklistChanged := false
+	for _, pair := range []struct {
+		sent   *bool
+		target **bool
+		now    *bool
+	}{
+		{req.ChecklistBudget, &next.ChecklistBudget, current.ChecklistBudget},
+		{req.ChecklistLocation, &next.ChecklistLocation, current.ChecklistLocation},
+		{req.ChecklistPeriod, &next.ChecklistPeriod, current.ChecklistPeriod},
+		{req.ChecklistMaterials, &next.ChecklistMaterials, current.ChecklistMaterials},
+		{req.ChecklistProduct, &next.ChecklistProduct, current.ChecklistProduct},
+	} {
+		if pair.sent == nil {
+			continue
+		}
+		*pair.target = pair.sent
+		if !equalBoolPtr(pair.now, *pair.target) {
+			checklistChanged = true
+		}
+	}
+	if checklistChanged {
+		changed = append(changed, leadInfoFieldChecklist)
+		values["checklist"] = map[string]any{
+			"budget": next.ChecklistBudget, "location": next.ChecklistLocation, "period": next.ChecklistPeriod,
+			"materials": next.ChecklistMaterials, "product": next.ChecklistProduct,
+		}
+	}
+	if req.ClientInformed != nil {
+		next.ClientInformed = req.ClientInformed
+		if !equalBoolPtr(current.ClientInformed, next.ClientInformed) {
+			changed = append(changed, leadInfoFieldClientInformed)
+			values["client_informed"] = next.ClientInformed
+		}
+	}
+	if req.ProjectType != nil {
+		next.ProjectType = clean(*req.ProjectType)
+		if !equalStringPtr(current.ProjectType, next.ProjectType) {
+			changed = append(changed, leadInfoFieldProjectType)
+			values["project_type"] = next.ProjectType
+		}
+	}
+	if req.ResponsibleManagerID != nil {
+		text := strings.TrimSpace(*req.ResponsibleManagerID)
+		if text == "" {
+			next.ResponsibleManagerID = nil
+		} else {
+			id, _ := uuid.Parse(text) // format already checked by validateLeadInfo
+			next.ResponsibleManagerID = &id
+		}
+		if !equalUUIDPtr(current.ResponsibleManagerID, next.ResponsibleManagerID) {
+			changed = append(changed, leadInfoFieldResponsibleManager)
+			values["responsible_manager_id"] = next.ResponsibleManagerID
+		}
+	}
 	return next, changed, values
 }
 
@@ -240,14 +372,18 @@ func (s *Server) handleUpdateLeadInfo(w http.ResponseWriter, r *http.Request) {
 		select l.office_id, l.version, l.estimated_budget_text, l.estimated_budget,
 		  l.estimated_budget_currency, l.city_region, l.products, l.material_fronts,
 		  l.material_worktop, l.material_appliances, l.expected_lead_time,
-		  l.preferred_measurement_at, o.code
+		  l.preferred_measurement_at, o.code, l.about_client, l.referred_by,
+		  l.checklist_budget, l.checklist_location, l.checklist_period, l.checklist_materials,
+		  l.checklist_product, l.client_informed, l.project_type, l.responsible_manager_id
 		from public.leads l join public.offices o on o.id = l.office_id
 		where l.id=$1 and l.archived_at is null
 		for update of l
 	`, leadID).Scan(
 		&officeID, &currentVersion, &current.BudgetText, &current.Budget, &current.BudgetCurrency,
 		&current.CityRegion, &current.Products, &current.Fronts, &current.Worktop, &current.Appliances,
-		&current.LeadTime, &current.MeasurementAt, &current.OfficeCode,
+		&current.LeadTime, &current.MeasurementAt, &current.OfficeCode, &current.AboutClient, &current.ReferredBy,
+		&current.ChecklistBudget, &current.ChecklistLocation, &current.ChecklistPeriod, &current.ChecklistMaterials,
+		&current.ChecklistProduct, &current.ClientInformed, &current.ProjectType, &current.ResponsibleManagerID,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
@@ -264,6 +400,24 @@ func (s *Server) handleUpdateLeadInfo(w http.ResponseWriter, r *http.Request) {
 	if currentVersion != version {
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
 		return
+	}
+	// W9: responsibleManagerId is not assigned_to (the CRM v2 owner-of-record concept, G4); it is
+	// the manager the popup names for the planned project. Same active-office-member rule as
+	// GET /v1/managers and assignedToId (G4).
+	if req.ResponsibleManagerID != nil {
+		if text := strings.TrimSpace(*req.ResponsibleManagerID); text != "" {
+			id, _ := uuid.Parse(text) // format already checked by validateLeadInfo
+			if err := validateLeadAssignee(r, tx, id, officeID); err != nil {
+				if errors.Is(err, errCommentAssigneeInvalid) {
+					s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead info", map[string]string{
+						"responsibleManagerId": "Must be an active member of the lead's office",
+					})
+					return
+				}
+				s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not verify responsible manager", nil)
+				return
+			}
+		}
 	}
 
 	next, changed, values := applyLeadInfo(current, req)
@@ -293,12 +447,17 @@ func (s *Server) handleUpdateLeadInfo(w http.ResponseWriter, r *http.Request) {
 		  estimated_budget_rate_set_id=case when $6 then estimated_budget_rate_set_id else $7 end,
 		  city_region=$8, products=$9, material_fronts=$10, material_worktop=$11,
 		  material_appliances=$12, expected_lead_time=$13, preferred_measurement_at=$14,
+		  about_client=$15, referred_by=$16, checklist_budget=$17, checklist_location=$18,
+		  checklist_period=$19, checklist_materials=$20, checklist_product=$21,
+		  client_informed=$22, project_type=$23, responsible_manager_id=$24,
 		  updated_at=now(), version=version+1
 		where id=$1 and version=$2 and archived_at is null
 		returning version
 	`, leadID, version, next.BudgetText, next.Budget, next.BudgetCurrency, rateSetKeep, rateSetID,
 		next.CityRegion, products, next.Fronts, next.Worktop, next.Appliances, next.LeadTime,
-		next.MeasurementAt).Scan(&nextVersion)
+		next.MeasurementAt, next.AboutClient, next.ReferredBy, next.ChecklistBudget, next.ChecklistLocation,
+		next.ChecklistPeriod, next.ChecklistMaterials, next.ChecklistProduct, next.ClientInformed,
+		next.ProjectType, next.ResponsibleManagerID).Scan(&nextVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
 		return

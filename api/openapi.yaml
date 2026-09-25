@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.27.0
+  version: 2.28.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -258,12 +258,16 @@ paths:
       operationId: updateLeadInfo
       summary: CRM v2 "Lead info" popup (partial update)
       description: >
-        Changes only the sent fields. An omitted field stays as it is; an empty string clears a text,
-        an empty list clears products and null clears the measurement date. A budget typed for a lead
-        without one takes the office currency (Warsaw PLN, Kyiv UAH) unless a currency is sent; its
-        lower bound also goes to v1 estimated_budget. Writes one lead_edited event with the changed
-        field keys (budget, cityRegion, product, materials, expectedLeadTime, preferredMeasurement) and
-        the new values under new_value.info. No change returns the current version without an event.
+        Changes only the sent fields. An omitted field stays as it is; an empty string clears a text
+        or (task W9) projectType/responsibleManagerId, an empty list clears products and null clears
+        the measurement date. A budget typed for a lead without one takes the office currency (Warsaw
+        PLN, Kyiv UAH) unless a currency is sent; its lower bound also goes to v1 estimated_budget.
+        responsibleManagerId is validated against the same active-office-member rule as assignedToId
+        (task G4) — it is not the lead's assigned_to. Writes one lead_edited event with the changed
+        field keys (budget, cityRegion, product, materials, expectedLeadTime, preferredMeasurement,
+        and since task W9: aboutClient, referredBy, checklist, clientInformed, projectType,
+        responsibleManager) and the new values under new_value.info. No change returns the current
+        version without an event.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }]
       requestBody:
@@ -1389,6 +1393,28 @@ components:
         products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
         referred_by: { type: [string, 'null'], maxLength: 200, description: 'CRM v2 Create lead "Referred by" field (task W8).' }
         about_client: { type: [string, 'null'], maxLength: 2000, description: CRM v2 Create lead "About the client" free text (task W8). }
+        # W9: "What's clarified with the client" checklist (Fill lead info / Create project boards).
+        checklist_budget: { type: [boolean, 'null'], description: CRM v2 clarification checklist — approximate budget discussed. }
+        checklist_location: { type: [boolean, 'null'], description: CRM v2 clarification checklist — project location discussed. }
+        checklist_period: { type: [boolean, 'null'], description: CRM v2 clarification checklist — production and installation period discussed. }
+        checklist_materials: { type: [boolean, 'null'], description: CRM v2 clarification checklist — materials discussed. }
+        checklist_product: { type: [boolean, 'null'], description: CRM v2 clarification checklist — product type discussed. }
+        client_informed:
+          type: [boolean, 'null']
+          description: >
+            CRM v2 "Client is informed about the next steps". The popup shows it as required, but
+            the API never requires it (Rule zero: no required PATCH fields).
+        project_type:
+          description: CRM v2 planned project type (Fill lead info / Create project boards).
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/ProjectType'
+        responsible_manager_id:
+          description: >
+            CRM v2 manager named for the planned project (Fill lead info / Create project
+            boards). Distinct from assigned_to, the lead's owner (task G4).
+          type: [string, 'null']
+          format: uuid
         material_fronts: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
         material_worktop: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
         material_appliances: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
@@ -1483,6 +1509,12 @@ components:
     LeadProduct:
       type: string
       enum: [kitchen, wardrobe, furniture, bathroom, hallway, other]
+    ProjectType:
+      type: string
+      description: >
+        Fill lead info / Create project board options: express (Paid express evaluation),
+        measure (Paid measurement and project design), contract (Contract signing).
+      enum: [express, measure, contract]
     LeadChannel:
       type: string
       description: CRM v2 channel. `other` marks the old Google Sheet import and is not offered for new leads.
@@ -2098,6 +2130,28 @@ components:
         materialAppliances: { type: string, maxLength: 200 }
         expectedLeadTime: { type: string, maxLength: 60 }
         preferredMeasurementAt: { type: [string, 'null'], format: date-time }
+        # W9: Fill lead info / Create project boards. aboutClient/referredBy reuse the W8 columns.
+        aboutClient: { type: string, maxLength: 2000 }
+        referredBy: { type: string, maxLength: 200 }
+        checklistBudget: { type: boolean, description: 'Clarification checklist: approximate budget.' }
+        checklistLocation: { type: boolean, description: 'Clarification checklist: project location.' }
+        checklistPeriod: { type: boolean, description: 'Clarification checklist: production and installation period.' }
+        checklistMaterials: { type: boolean, description: 'Clarification checklist: materials.' }
+        checklistProduct: { type: boolean, description: 'Clarification checklist: product type.' }
+        clientInformed:
+          type: boolean
+          description: >
+            "Client is informed about the next steps". The popup shows it as required; the API
+            never requires it (Rule zero: no required PATCH fields).
+        projectType:
+          $ref: '#/components/schemas/ProjectType'
+          description: Empty string clears it. Not accepted by the Successful call activity — PATCH info only (no board shows it there).
+        responsibleManagerId:
+          type: string
+          format: uuid
+          description: >
+            Empty string clears it. Must be an active, non-super_admin member of the lead's
+            office (same rule as assignedToId, task G4) — not the lead's assigned_to.
     SiteCode:
       type: string
       enum: [kolss-pl, kolss-ua]
