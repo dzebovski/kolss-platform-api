@@ -219,6 +219,30 @@ The lead card uses them for the Current status card and the timeline detail rows
   `20260924160000_lead_info`): texts ≤ 200 (materials) / 60 (lead time) characters, empty string
   clears, `null` clears the date; the CRM needs v1 labels for the three new audit keys first.
 
+### 3.3a Create lead (task W8)
+
+`POST /v1/leads` (`CreateLeadRequest`) gains optional fields for the v2 Create lead popup;
+`officeId` remains the showroom (no separate field) and `sourceCreatedAtLocal` remains the
+created date/time. All new fields are omittable, so v1 create requests are unchanged:
+
+- `channel` (`LeadChannel`): rejects `other` here (400 `validation_error`), since that value only
+  marks the legacy Google Sheet import (§2, §6.11). Omitted keeps the source-derived default
+  (`leads_default_channel` trigger), same as before W8.
+- `referredBy` (≤ 200 chars), `aboutClient` (≤ 2000 chars): stored in the new `referred_by` /
+  `about_client` columns (migration `20260925120000_lead_create_v2_fields`), named for reuse by
+  `PATCH /v1/leads/{leadId}/info` in W9.
+- `products` (`LeadProduct[]`): reuses the W4/W7 `products` column.
+- `estimatedBudgetText` (a number or a range, §3.7): reuses the W7 `estimated_budget_text` column;
+  its lower bound overrides `estimatedBudget`. `estimatedBudgetCurrency` still defaults to EUR when
+  omitted and no `estimatedBudgetText` is sent (unchanged v1 behaviour); when `estimatedBudgetText`
+  is sent and `estimatedBudgetCurrency` is omitted, the default is the office currency instead
+  (§3.7), matching `PATCH /v1/leads/{leadId}/info`.
+
+The client's request is the existing `initialMessage` (stored as `order_comment`, shown as the
+first timeline entry); showroom is the existing `officeId`. `Lead` (returned by create, get and
+list, via `to_jsonb(leads)`) gains `referred_by` and `about_client` for free since the read model
+already reflects every lead column.
+
 ### 3.4 Leads list
 
 `GET /v1/leads`, new optional query parameters (comma-separated, as the existing filters):
