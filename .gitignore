@@ -16,3 +16,4 @@
 # Supabase local
 supabase/.branches
 supabase/.temp
+supabase/signing_keys.json

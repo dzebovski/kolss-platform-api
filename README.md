@@ -23,6 +23,19 @@ go run ./cmd/api
 S3 credentials are optional and retained only for historical CRM attachment URLs.
 Health endpoints are `GET /health/live` and `GET /health/ready`.
 
+### Local stack (no production data)
+
+```bash
+supabase start               # local Postgres + Auth in Docker; first run: supabase db reset --local
+./scripts/dev-local.sh       # API on :8080 against the local stack only
+```
+
+`supabase/seed.sql` creates fictional users (`admin@kolss.local`, `kyiv@kolss.local`,
+`warsaw@kolss.local`, password `kolss-local-dev`) and leads. The CRM counterpart is
+`npm run start:local-stack` in `kolss-crm-angular` (`:4202`). Local Auth needs the gitignored
+ES256 key `supabase/signing_keys.json` (`supabase gen signing-key --algorithm ES256`, wrapped
+in a JSON array). Full rules: `../.agents/skills/how-to-dev-kolss/references/local-stack.md`.
+
 ## Contract, migrations, and Meta setup
 
 - OpenAPI 2.16: [`api/openapi.yaml`](./api/openapi.yaml)
