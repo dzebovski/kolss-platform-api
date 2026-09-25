@@ -87,6 +87,13 @@ type Permissions struct {
 	CanArchiveLeads     bool `json:"canArchiveLeads"`
 	CanRestoreLeads     bool `json:"canRestoreLeads"`
 	CanAskLeadQuestions bool `json:"canAskLeadQuestions"`
+	// CanChangeLeadManager is new (G4, D9, 2026-09-25): any office member may now change a
+	// lead's assigned manager through PATCH /v1/leads/{leadId}, not only super admin. v1's
+	// "Assign manager" dialog does not read this flag — it gates itself on the client-side role
+	// check isSuperAdminRole(profile.role) (lead-detail-page.ts canAssignManager), so v1 keeps
+	// showing that control to super admin only regardless of this value. Only the CRM v2 UI is
+	// meant to read it.
+	CanChangeLeadManager bool `json:"canChangeLeadManager"`
 }
 
 type MeResponse struct {

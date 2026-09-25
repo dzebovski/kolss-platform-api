@@ -1029,6 +1029,93 @@ func slicesEqual(a, b []string) bool {
 	return true
 }
 
+func TestResolveAssignedToID(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	idA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	idB := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
+	tests := []struct {
+		name         string
+		raw          *string
+		isSuperAdmin bool
+		current      *uuid.UUID
+		want         *uuid.UUID
+		wantErr      bool
+	}{
+		{
+			name: "super admin: omitted clears (unchanged)", raw: nil, isSuperAdmin: true, current: &idA, want: nil,
+		},
+		{
+			name: "super admin: empty string clears (unchanged)", raw: strPtr(""), isSuperAdmin: true, current: &idA, want: nil,
+		},
+		{
+			name: "super admin: uuid assigns (unchanged)", raw: strPtr(idB.String()), isSuperAdmin: true, current: &idA, want: &idB,
+		},
+		{
+			// G4 fix: Go can't tell "field absent" from an explicit JSON null on a plain
+			// *string, so office users must keep their current manager for either case,
+			// exactly as they did before G4 (they never touched assigned_to at all).
+			name: "office user: omitted keeps the current manager", raw: nil, isSuperAdmin: false, current: &idA, want: &idA,
+		},
+		{
+			name: "office user: omitted keeps unassigned", raw: nil, isSuperAdmin: false, current: nil, want: nil,
+		},
+		{
+			name: "office user: empty string clears", raw: strPtr(""), isSuperAdmin: false, current: &idA, want: nil,
+		},
+		{
+			name: "office user: uuid reassigns", raw: strPtr(idB.String()), isSuperAdmin: false, current: &idA, want: &idB,
+		},
+		{
+			name: "malformed uuid errors", raw: strPtr("not-a-uuid"), isSuperAdmin: false, current: &idA, wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := resolveAssignedToID(test.raw, test.isSuperAdmin, test.current)
+			if test.wantErr {
+				if err == nil {
+					t.Fatal("expected a parse error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !equalUUIDPtr(got, test.want) {
+				t.Fatalf("resolveAssignedToID(%v, %v, %v) = %v, want %v", test.raw, test.isSuperAdmin, test.current, got, test.want)
+			}
+		})
+	}
+}
+
+func TestRequiresLeadAssigneeCheck(t *testing.T) {
+	idA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	idB := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+
+	tests := []struct {
+		name         string
+		isSuperAdmin bool
+		current      *uuid.UUID
+		next         *uuid.UUID
+		want         bool
+	}{
+		{name: "super admin reassigning: no check (unchanged behaviour)", isSuperAdmin: true, current: &idA, next: &idB, want: false},
+		{name: "office user reassigning to someone new: check", isSuperAdmin: false, current: &idA, next: &idB, want: true},
+		{name: "office user echoing back the current assignee: no check", isSuperAdmin: false, current: &idA, next: &idA, want: false},
+		{name: "office user clearing the assignment: no check", isSuperAdmin: false, current: &idA, next: nil, want: false},
+		{name: "office user assigning from unassigned: check", isSuperAdmin: false, current: nil, next: &idB, want: true},
+		{name: "unassigned stays unassigned: no check", isSuperAdmin: false, current: nil, next: nil, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := requiresLeadAssigneeCheck(test.isSuperAdmin, test.current, test.next); got != test.want {
+				t.Fatalf("requiresLeadAssigneeCheck(%v, %v, %v) = %v, want %v", test.isSuperAdmin, test.current, test.next, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRatingFilterWhere(t *testing.T) {
 	addArg := func(value any) string {
 		return fmt.Sprintf("%q", value)

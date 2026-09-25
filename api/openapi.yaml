@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.26.0
+  version: 2.27.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -223,6 +223,16 @@ paths:
     patch:
       tags: [Leads]
       operationId: updateLead
+      description: >
+        assignedToId (task G4, decision D9): any actor who can edit the lead (office member,
+        office admin, curator, or super admin with office access) may set it, not only super
+        admin. Super admin's own behaviour is unchanged: omitted, null and "" all clear the
+        assignment, no membership check. For every other actor, assignedToId omitted or null
+        keeps the lead's current manager (unchanged from before this task); an explicit "" clears
+        it (no check, same as super admin); a uuid reassigns it and, when that differs from the
+        lead's current assignedToId, is checked against the same rule GET /v1/managers uses: the
+        new assignee must be an active, non-super_admin member of the lead's office, or the
+        request fails with 400 validation_error, field assignedToId.
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/IfMatch' }]
       requestBody:
@@ -239,6 +249,7 @@ paths:
                 type: object
                 required: [version]
                 properties: { version: { type: integer } }
+        '400': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/info:
     parameters: [{ $ref: '#/components/parameters/LeadId' }]
@@ -1273,7 +1284,7 @@ components:
         permissions:
           type: object
           additionalProperties: false
-          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks, canAskLeadQuestions]
+          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks, canAskLeadQuestions, canChangeLeadManager]
           properties:
             canManageUsers: { type: boolean }
             canEditLeadFields: { type: boolean }
@@ -1281,6 +1292,13 @@ components:
             canRestoreLeads: { type: boolean }
             canManageTasks: { type: boolean }
             canAskLeadQuestions: { type: boolean }
+            canChangeLeadManager:
+              type: boolean
+              description: >
+                New (task G4). Same office scope as canEditLeadFields; the actual gate is
+                PATCH /v1/leads/{leadId} (see its description). v1's "Assign manager" dialog does
+                not read this flag — it stays gated on the client-side super-admin role check, so
+                v1 behaviour is unchanged. Only the CRM v2 UI is meant to use this flag.
     LossReason:
       type: object
       required: [code, label_uk, label_pl]

@@ -46,6 +46,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		CanArchiveLeads:     actor.IsSuperAdmin() || actor.Role == "office_admin",
 		CanRestoreLeads:     actor.IsSuperAdmin(),
 		CanAskLeadQuestions: actor.IsSuperAdmin() || actor.Role == "office_admin" || actor.Role == "curator",
+		// G4: same office scope as CanEditLeadFields; handleUpdateLead is the actual gate
+		// (CanEditLead + an active-office-member check on the new assignee).
+		CanChangeLeadManager: actor.IsSuperAdmin() || len(actor.OfficeIDs) > 0,
 	}
 	writeJSON(w, http.StatusOK, response)
 }
