@@ -60,3 +60,53 @@ func (s *S3) PresignGet(ctx context.Context, in PresignGetInput) (PresignGetResu
 	}
 	return PresignGetResult{URL: out.URL, ExpiresAt: time.Now().UTC().Add(expires)}, nil
 }
+
+// PresignPut signs a direct browser-to-storage PUT (task W11). Pinning ContentType in the
+// signed input forces the uploader to send that exact Content-Type header, so the API's
+// server-derived content type (from the file extension, never trusted from the client as-is)
+// is what actually gets stored.
+func (s *S3) PresignPut(ctx context.Context, in PresignPutInput) (PresignPutResult, error) {
+	expires := in.Expires
+	if expires <= 0 {
+		expires = 10 * time.Minute
+	}
+	input := &s3.PutObjectInput{
+		Bucket: aws.String(in.Bucket),
+		Key:    aws.String(in.Key),
+	}
+	headers := map[string]string{}
+	if in.ContentType != "" {
+		input.ContentType = aws.String(in.ContentType)
+		headers["Content-Type"] = in.ContentType
+	}
+	out, err := s.presigner.PresignPutObject(ctx, input, s3.WithPresignExpires(expires))
+	if err != nil {
+		return PresignPutResult{}, err
+	}
+	method := out.Method
+	if method == "" {
+		method = "PUT"
+	}
+	return PresignPutResult{URL: out.URL, Method: method, Headers: headers, ExpiresAt: time.Now().UTC().Add(expires)}, nil
+}
+
+// HeadObject confirms an upload (task W11) exists and reads its actual size/content type. Any
+// error (including "not found") is reported as-is; the caller treats it uniformly as "the file
+// was not uploaded yet".
+func (s *S3) HeadObject(ctx context.Context, in HeadObjectInput) (HeadObjectResult, error) {
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(in.Bucket),
+		Key:    aws.String(in.Key),
+	})
+	if err != nil {
+		return HeadObjectResult{}, err
+	}
+	result := HeadObjectResult{}
+	if out.ContentLength != nil {
+		result.SizeBytes = *out.ContentLength
+	}
+	if out.ContentType != nil {
+		result.ContentType = *out.ContentType
+	}
+	return result, nil
+}

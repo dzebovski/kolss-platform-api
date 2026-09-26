@@ -107,6 +107,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Delete("/v1/leads/{leadId}/markers/{kind}", s.handleDeleteLeadMarker)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
 			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
+			r.Patch("/v1/leads/{leadId}/events/{eventId}/correction", s.handleCorrectEvent)
 			r.Post("/v1/leads/{leadId}/events/{eventId}/translate", s.handleTranslateEvent)
 			r.Post("/v1/leads/{leadId}/events/{eventId}/answer", s.handleAnswerLeadQuestion)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}/answer", s.handleUpdateLeadQuestionAnswer)
@@ -137,6 +138,9 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/settings/currency-rates", s.handleGetCurrencyRates)
 			r.Put("/v1/settings/currency-rates", s.handleUpdateCurrencyRates)
 			r.Get("/v1/files/{fileId}/download-url", s.handleFileDownloadURL)
+			r.Post("/v1/leads/{leadId}/documents/uploads", s.handleCreateDocumentUpload)
+			r.Get("/v1/leads/{leadId}/documents", s.handleListDocuments)
+			r.Post("/v1/leads/{leadId}/documents", s.handleConfirmDocument)
 		})
 
 		for _, pattern := range crmCORSRoutePatterns {
@@ -182,6 +186,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}/info",
 	"/v1/leads/{leadId}/markers/{kind}",
 	"/v1/leads/{leadId}/events/{eventId}",
+	"/v1/leads/{leadId}/events/{eventId}/correction",
 	"/v1/leads/{leadId}/events/{eventId}/translate",
 	"/v1/leads/{leadId}/events/{eventId}/answer",
 	"/v1/leads/{leadId}/events/{eventId}/answer/translate",
@@ -207,6 +212,8 @@ var crmCORSRoutePatterns = []string{
 	"/v1/reports/sales-funnel",
 	"/v1/settings/currency-rates",
 	"/v1/files/{fileId}/download-url",
+	"/v1/leads/{leadId}/documents/uploads",
+	"/v1/leads/{leadId}/documents",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {
