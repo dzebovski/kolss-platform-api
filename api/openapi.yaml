@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.30.0
+  version: 2.31.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -942,6 +942,40 @@ paths:
         '404': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
         '503': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/events/{eventId}/correction:
+    patch:
+      tags: [Leads]
+      operationId: correctLeadEvent
+      summary: Correct a timeline entry's type and/or comment (CRM v2 Edit timeline entry)
+      description: >
+        Only Successful call, Call later, No answer, Client thinking and Comment entries can be corrected.
+        The entry is rewritten in place and the original goes to new_value.corrections with the reason.
+        When the entry is the lead's latest status entry and the lead is not closed, the lead's status,
+        v1 call/client status, callback_due_at and no-answer counter follow the correction.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { name: eventId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LeadEventCorrectionRequest' }
+      responses:
+        '200':
+          description: Entry corrected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, version, leadStatusChanged]
+                properties:
+                  ok: { type: boolean }
+                  version: { type: integer }
+                  leadStatusChanged: { type: boolean }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
   /v1/files/{fileId}/download-url:
     get:
       tags: [Leads]
@@ -1221,6 +1255,21 @@ components:
         uploadedBy: { type: string, format: uuid }
         uploadedByName: { type: string }
         createdAt: { type: string, format: date-time }
+    LeadEventCorrectionRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        type:
+          type: string
+          enum: [success, later, noanswer, thinking, comment]
+          description: New entry type; must differ from the current one.
+        dueAt:
+          type: string
+          format: date-time
+          description: Required when type becomes later, noanswer or thinking; allowed alone to move the date of such an entry.
+        comment: { type: string, description: New comment; required (non-empty) for a comment entry. }
+        reason: { type: string, minLength: 1, maxLength: 1000, description: Why the entry is corrected; kept in the edit history. }
     CRMErrorResponse:
       type: object
       additionalProperties: false

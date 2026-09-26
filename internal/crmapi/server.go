@@ -107,6 +107,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Delete("/v1/leads/{leadId}/markers/{kind}", s.handleDeleteLeadMarker)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}", s.handleUpdateEvent)
 			r.Delete("/v1/leads/{leadId}/events/{eventId}", s.handleDeleteEvent)
+			r.Patch("/v1/leads/{leadId}/events/{eventId}/correction", s.handleCorrectEvent)
 			r.Post("/v1/leads/{leadId}/events/{eventId}/translate", s.handleTranslateEvent)
 			r.Post("/v1/leads/{leadId}/events/{eventId}/answer", s.handleAnswerLeadQuestion)
 			r.Patch("/v1/leads/{leadId}/events/{eventId}/answer", s.handleUpdateLeadQuestionAnswer)
@@ -185,6 +186,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/leads/{leadId}/info",
 	"/v1/leads/{leadId}/markers/{kind}",
 	"/v1/leads/{leadId}/events/{eventId}",
+	"/v1/leads/{leadId}/events/{eventId}/correction",
 	"/v1/leads/{leadId}/events/{eventId}/translate",
 	"/v1/leads/{leadId}/events/{eventId}/answer",
 	"/v1/leads/{leadId}/events/{eventId}/answer/translate",

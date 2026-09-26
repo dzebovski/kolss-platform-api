@@ -419,6 +419,26 @@ Prerequisite in prod: the API's `SUPABASE_S3_*` variables must be set (otherwise
 answer `503 file_unavailable`), and Supabase Storage must accept the browser's cross-origin PUT to the
 presigned URL — check once with a real upload after the deploy.
 
+### 3.5c Timeline entry correction (task W12, OpenAPI 2.31.0)
+
+`PATCH /v1/leads/{leadId}/events/{eventId}/correction` `{type?, dueAt?, comment?, reason}` for the Edit
+timeline entry board. Same permission as the existing event edit (super admin, or the entry's author
+with office access).
+- Correctable entries: Successful call, Call later, No answer (`call_status_changed`), Client thinking
+  (`client_status_changed` / `thinking`), Comment (`comment_added`). Invited, Lost and other entries → `400 event_not_correctable`.
+- `type` must differ from the current one; later / noanswer / thinking need `dueAt`; a comment entry
+  needs a non-empty comment; `reason` is always required.
+- The entry is rewritten in place (type, category, status code, comment, v2 details); the original
+  values, the reason, who and when go to `new_value.corrections[]` (the edit history; v2 shows "Edited").
+  A changed comment also sets v1's `edit_audit` (`message`), so v1 shows it as edited.
+- **Lead status (decision, confirm on review):** only when the entry is the lead's latest status entry
+  and the lead is not closed. The old type is undone from the entry's own `old_value` (previous call /
+  client status), the new type is applied like the `v2_status` activity (v1 mirror, `callback_due_at`
+  = `dueAt`), the no-answer counter follows (−1 / +1), `v2_status` is derived again. A comment turned
+  into a status becomes the latest status entry only when it is newer than the current one. Older
+  entries change only the history. The same-type date change on the latest entry moves `callback_due_at`.
+- No migration; no v1 fallback needed (event types and categories stay the existing ones).
+
 ### 3.6 v1 activities also set `v2_status`
 
 `call_status` / `client_status` / `reopen` activities from v1 update `v2_status` and
