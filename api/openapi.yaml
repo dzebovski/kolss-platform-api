@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.29.0
+  version: 2.30.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -869,6 +869,79 @@ paths:
               schema: { $ref: '#/components/schemas/CurrencyRateSet' }
         '400': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/documents/uploads:
+    post:
+      tags: [Leads]
+      operationId: createLeadDocumentUpload
+      summary: Start a document upload (CRM v2 Add documents, step 1)
+      description: >
+        Validates the file name and declared size (PDF, JPG, PNG, HEIC, DWG; at most 25 MB), creates a
+        pending document and returns a short-lived presigned URL. The browser uploads the file bytes
+        directly to storage with that method and headers, then confirms with POST /v1/leads/{leadId}/documents.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/LeadId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateLeadDocumentUploadRequest' }
+      responses:
+        '200':
+          description: Presigned upload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadDocumentUpload' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '503': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/documents:
+    get:
+      tags: [Leads]
+      operationId: listLeadDocuments
+      summary: Confirmed documents of a lead, newest first
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/LeadId' }]
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/LeadDocument' } }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    post:
+      tags: [Leads]
+      operationId: confirmLeadDocument
+      summary: Confirm an uploaded document (step 2)
+      description: >
+        Checks that the object exists in storage and its real size, marks the document ready and writes one
+        `attachment` timeline event with the tag and the optional note. Downloads use
+        GET /v1/files/{fileId}/download-url with the document id.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfirmLeadDocumentRequest' }
+      responses:
+        '201':
+          description: Document confirmed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadDocument' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '503': { $ref: '#/components/responses/CRMError' }
   /v1/files/{fileId}/download-url:
     get:
       tags: [Leads]
@@ -1102,6 +1175,52 @@ components:
           maxItems: 50
           items: { $ref: '#/components/schemas/DashboardTask' }
         nextCursor: { type: [string, 'null'] }
+    LeadDocumentTag:
+      type: string
+      description: File type tag of the Add documents board.
+      enum: [plan, photo, drawing, estimate, other]
+    CreateLeadDocumentUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [fileName, sizeBytes]
+      properties:
+        fileName: { type: string, minLength: 1, description: 'Extension decides the type: pdf, jpg, jpeg, png, heic, dwg.' }
+        sizeBytes: { type: integer, minimum: 1, maximum: 26214400 }
+    LeadDocumentUpload:
+      type: object
+      required: [attachmentId, uploadUrl, method, headers, expiresAt]
+      properties:
+        attachmentId: { type: string, format: uuid }
+        uploadUrl: { type: string, format: uri }
+        method: { type: string, examples: [PUT] }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          description: Headers the upload request must send as-is (Content-Type is pinned by the signature).
+        expiresAt: { type: string, format: date-time }
+    ConfirmLeadDocumentRequest:
+      type: object
+      additionalProperties: false
+      required: [attachmentId]
+      properties:
+        attachmentId: { type: string, format: uuid }
+        tag:
+          oneOf: [{ type: string, const: '' }, { $ref: '#/components/schemas/LeadDocumentTag' }]
+        note: { type: string, maxLength: 1000, description: Optional note for the timeline. }
+    LeadDocument:
+      type: object
+      additionalProperties: false
+      required: [id, fileName, mimeType, sizeBytes, tag, uploadedBy, uploadedByName, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        fileName: { type: string }
+        mimeType: { type: string }
+        sizeBytes: { type: integer }
+        tag:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/LeadDocumentTag' }]
+        uploadedBy: { type: string, format: uuid }
+        uploadedByName: { type: string }
+        createdAt: { type: string, format: date-time }
     CRMErrorResponse:
       type: object
       additionalProperties: false

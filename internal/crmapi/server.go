@@ -137,6 +137,9 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/settings/currency-rates", s.handleGetCurrencyRates)
 			r.Put("/v1/settings/currency-rates", s.handleUpdateCurrencyRates)
 			r.Get("/v1/files/{fileId}/download-url", s.handleFileDownloadURL)
+			r.Post("/v1/leads/{leadId}/documents/uploads", s.handleCreateDocumentUpload)
+			r.Get("/v1/leads/{leadId}/documents", s.handleListDocuments)
+			r.Post("/v1/leads/{leadId}/documents", s.handleConfirmDocument)
 		})
 
 		for _, pattern := range crmCORSRoutePatterns {
@@ -207,6 +210,8 @@ var crmCORSRoutePatterns = []string{
 	"/v1/reports/sales-funnel",
 	"/v1/settings/currency-rates",
 	"/v1/files/{fileId}/download-url",
+	"/v1/leads/{leadId}/documents/uploads",
+	"/v1/leads/{leadId}/documents",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {
