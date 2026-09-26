@@ -895,6 +895,57 @@ func isLeadChannelForCreate(value string) bool {
 	}
 }
 
+// resolveAssignedToID computes the next assigned_to from UpdateLeadRequest.assignedToId (G4,
+// D9). Super admin keeps its exact original semantics (Rule zero): an omitted/null or empty
+// assignedToId always clears the assignment, a UUID string assigns it. Go's plain *string field
+// cannot tell "field absent" from an explicit JSON null (both decode to a nil pointer), so for
+// every other actor a nil pointer instead means "keep the lead's current assignee" — before G4
+// they could edit a lead without touching its manager at all, and that must keep working; only
+// an explicit empty string clears it for them. A UUID string reassigns for either actor. Pure
+// logic, no DB access, so it is unit-testable on its own (see TestResolveAssignedToID).
+func resolveAssignedToID(raw *string, isSuperAdmin bool, current *uuid.UUID) (*uuid.UUID, error) {
+	if raw == nil {
+		if isSuperAdmin {
+			return nil, nil
+		}
+		return current, nil
+	}
+	trimmed := strings.TrimSpace(*raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(trimmed)
+	if err != nil {
+		return nil, err
+	}
+	return &id, nil
+}
+
+// equalUUIDPtr reports whether two optional UUIDs hold the same value.
+func equalUUIDPtr(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// requiresLeadAssigneeCheck reports whether handleUpdateLead must verify the new assignee is an
+// active member of the lead's office (G4, D9, 2026-09-25): only for a non-super-admin actor who
+// is actually reassigning the lead to someone new, not for a super admin (unchanged, Rule zero)
+// and not when the request merely echoes back the current assignee (the v1 Edit lead dialog
+// always sends the lead's current assignedToId, so this keeps that request working unchanged).
+// Pure decision logic, extracted for TestRequiresLeadAssigneeCheck.
+func requiresLeadAssigneeCheck(isSuperAdmin bool, current, next *uuid.UUID) bool {
+	return !isSuperAdmin && next != nil && !equalUUIDPtr(current, next)
+}
+
+// validateLeadAssignee checks the same rule GET /v1/managers and the comment "Assign to" (D5)
+// use: an active, non-super_admin profile that belongs to the lead's office (G4). Reuses
+// validateCommentAssignee's query instead of inventing a new one.
+func validateLeadAssignee(r *http.Request, tx pgx.Tx, assigneeID, officeID uuid.UUID) error {
+	return validateCommentAssignee(r, tx, assigneeID, officeID)
+}
+
 type updateLeadRequest struct {
 	Name                    string   `json:"name"`
 	Phone                   string   `json:"phone"`
@@ -963,24 +1014,12 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil)
 		return
 	}
-	var assignedTo *uuid.UUID
-	if actor.IsSuperAdmin() {
-		if req.AssignedToID != nil && strings.TrimSpace(*req.AssignedToID) != "" {
-			id, parseErr := uuid.Parse(*req.AssignedToID)
-			if parseErr != nil {
-				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil)
-				return
-			}
-			assignedTo = &id
-		}
-	} else {
-		for _, field := range req.EditedFields {
-			if field == "manager" {
-				s.writeError(w, r, http.StatusForbidden, "lead_assign_forbidden", "Manager assignment is not allowed", nil)
-				return
-			}
-		}
-		assignedTo = currentAssignedTo
+	// G4 (D9, 2026-09-25): any actor who can edit the lead may now set assignedToId, not only
+	// super admin. Super admin keeps its exact previous behaviour (no office-membership check).
+	assignedTo, parseErr := resolveAssignedToID(req.AssignedToID, actor.IsSuperAdmin(), currentAssignedTo)
+	if parseErr != nil {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid assigned manager", nil)
+		return
 	}
 	tx, err := s.pool.Begin(r.Context())
 	if err != nil {
@@ -988,6 +1027,18 @@ func (s *Server) handleUpdateLead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if requiresLeadAssigneeCheck(actor.IsSuperAdmin(), currentAssignedTo, assignedTo) {
+		if err := validateLeadAssignee(r, tx, *assignedTo, officeID); err != nil {
+			if errors.Is(err, errCommentAssigneeInvalid) {
+				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", map[string]string{
+					"assignedToId": "Must be an active member of the lead's office",
+				})
+				return
+			}
+			s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not verify assigned manager", nil)
+			return
+		}
+	}
 	budgetRateSetID := currentBudgetRateSetID
 	budgetChanged := !optionalFloatEqual(currentBudget, req.EstimatedBudget) || budgetCurrency != currentBudgetCurrency
 	if budgetChanged {

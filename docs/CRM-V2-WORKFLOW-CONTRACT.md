@@ -243,6 +243,28 @@ first timeline entry); showroom is the existing `officeId`. `Lead` (returned by 
 list, via `to_jsonb(leads)`) gains `referred_by` and `about_client` for free since the read model
 already reflects every lead column.
 
+### 3.3b Manager can be changed by any office user (task G4, decision D9)
+
+`PATCH /v1/leads/{leadId}` (`UpdateLeadRequest.assignedToId`) is no longer super-admin-only.
+Every actor who passes `actor.CanEditLead(officeID)` may set it. Super admin keeps its exact
+previous behaviour (no server-side check on the assignee at all; omitted, `null` and `""` all
+clear). For every other actor, `assignedToId` omitted or `null` **keeps the lead's current
+manager** — before this task they could not touch `assigned_to` at all, so this preserves that
+(Rule zero; Go's plain `*string` field can't tell an absent JSON key from an explicit `null`, so
+both decode to `nil` and both mean "keep" for a non-super-admin actor, see
+`resolveAssignedToID`); an explicit `""` clears it, with no check, same as super admin; a uuid
+reassigns it and, when that differs from the lead's current `assigned_to` (the v1 Edit lead
+dialog always echoes back the unchanged current value, so that request path is unaffected), is
+checked with the same rule `GET /v1/managers` and the comment "Assign to" (D5,
+`commentAssigneeExistsQuery`) already use: the new assignee must be an active, non-`super_admin`
+profile that belongs to the lead's office, else `400 validation_error` on `assignedToId`.
+
+`/v1/me` gains `permissions.canChangeLeadManager` (same office scope as `canEditLeadFields`) for
+the v2 UI. v1's own "Assign manager" dialog (`lead-detail-page.ts canAssignManager`) does not
+read `/v1/me` permissions for this feature at all — it gates itself on the client-side role check
+`isSuperAdminRole(profile.role)`, so v1 keeps showing that control to super admin only and its
+behaviour is unchanged by this task.
+
 ### 3.4 Leads list
 
 `GET /v1/leads`, new optional query parameters (comma-separated, as the existing filters):
