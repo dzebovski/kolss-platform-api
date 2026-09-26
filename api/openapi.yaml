@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.25.0
+  version: 2.26.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1369,6 +1369,8 @@ components:
         no_answer_attempts: { type: integer, minimum: 0, description: No answer results since the last successful call (v2 only). }
         estimated_budget_text: { type: [string, 'null'], maxLength: 60, description: 'Budget as typed: a number or a range. estimated_budget holds its lower bound.' }
         products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
+        referred_by: { type: [string, 'null'], maxLength: 200, description: 'CRM v2 Create lead "Referred by" field (task W8).' }
+        about_client: { type: [string, 'null'], maxLength: 2000, description: CRM v2 Create lead "About the client" free text (task W8). }
         material_fronts: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
         material_worktop: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
         material_appliances: { type: [string, 'null'], maxLength: 200, description: CRM v2 lead info. }
@@ -2026,6 +2028,22 @@ components:
           pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$'
           example: '2026-07-20T12:00'
           description: Lead source date and time in the selected office's local timezone.
+        # CRM v2 Create lead popup fields (task W8); all optional, v1 keeps working unchanged.
+        channel:
+          $ref: '#/components/schemas/LeadChannel'
+          description: >
+            CRM v2 channel. "other" is not accepted here (legacy display-only value). When
+            omitted, the channel defaults from source as before (see the Lead schema note).
+        referredBy: { type: string, maxLength: 200 }
+        products: { type: array, items: { $ref: '#/components/schemas/LeadProduct' } }
+        estimatedBudgetText:
+          type: string
+          maxLength: 60
+          description: >
+            A number or a range ("20 000 – 25 000"), see contract §3.7. Its lower bound overrides
+            estimatedBudget. estimatedBudgetCurrency defaults to the office currency when omitted
+            and this field is sent, instead of EUR.
+        aboutClient: { type: string, maxLength: 2000 }
     UpdateLeadRequest:
       type: object
       additionalProperties: false

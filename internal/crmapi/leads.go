@@ -631,6 +631,48 @@ type createLeadRequest struct {
 	EstimatedBudgetCurrency *string   `json:"estimatedBudgetCurrency"`
 	InitialMessage          string    `json:"initialMessage"`
 	SourceCreatedAtLocal    string    `json:"sourceCreatedAtLocal"`
+	// CRM v2 Create lead popup fields (task W8); all optional, v1 create requests omit them.
+	Channel             *string  `json:"channel"`
+	ReferredBy          *string  `json:"referredBy"`
+	Products            []string `json:"products"`
+	EstimatedBudgetText *string  `json:"estimatedBudgetText"`
+	AboutClient         *string  `json:"aboutClient"`
+}
+
+const (
+	maxReferredByLength  = 200
+	maxAboutClientLength = 2000
+)
+
+// validateCreateLead checks the optional CRM v2 Create lead fields (task W8). The existing v1
+// fields keep their own inline checks in handleCreateLead so v1 behaviour is unchanged.
+func validateCreateLead(req createLeadRequest) map[string]string {
+	fields := map[string]string{}
+	if req.Channel != nil && !isLeadChannelForCreate(*req.Channel) {
+		fields["channel"] = "Must be referral, phone, office, website, meta_ads, or google_ads"
+	}
+	if req.Products != nil {
+		for _, product := range req.Products {
+			if _, ok := leadProducts[product]; !ok {
+				fields["products"] = "Must be kitchen, wardrobe, furniture, bathroom, hallway, or other"
+				break
+			}
+		}
+	}
+	if req.EstimatedBudgetText != nil {
+		if text := strings.TrimSpace(*req.EstimatedBudgetText); text != "" {
+			if _, ok := parseBudgetText(text); !ok {
+				fields["estimatedBudgetText"] = "Must be a number or a range, up to 60 characters"
+			}
+		}
+	}
+	if req.ReferredBy != nil && len([]rune(strings.TrimSpace(*req.ReferredBy))) > maxReferredByLength {
+		fields["referredBy"] = "Must be at most 200 characters"
+	}
+	if req.AboutClient != nil && len([]rune(strings.TrimSpace(*req.AboutClient))) > maxAboutClientLength {
+		fields["aboutClient"] = "Must be at most 2000 characters"
+	}
+	return fields
 }
 
 const sourceCreatedAtLocalLayout = "2006-01-02T15:04"
@@ -642,8 +684,9 @@ const createLeadInsertQuery = `
 			source_created_at,
 			name, phone, email, city_region, product_interest,
 			estimated_budget, estimated_budget_currency, estimated_budget_rate_set_id,
-			order_comment
-		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			order_comment,
+			channel, referred_by, products, estimated_budget_text, about_client
+		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		on conflict (source_system,external_lead_id) do nothing
 		returning *
 	)
@@ -695,6 +738,11 @@ func createLeadInsertArgs(
 		budgetCurrency,
 		budgetRateSetID,
 		clean(req.InitialMessage),
+		req.Channel,
+		cleanPtr(req.ReferredBy),
+		uniqueStrings(req.Products),
+		cleanPtr(req.EstimatedBudgetText),
+		cleanPtr(req.AboutClient),
 	}
 }
 
@@ -735,6 +783,18 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if fields := validateCreateLead(req); len(fields) > 0 {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead data", fields)
+		return
+	}
+	// CRM v2 free-text budget (contract §3.7): its lower bound overrides the numeric
+	// estimatedBudget field so v1 and reports keep a numeric value. v1 never sends this field.
+	budgetText := cleanPtr(req.EstimatedBudgetText)
+	if budgetText != nil {
+		lower, _ := parseBudgetText(*budgetText) // already validated above
+		req.EstimatedBudget = &lower
+		req.EstimatedBudgetText = budgetText
+	}
 	budgetCurrency := currencyEUR
 	if req.EstimatedBudgetCurrency != nil {
 		var valid bool
@@ -757,6 +817,10 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 	if err := tx.QueryRow(r.Context(), `select code from public.offices where id = $1`, req.OfficeID).Scan(&officeCode); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "lead_create_failed", "Could not load lead office", nil)
 		return
+	}
+	if req.EstimatedBudgetCurrency == nil && budgetText != nil {
+		// Contract §3.7: the free-text budget defaults to the office currency, not EUR.
+		budgetCurrency = officeBudgetCurrency(officeCode)
 	}
 	sourceCreatedAt, err := parseSourceCreatedAtLocal(req.SourceCreatedAtLocal, officeCode)
 	if err != nil {
@@ -813,6 +877,18 @@ func (s *Server) handleCreateLead(w http.ResponseWriter, r *http.Request) {
 func isLeadChannel(value string) bool {
 	switch value {
 	case "referral", "phone", "office", "website", "meta_ads", "google_ads", "other":
+		return true
+	default:
+		return false
+	}
+}
+
+// isLeadChannelForCreate is isLeadChannel without "other": that value marks the legacy Google
+// Sheet import for display only (contract §2, §6.11) and is not a channel a manager can pick
+// when creating a new lead.
+func isLeadChannelForCreate(value string) bool {
+	switch value {
+	case "referral", "phone", "office", "website", "meta_ads", "google_ads":
 		return true
 	default:
 		return false

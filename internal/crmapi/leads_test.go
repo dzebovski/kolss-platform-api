@@ -901,6 +901,134 @@ func TestManualLeadCreationUsesSelectedSourceTimestamp(t *testing.T) {
 	}
 }
 
+func TestIsLeadChannelForCreateRejectsOther(t *testing.T) {
+	for _, value := range []string{"referral", "phone", "office", "website", "meta_ads", "google_ads"} {
+		if !isLeadChannelForCreate(value) {
+			t.Errorf("isLeadChannelForCreate(%q) = false, want true", value)
+		}
+	}
+	for _, value := range []string{"other", "", "unknown"} {
+		if isLeadChannelForCreate(value) {
+			t.Errorf("isLeadChannelForCreate(%q) = true, want false", value)
+		}
+	}
+}
+
+func TestValidateCreateLead(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+	longReferredBy := strings.Repeat("a", maxReferredByLength+1)
+	longAboutClient := strings.Repeat("a", maxAboutClientLength+1)
+
+	tests := []struct {
+		name       string
+		req        createLeadRequest
+		wantFields []string
+	}{
+		{name: "all omitted is valid"},
+		{
+			name: "valid v2 fields",
+			req: createLeadRequest{
+				Channel:             strPtr("website"),
+				ReferredBy:          strPtr("Jan Kowalski"),
+				Products:            []string{"kitchen", "wardrobe"},
+				EstimatedBudgetText: strPtr("20 000 – 25 000"),
+				AboutClient:         strPtr("Renovating a two-room flat."),
+			},
+		},
+		{
+			name:       "other is rejected for create",
+			req:        createLeadRequest{Channel: strPtr("other")},
+			wantFields: []string{"channel"},
+		},
+		{
+			name:       "unknown product",
+			req:        createLeadRequest{Products: []string{"garage"}},
+			wantFields: []string{"products"},
+		},
+		{
+			name:       "unparseable budget text",
+			req:        createLeadRequest{EstimatedBudgetText: strPtr("not a number")},
+			wantFields: []string{"estimatedBudgetText"},
+		},
+		{
+			name:       "referredBy too long",
+			req:        createLeadRequest{ReferredBy: strPtr(longReferredBy)},
+			wantFields: []string{"referredBy"},
+		},
+		{
+			name:       "aboutClient too long",
+			req:        createLeadRequest{AboutClient: strPtr(longAboutClient)},
+			wantFields: []string{"aboutClient"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fields := validateCreateLead(test.req)
+			if len(fields) != len(test.wantFields) {
+				t.Fatalf("validateCreateLead(%+v) = %v, want fields %v", test.req, fields, test.wantFields)
+			}
+			for _, key := range test.wantFields {
+				if _, ok := fields[key]; !ok {
+					t.Fatalf("validateCreateLead(%+v) = %v, want error on %q", test.req, fields, key)
+				}
+			}
+		})
+	}
+}
+
+func TestCreateLeadInsertArgsIncludesV2Fields(t *testing.T) {
+	officeID := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	rateSetID := uuid.MustParse("22222222-2222-2222-2222-222222222222")
+	channel := "website"
+	referredBy := "  Jan Kowalski  "
+	budgetText := "20 000"
+	aboutClient := "  Wants a modern kitchen.  "
+	req := createLeadRequest{
+		OfficeID:            officeID,
+		Name:                "Anna",
+		Phone:               "+48123456789",
+		Channel:             &channel,
+		ReferredBy:          &referredBy,
+		Products:            []string{"kitchen", "kitchen", "wardrobe"},
+		EstimatedBudgetText: &budgetText,
+		AboutClient:         &aboutClient,
+	}
+
+	args := createLeadInsertArgs(req, "manual", "office", "crm:external", time.Now().UTC(), "PLN", &rateSetID)
+	if len(args) != 19 {
+		t.Fatalf("len(args) = %d, want 19", len(args))
+	}
+	if got := args[14]; got != &channel {
+		t.Fatalf("channel arg = %#v, want %#v", got, &channel)
+	}
+	if got, ok := args[15].(*string); !ok || got == nil || *got != "Jan Kowalski" {
+		t.Fatalf("referredBy arg = %#v, want trimmed \"Jan Kowalski\"", args[15])
+	}
+	products, ok := args[16].([]string)
+	if !ok || !slicesEqual(products, []string{"kitchen", "wardrobe"}) {
+		t.Fatalf("products arg = %#v, want deduplicated [kitchen wardrobe]", args[16])
+	}
+	if got, ok := args[17].(*string); !ok || got == nil || *got != "20 000" {
+		t.Fatalf("estimatedBudgetText arg = %#v, want \"20 000\"", args[17])
+	}
+	if got, ok := args[18].(*string); !ok || got == nil || *got != "Wants a modern kitchen." {
+		t.Fatalf("aboutClient arg = %#v, want trimmed value", args[18])
+	}
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestRatingFilterWhere(t *testing.T) {
 	addArg := func(value any) string {
 		return fmt.Sprintf("%q", value)
