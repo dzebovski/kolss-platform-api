@@ -1,8 +1,8 @@
 # CRM v2 workflow — contract (W1)
 
-Status: **approved by the user 2026-09-24** (answers in §6). Nothing here is implemented yet;
-`api/openapi.yaml` stays at 2.19.0 until the W tasks land. Implementation tasks: W2–W6 in the CRM v2 roadmap
-(`web/.agents/skills/how-to-dev-kolss/references/crm-v2-roadmap.md`).
+Status: **approved by the user 2026-09-24** (answers in §6). Implemented and deployed as W2–W12
+(OpenAPI 2.20.0 → 2.31.0, 2026-09-24…26). Task status: `web/.agents/skills/how-to-dev-kolss/references/crm-v2-tasks.md`;
+decisions: `crm-v2-context.md` in the same folder.
 
 Sources: lead card v1.3 design (popups, JS state model), leads list design, the KOLSS CRM design
 system README, decisions D1–D6 in the roadmap, and the current code (`internal/crmapi/activities.go`,
