@@ -108,10 +108,8 @@ func (s *Server) listActorOffices(r *http.Request, actor Actor, all bool) ([]Off
 
 func (s *Server) handleLossReasons(w http.ResponseWriter, r *http.Request) {
 	// is_v2 (task W10, D12): which codes the CRM v2 "Lost" popup may offer, data-driven so the
-	// list can grow/shrink without a deploy. label_en stays unselected here (pre-existing gap:
-	// documented in the OpenAPI Lead schema since W5 but never wired into this handler; out of
-	// scope for W10).
-	rows, err := s.pool.Query(r.Context(), `select code, label_uk, label_pl, is_v2 from public.loss_reasons order by code`)
+	// list can grow/shrink without a deploy. label_en (task TD2) is nullable: set only for v2 codes.
+	rows, err := s.pool.Query(r.Context(), `select code, label_uk, label_pl, label_en, is_v2 from public.loss_reasons order by code`)
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "loss_reasons_load_failed", "Could not load loss reasons", nil)
 		return
@@ -120,12 +118,13 @@ func (s *Server) handleLossReasons(w http.ResponseWriter, r *http.Request) {
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var code, labelUK, labelPL string
+		var labelEN *string
 		var isV2 bool
-		if err := rows.Scan(&code, &labelUK, &labelPL, &isV2); err != nil {
+		if err := rows.Scan(&code, &labelUK, &labelPL, &labelEN, &isV2); err != nil {
 			s.writeError(w, r, http.StatusInternalServerError, "loss_reasons_load_failed", "Could not load loss reasons", nil)
 			return
 		}
-		items = append(items, map[string]any{"code": code, "label_uk": labelUK, "label_pl": labelPL, "is_v2": isV2})
+		items = append(items, map[string]any{"code": code, "label_uk": labelUK, "label_pl": labelPL, "label_en": labelEN, "is_v2": isV2})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
