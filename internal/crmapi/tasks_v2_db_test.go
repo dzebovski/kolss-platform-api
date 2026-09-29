@@ -49,9 +49,16 @@ func TestTasksV2DB(t *testing.T) {
 		return Actor{ID: id, Role: "office_member", IsActive: true, DisplayName: ptr(name), OfficeIDs: map[uuid.UUID]struct{}{officeID: {}}}
 	}
 	anna, boris, carol := newUser("Anna"), newUser("Boris"), newUser("Carol")
+	curator := newUser("Curator")
+	curator.Role = "curator"
 	admin := Actor{ID: uuid.New(), Role: "super_admin", IsActive: true}
 	mustExec(t, pool, `insert into auth.users (id, email) values ($1, $2)`, admin.ID, admin.ID.String()+"@test.local")
 	mustExec(t, pool, `insert into public.profiles (id, display_name) values ($1, 'Admin') on conflict (id) do nothing`, admin.ID)
+	// A real super admin has the role in the database (no office membership). The role guard
+	// trigger blocks the change outside an admin session, so switch it off for this fixture.
+	mustExec(t, pool, `alter table public.profiles disable trigger profiles_guard_sensitive_fields`)
+	mustExec(t, pool, `update public.profiles set role='super_admin' where id=$1`, admin.ID)
+	mustExec(t, pool, `alter table public.profiles enable trigger profiles_guard_sensitive_fields`)
 
 	call := func(actor Actor, handler http.HandlerFunc, method, target, body string, pathValues map[string]string, headers map[string]string) (int, map[string]any) {
 		req := httptest.NewRequest(method, target, strings.NewReader(body))
@@ -71,9 +78,6 @@ func TestTasksV2DB(t *testing.T) {
 	key := func() map[string]string { return map[string]string{"Idempotency-Key": uuid.NewString()} }
 
 	// Task list: created by the admin (owner defaults to the actor), colour assigned from the palette.
-	// Profile roles cannot be changed in the database, so the admin is a super admin only in Go; a
-	// membership satisfies the owner check (a real super admin passes it by role).
-	mustExec(t, pool, `insert into public.user_office_memberships (user_id, office_id) values ($1,$2)`, admin.ID, officeID)
 	code, list := call(admin, server.handleCreateTaskList, http.MethodPost, "/v1/task-lists", `{"name":"  Expo 2026  ","description":"Fair","datesText":"12–15 Nov"}`, nil, key())
 	if code != http.StatusCreated || list["name"] != "Expo 2026" || list["ownerId"] != admin.ID.String() || !strings.HasPrefix(list["color"].(string), "#") {
 		t.Fatalf("create list: %d %v", code, list)
@@ -124,6 +128,9 @@ func TestTasksV2DB(t *testing.T) {
 		t.Fatalf("project links are not available yet: %d %v", code, out)
 	}
 
+	patch := func(actor Actor, id string, version int, body string) (int, map[string]any) {
+		return call(actor, server.handleUpdateTask, http.MethodPatch, "/v1/tasks/x", body, map[string]string{"taskId": id}, map[string]string{"If-Match": string(rune('0' + version))})
+	}
 	feed := func(actor Actor, query string) []string {
 		code, out := call(actor, server.handleListTasks, http.MethodGet, "/v1/tasks?"+query, "", nil, nil)
 		if code != http.StatusOK {
@@ -151,7 +158,23 @@ func TestTasksV2DB(t *testing.T) {
 	equal(feed(carol, "view=my_day"))
 	equal(feed(carol, "view=list&listId="+listID), "Book hotel") // lists are visible to everyone
 	if code, _ := call(anna, server.handleListTasks, http.MethodGet, "/v1/tasks?view=all", "", nil, nil); code != http.StatusForbidden {
-		t.Fatalf("view=all is for admins: %d", code)
+		t.Fatalf("view=all is not for members: %d", code)
+	}
+	if got := feed(curator, "view=all&assigneeId="+boris.ID.String()); strings.Join(got, "|") != "Boris only" {
+		t.Fatalf("a curator sees All tasks in their office: %v", got)
+	}
+	// A super admin can hold tasks, with no office membership, and sees them in their own My day.
+	adminTask := mk(anna, admin, `,"title":"For the admin","dueDate":"`+day(0)+`"`)
+	equal(feed(admin, "view=my_day&kinds=personal"), "For the admin")
+	code, detail0 := call(admin, server.handleGetTask, http.MethodGet, "/v1/tasks/x", "", map[string]string{"taskId": adminTask}, nil)
+	if code != http.StatusOK || detail0["assigneeId"] != admin.ID.String() {
+		t.Fatalf("super admin assignee: %d %v", code, detail0)
+	}
+	if code, out := patch(anna, adminTask, 1, `{"assigneeId":"`+anna.ID.String()+`"}`); code != http.StatusOK {
+		t.Fatalf("reassign from the super admin: %d %v", code, out)
+	}
+	if code, out := patch(anna, adminTask, 2, `{"assigneeId":"`+admin.ID.String()+`"}`); code != http.StatusOK {
+		t.Fatalf("reassign to a super admin: %d %v", code, out)
 	}
 	if got := feed(admin, "view=all&assigneeId="+boris.ID.String()); strings.Join(got, "|") != "Boris only" {
 		t.Fatalf("admin all/assignee: %v", got)
@@ -171,9 +194,6 @@ func TestTasksV2DB(t *testing.T) {
 		t.Fatalf("linked detail: %d %v", code, detail)
 	}
 
-	patch := func(actor Actor, id string, version int, body string) (int, map[string]any) {
-		return call(actor, server.handleUpdateTask, http.MethodPatch, "/v1/tasks/x", body, map[string]string{"taskId": id}, map[string]string{"If-Match": string(rune('0' + version))})
-	}
 	// In progress, then done clears it, reopening starts at To do.
 	if code, out := patch(anna, today, 1, `{"inProgress":true}`); code != http.StatusOK || out["inProgress"] != true || out["version"] != float64(2) {
 		t.Fatalf("in progress: %d %v", code, out)
@@ -230,8 +250,8 @@ func TestTasksV2DB(t *testing.T) {
 		t.Fatalf("list detail: %d %v", code, out)
 	}
 
-	// Automatic items join the feed read-only: a lead with nothing planned is "no next step" due
-	// today, a scheduled showroom visit is a "visit" at its local time.
+	// Automatic items join the feed read-only: a scheduled showroom visit is a "visit" at its local
+	// time. "No next step" items are switched off (taskFeedIncludeNoNextStep) and come back with it.
 	autoLead := uuid.New()
 	mustExec(t, pool, `insert into public.leads (id, office_id, external_lead_id, name, phone, assigned_to) values ($1,$2,$3,'Auto lead','+48600000003',$4)`, autoLead, officeID, autoLead.String(), anna.ID)
 	visitAt, err := time.ParseInLocation(taskDateLayout+" 15:04", day(1)+" 12:00", location)
@@ -248,16 +268,19 @@ func TestTasksV2DB(t *testing.T) {
 	if visit["source"] != "appointment" || visit["subKind"] != "showroom" || visit["canManage"] != false || visit["dueTime"] == nil || visit["title"] != nil {
 		t.Fatalf("visit item: %v", visit)
 	}
-	code, out = call(anna, server.handleListTasks, http.MethodGet, "/v1/tasks?view=my_day&kinds=nonext", "", nil, nil)
-	autoItems, _ = out["items"].([]any)
-	if code != http.StatusOK || len(autoItems) != 0 {
-		t.Fatalf("a lead with a scheduled visit has a next step: %d %v", code, out)
-	}
 	mustExec(t, pool, `update public.lead_showroom_visits set status='canceled' where lead_id=$1`, autoLead)
 	code, out = call(anna, server.handleListTasks, http.MethodGet, "/v1/tasks?view=my_day&kinds=nonext", "", nil, nil)
 	autoItems, _ = out["items"].([]any)
-	if code != http.StatusOK || len(autoItems) != 1 || autoItems[0].(map[string]any)["subKind"] != "no_next_step" {
-		t.Fatalf("no-next-step feed: %d %v", code, out)
+	wantNoNextStep := 0
+	if taskFeedIncludeNoNextStep {
+		wantNoNextStep = 1
+	}
+	if code != http.StatusOK || len(autoItems) != wantNoNextStep {
+		t.Fatalf("no-next-step items (enabled=%v): %d %v", taskFeedIncludeNoNextStep, code, out)
+	}
+	code, counts = call(anna, server.handleTaskCounts, http.MethodGet, "/v1/tasks/counts", "", nil, nil)
+	if code != http.StatusOK || counts["myDay"] != float64(1+wantNoNextStep) {
+		t.Fatalf("counts must not include no-next-step leads while they are off: %d %v", code, counts)
 	}
 
 	// v1 keeps working: a status-only PATCH and the dashboard section query still run.

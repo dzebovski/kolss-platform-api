@@ -37,11 +37,14 @@ func TestTaskFeedQueryBindsFixedArguments(t *testing.T) {
 	}
 }
 
-func TestOnlyAdminsViewAllTasks(t *testing.T) {
+func TestWhoViewsAllTasks(t *testing.T) {
 	if !canViewAllTasks(Actor{Role: "super_admin"}) || !canViewAllTasks(Actor{Role: "office_admin"}) {
 		t.Fatal("admins see all tasks")
 	}
-	if canViewAllTasks(Actor{Role: "office_member"}) || canViewAllTasks(Actor{Role: "curator"}) {
-		t.Fatal("members and curators do not")
+	if !canViewAllTasks(Actor{Role: "curator"}) {
+		t.Fatal("curators see all tasks too (owner decision 2026-09-29)")
+	}
+	if canViewAllTasks(Actor{Role: "office_member"}) {
+		t.Fatal("members do not")
 	}
 }

@@ -174,6 +174,21 @@ func taskLinkTypeAvailable(linkType string) bool {
 	return linkType == "lead"
 }
 
+// taskAssigneeAllowed: an active profile that is a member of the task's office. A super admin
+// (owner decision 2026-09-29) may hold tasks and needs no membership: like everywhere else in the
+// API a super admin reaches every office. The v1 dashboard still resolves such a task to
+// "unassigned" because it keeps its own manager rule.
+func taskAssigneeAllowed(r *http.Request, tx pgx.Tx, assigneeID, officeID uuid.UUID) (bool, error) {
+	var allowed bool
+	err := tx.QueryRow(r.Context(), `
+		select exists(
+		  select 1 from public.profiles p
+		  where p.id=$1 and p.is_active=true
+		    and (p.role='super_admin' or exists (select 1 from public.user_office_memberships m where m.user_id=p.id and m.office_id=$2))
+		)`, assigneeID, officeID).Scan(&allowed)
+	return allowed, err
+}
+
 func createManualTask(r *http.Request, tx pgx.Tx, actor Actor, req createTaskRequest) (taskMutationResponse, error) {
 	var timezone string
 	if err := tx.QueryRow(r.Context(), `select timezone_name from public.offices where id=$1 and is_active=true`, req.OfficeID).Scan(&timezone); err != nil {
@@ -190,8 +205,8 @@ func createManualTask(r *http.Request, tx pgx.Tx, actor Actor, req createTaskReq
 	if err != nil {
 		return taskMutationResponse{}, err
 	}
-	var assigneeActive bool
-	if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.profiles p join public.user_office_memberships m on m.user_id=p.id where p.id=$1 and p.is_active=true and p.role<>'super_admin' and m.office_id=$2)`, req.AssigneeID, req.OfficeID).Scan(&assigneeActive); err != nil {
+	assigneeActive, err := taskAssigneeAllowed(r, tx, req.AssigneeID, req.OfficeID)
+	if err != nil {
 		return taskMutationResponse{}, err
 	}
 	if !assigneeActive {
@@ -376,8 +391,8 @@ func updateManualTask(r *http.Request, tx pgx.Tx, actor Actor, taskID uuid.UUID,
 	}
 	var assigneeID *uuid.UUID
 	if req.AssigneeID != nil && (access.AssigneeID == nil || *access.AssigneeID != *req.AssigneeID) {
-		var active bool
-		if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.profiles p join public.user_office_memberships m on m.user_id=p.id where p.id=$1 and p.is_active=true and p.role<>'super_admin' and m.office_id=$2)`, *req.AssigneeID, access.OfficeID).Scan(&active); err != nil {
+		active, err := taskAssigneeAllowed(r, tx, *req.AssigneeID, access.OfficeID)
+		if err != nil {
 			return taskMutationResponse{}, err
 		}
 		if !active {

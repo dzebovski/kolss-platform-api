@@ -66,6 +66,35 @@ type taskFeedItem struct {
 	UpdatedAt     time.Time           `json:"updatedAt"`
 }
 
+// taskFeedIncludeNoNextStep switches the automatic "no next step" items (active leads with no
+// call-back, reminder, visit or office-work block, due today) on. The owner decided on 2026-09-29
+// not to show them yet: flip this to true to bring them back into the feed, the counts and every
+// view (also update the OpenAPI notes, the contract §8 and TestTasksV2DB, which follows the flag).
+const taskFeedIncludeNoNextStep = false
+
+// taskFeedNoNextStepSQL is the union branch behind taskFeedIncludeNoNextStep. It mirrors the "lead"
+// rows of the v1 dashboard "current" section.
+const taskFeedNoNextStepSQL = `
+	union all
+	select 'lead:' || l.id::text, l.id::text, 'lead', 'nonext', 'no_next_step',
+	 null::text, null::text, null::timestamptz, null::text,
+	 o.id, o.code, o.name_uk, o.name_pl, o.timezone_name,
+	 l.assigned_to, null::uuid,
+	 'open', false, null::bigint, l.updated_at, null::timestamptz,
+	 null::uuid, l.id, null::uuid, null::uuid, l.name, l.reference_id, l.phone
+	from public.leads l join public.offices o on o.id=l.office_id
+	where l.archived_at is null and l.client_status not in ('contract_signed','closed_lost')
+	  and not exists (select 1 from ` + leadcohorts.ActiveReminderCandidatesSQL + ` active)
+	  and not exists (select 1 from public.lead_showroom_visits work where work.lead_id=l.id and work.kind='office_work' and work.status='scheduled')
+`
+
+func taskFeedNoNextStepBranch() string {
+	if taskFeedIncludeNoNextStep {
+		return taskFeedNoNextStepSQL
+	}
+	return ""
+}
+
 // taskFeedSourceSQL yields one row per task-like item with the office-local date columns. It has
 // no parameters; filtering happens in the query built around it.
 var taskFeedSourceSQL = `with source_rows as (
@@ -110,20 +139,10 @@ var taskFeedSourceSQL = `with source_rows as (
 	    and (v.scheduled_at at time zone o.timezone_name)::date >= (now() at time zone o.timezone_name)::date - 365)
 	  or (v.status='visited' and v.updated_at >= now() - interval '60 days'))
 
-	union all
-	select 'lead:' || l.id::text, l.id::text, 'lead', 'nonext', 'no_next_step',
-	 null::text, null::text, null::timestamptz, null::text,
-	 o.id, o.code, o.name_uk, o.name_pl, o.timezone_name,
-	 l.assigned_to, null::uuid,
-	 'open', false, null::bigint, l.updated_at, null::timestamptz,
-	 null::uuid, l.id, null::uuid, null::uuid, l.name, l.reference_id, l.phone
-	from public.leads l join public.offices o on o.id=l.office_id
-	where l.archived_at is null and l.client_status not in ('contract_signed','closed_lost')
-	  and not exists (select 1 from ` + leadcohorts.ActiveReminderCandidatesSQL + ` active)
-	  and not exists (select 1 from public.lead_showroom_visits work where work.lead_id=l.id and work.kind='office_work' and work.status='scheduled')
+` + taskFeedNoNextStepBranch() + `
 ), resolved as (
 	select s.*,
-	 case when p.is_active=true and p.role <> 'super_admin' and exists (select 1 from public.user_office_memberships m where m.user_id=p.id and m.office_id=s.office_id) then s.manager_candidate else null end manager_id,
+	 case when p.is_active=true and (p.role = 'super_admin' or exists (select 1 from public.user_office_memberships m where m.user_id=p.id and m.office_id=s.office_id)) then s.manager_candidate else null end manager_id,
 	 (now() at time zone s.timezone_name)::date local_today,
 	 case when s.source='lead' then (now() at time zone s.timezone_name)::date else (s.due_at at time zone s.timezone_name)::date end local_date,
 	 case when s.source='manual' then s.due_time
@@ -223,10 +242,10 @@ func parseTaskFeedKinds(raw string) ([]string, bool) {
 	return kinds, true
 }
 
-// canViewAllTasks: the "All tasks" view is for admins and office admins (boards: "visible to
-// admins and office admins").
+// canViewAllTasks: the "All tasks" view is for super admins, office admins and curators (owner
+// decision 2026-09-29); each sees the offices they belong to, a super admin every office.
 func canViewAllTasks(actor Actor) bool {
-	return actor.IsSuperAdmin() || actor.Role == "office_admin"
+	return actor.IsSuperAdmin() || actor.Role == "office_admin" || actor.Role == "curator"
 }
 
 type taskFeedScanner interface {
@@ -296,7 +315,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		feed.ListID = &listID
 	case "all":
 		if !canViewAllTasks(actor) {
-			s.writeError(w, r, http.StatusForbidden, "forbidden", "Only admins can see all tasks", nil)
+			s.writeError(w, r, http.StatusForbidden, "forbidden", "Only admins and curators can see all tasks", nil)
 			return
 		}
 		officeIDs, ok := s.reportOfficeFilter(w, r, actor)
