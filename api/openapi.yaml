@@ -706,7 +706,8 @@ paths:
       description: >
         One office-local feed of standalone manual tasks (personal, list and linked tasks) and the
         automatic items of `GET /v1/dashboard/manager-tasks` (call-backs, comment reminders,
-        showroom / measurement / office-work visits, leads with no next step). Automatic items are
+        showroom / measurement / office-work visits). "No next step" items (leads with nothing planned) exist in the schema
+        but are switched off and never returned for now. Automatic items are
         read-only (`canManage: false`). Ordered by due date and time (Done: latest first), capped at
         500 items (`truncated`). Canceled tasks are never returned.
       security: [{ bearerAuth: [] }]
@@ -718,7 +719,7 @@ paths:
           description: >
             `my_day` = the caller's open tasks due today or earlier plus tasks done today; `upcoming` = the caller's open tasks
             due after today or without a date; `done` = the caller's done tasks; `all` = everyone's open tasks plus tasks done today
-            (super admins and office admins only, else 403); `list` = every task of `listId` (visible to everyone).
+            (super admins, office admins and curators only, else 403; each sees their own offices, a super admin all of them); `list` = every task of `listId` (visible to everyone).
         - { name: listId, in: query, schema: { type: string, format: uuid }, description: Required for view `list`. }
         - { name: assigneeId, in: query, schema: { type: string, format: uuid }, description: 'Only for view `all`: one person''s tasks.' }
         - { name: officeId, in: query, schema: { type: string, format: uuid }, description: Optional accessible office. Ignored for view `list`. }
@@ -1609,7 +1610,7 @@ components:
       properties:
         status: { type: string, enum: [open, done, canceled] }
         inProgress: { type: boolean, description: Only an open task can be in progress. }
-        assigneeId: { type: string, format: uuid, description: An active member of the task's office. }
+        assigneeId: { type: string, format: uuid, description: "An active member of the task's office, or any active super admin." }
         title: { type: string, minLength: 1, maxLength: 1000 }
         note: { type: [string, 'null'], maxLength: 5000, description: Blank or null clears the note. }
         dueDate: { type: [string, 'null'], format: date, description: Office-local date. null clears the date and the time. }
@@ -1656,18 +1657,18 @@ components:
           description: >
             Source chip. Manual tasks: `list` when on a task list, `comment` when linked to a lead / project / client
             (the boards call them "Task from comment"), else `personal`. Automatic items: `call` (call-back / thinking reminder),
-            `comment` (comment reminder), `visit`, `nonext` (lead with no next step).
+            `comment` (comment reminder), `visit`, `nonext` (lead with no next step; not returned while switched off).
         subKind: { type: string, description: 'task, callback, thinking, comment, showroom, measurement, office_work or no_next_step.' }
         title: { type: [string, 'null'], description: Null for automatic items without their own text; the CRM derives it from `subKind`. }
         note: { type: [string, 'null'] }
         status: { type: string, enum: [open, done], description: 'Visit items are `done` once visited. Automatic items other than visits are always open.' }
         inProgress: { type: boolean }
-        dueDate: { type: [string, 'null'], format: date, description: Office-local date. "No next step" items are due today. }
+        dueDate: { type: [string, 'null'], format: date, description: Office-local date. "No next step" items (switched off) are due today. }
         dueTime: { type: [string, 'null'], description: 'HH:MM office-local; null when the source has no time (date-only tasks and call-backs at midnight).' }
         dueAt: { type: [string, 'null'], format: date-time }
         overdueDays: { type: integer, minimum: 0, description: Whole office-local days past due for open items, else 0. }
         office: { $ref: '#/components/schemas/DashboardTaskOffice' }
-        assigneeId: { type: [string, 'null'], format: uuid, description: The active office member responsible, or null. }
+        assigneeId: { type: [string, 'null'], format: uuid, description: The active office member (or super admin) responsible, or null. }
         assigneeName: { type: [string, 'null'] }
         createdById: { type: [string, 'null'], format: uuid }
         createdByName: { type: [string, 'null'] }

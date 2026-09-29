@@ -546,7 +546,7 @@ read the same rows as before. No priority in v2 (owner decision); the `priority`
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /v1/tasks?view=my_day\|upcoming\|all\|done\|list` | Unified feed (manual tasks + call-backs, comment reminders, visits, "no next step" leads). Filters `listId`, `assigneeId` (view `all`), `officeId`, `kinds`, `q`. Capped at 500 (`truncated`). |
+| `GET /v1/tasks?view=my_day\|upcoming\|all\|done\|list` | Unified feed (manual tasks + call-backs, comment reminders, visits; "no next step" leads are switched off). Filters `listId`, `assigneeId` (view `all`), `officeId`, `kinds`, `q`. Capped at 500 (`truncated`). |
 | `GET /v1/tasks/counts` | Sidebar badges: `myDay`, `upcoming`, `overdue` (admins only, else null). |
 | `GET /v1/tasks/{taskId}` | One manual task in the feed-item shape. |
 | `POST /v1/tasks` | Existing; new optional `dueTime`, `note`, `listId`, `link {type,id}`. |
@@ -558,19 +558,22 @@ View rules (all dates office-local, per task office):
 - `my_day`: the caller's open items due today or earlier (undated items excluded) plus items done today.
 - `upcoming`: the caller's open items due after today or with no date.
 - `done`: the caller's done items, latest first (manual tasks and visits marked visited in the last 60 days).
-- `all`: everyone's open items plus items done today; super admin and office admin only (403 otherwise).
+- `all`: everyone's open items plus items done today; super admin, office admin and curator only (403 otherwise; each sees their own offices, a super admin all).
 - `list`: every task of `listId`, any assignee or office.
 - Kinds: manual task → `list` (on a list), `comment` (linked to a lead / project / client, the boards' "Task from
-  comment") or `personal`; automatic → `call`, `comment`, `visit`, `nonext`. Automatic items are read-only
-  (`canManage: false`) and close through their lead action (Q-T4). A lead with nothing planned is a `nonext` item
-  due today, exactly the set of the v1 dashboard "current" section.
+  comment") or `personal`; automatic → `call`, `comment`, `visit` (and `nonext`, see below). Automatic items are
+  read-only (`canManage: false`) and close through their lead action (Q-T4).
+- "No next step" items (a lead with nothing planned, due today, the set of the v1 dashboard "current" section) are
+  **switched off** by owner decision (2026-09-29): not in the feed, the counts or any view. The code stays behind
+  `taskFeedIncludeNoNextStep` in `internal/crmapi/task_feed.go`; flip it to bring them back (and update this text).
 - `dueTime` of automatic items is the office-local time; a call-back exactly at 00:00 has none.
 
 Rules for writes:
 
 - Status, `inProgress`, assignee, date and time: any member of the task's office (the v1 rule) or the owner of the
   task's list. Done and canceled clear `inProgress`; reopening starts at "To do". The assignee must be an active
-  non-super-admin member of the task's office. A time needs a date; clearing the date clears the time.
+  member of the task's office; a super admin can be assigned in any office without a membership (owner decision
+  2026-09-29). The v1 dashboard keeps its own manager rule and shows such a task as unassigned. A time needs a date; clearing the date clears the time.
 - Title and note (Q-T2 default): the creator, the assignee, the list owner, an office admin of the task's office and
   a super admin; otherwise 403 `task_edit_forbidden`.
 - Deleting a task is `status: canceled` (soft delete, Q-T3 default); canceled tasks leave every view. No delete
