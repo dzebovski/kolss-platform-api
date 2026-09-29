@@ -25,7 +25,15 @@ func (s *Server) handleFileDownloadURL(w http.ResponseWriter, r *http.Request) {
 		from public.lead_attachments a join public.leads l on l.id=a.lead_id
 		where a.id=$1 and l.archived_at is null
 	`, fileID).Scan(&officeID, &bucket, &path, &filename, &status)
-	if errors.Is(err, pgx.ErrNoRows) || !actor.CanAccessOffice(officeID) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Not a lead document: contract files and receipts of a project (CRM v2, P1).
+		err = s.pool.QueryRow(r.Context(), `
+			select p.office_id,f.storage_bucket,f.storage_path,f.file_name,f.status
+			from public.project_files f join public.projects p on p.id=f.project_id
+			where f.id=$1
+		`, fileID).Scan(&officeID, &bucket, &path, &filename, &status)
+	}
+	if errors.Is(err, pgx.ErrNoRows) || (err == nil && !actor.CanAccessOffice(officeID)) {
 		s.writeError(w, r, http.StatusNotFound, "file_not_found", "File not found", nil)
 		return
 	}

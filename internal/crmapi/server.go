@@ -141,6 +141,17 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/leads/{leadId}/documents/uploads", s.handleCreateDocumentUpload)
 			r.Get("/v1/leads/{leadId}/documents", s.handleListDocuments)
 			r.Post("/v1/leads/{leadId}/documents", s.handleConfirmDocument)
+			r.Post("/v1/leads/{leadId}/project", s.handleCreateProject)
+			r.Get("/v1/projects", s.handleListProjects)
+			r.Get("/v1/projects/facets", s.handleProjectFacets)
+			r.Get("/v1/projects/{projectId}", s.handleGetProject)
+			r.Get("/v1/projects/{projectId}/timeline", s.handleListProjectTimeline)
+			r.Post("/v1/projects/{projectId}/status", s.handleChangeProjectStatus)
+			r.Post("/v1/projects/{projectId}/cancel", s.handleCancelProject)
+			r.Post("/v1/projects/{projectId}/restore", s.handleRestoreProject)
+			r.Post("/v1/projects/{projectId}/contract", s.handleAddProjectContract)
+			r.Post("/v1/projects/{projectId}/payments", s.handleAddProjectPayment)
+			r.Post("/v1/projects/{projectId}/files/uploads", s.handleCreateProjectFileUpload)
 		})
 
 		for _, pattern := range crmCORSRoutePatterns {
@@ -214,6 +225,17 @@ var crmCORSRoutePatterns = []string{
 	"/v1/files/{fileId}/download-url",
 	"/v1/leads/{leadId}/documents/uploads",
 	"/v1/leads/{leadId}/documents",
+	"/v1/leads/{leadId}/project",
+	"/v1/projects",
+	"/v1/projects/facets",
+	"/v1/projects/{projectId}",
+	"/v1/projects/{projectId}/timeline",
+	"/v1/projects/{projectId}/status",
+	"/v1/projects/{projectId}/cancel",
+	"/v1/projects/{projectId}/restore",
+	"/v1/projects/{projectId}/contract",
+	"/v1/projects/{projectId}/payments",
+	"/v1/projects/{projectId}/files/uploads",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.31.0
+  version: 2.32.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -17,6 +17,7 @@ tags:
   - name: Activities
   - name: Appointments
   - name: Workflow
+  - name: Projects
   - name: Users
   - name: Reports
   - name: Settings
@@ -942,6 +943,290 @@ paths:
         '404': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
         '503': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/project:
+    post:
+      tags: [Projects]
+      operationId: createProjectFromLead
+      summary: Create a project from a lead (CRM v2 Create project)
+      description: >
+        Creates the lead's single project, links it (`leads.converted_project_id`) and moves the lead to
+        v2 status `project`, after which the lead only accepts comments and questions (`409 lead_terminal`).
+        `projectType` and `managerId` default to the lead's stored project type and responsible manager,
+        then to the lead's owner, then to the caller. The first project status follows the type:
+        express → `express`, measure → `measure`, contract → `design`, no type → `none`.
+        The lead's own data is not copied: the project card reads it from the lead.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProjectRequest' }
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409':
+          description: '`project_exists` or `lead_terminal` (the lead is closed as lost)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CRMErrorResponse' }
+  /v1/projects:
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      summary: Projects list (CRM v2), newest first
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "Matches the client name, phone or code." }
+        - { name: managerId, in: query, schema: { type: string, format: uuid } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - name: status
+          in: query
+          description: Comma-separated project statuses.
+          schema: { type: string }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Page of projects
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ProjectListItem' } }
+                  nextCursor: { type: string, description: Empty when there is no next page. }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/facets:
+    get:
+      tags: [Projects]
+      operationId: getProjectFacets
+      summary: Projects list chip counts
+      description: >
+        `total` counts with every filter; `status` counts per project status with every filter except `status`.
+        Takes the listProjects filters; `limit` and `cursor` are ignored.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: managerId, in: query, schema: { type: string, format: uuid } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, status]
+                properties:
+                  total: { type: integer }
+                  status:
+                    type: object
+                    additionalProperties: { type: integer }
+                    description: Project status code → count. Statuses without projects are absent.
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}:
+    get:
+      tags: [Projects]
+      operationId: getProject
+      summary: Project card (CRM v2)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Project with contract, payments and the caller's permissions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/timeline:
+    get:
+      tags: [Projects]
+      operationId: listProjectTimeline
+      summary: Project timeline, newest first (up to 200 entries)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 100 } }
+      responses:
+        '200':
+          description: Timeline
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ProjectEvent' } }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/status:
+    post:
+      tags: [Projects]
+      operationId: changeProjectStatus
+      summary: Change status (or update the details of the current one)
+      description: >
+        Per status: `express` needs responsibleId, what and eventDate (the deadline); `measure` needs
+        responsibleId, eventDate, eventTime and address; both take `done` and a `result` that is required
+        once `done`. `design`, `production` and `installation` take an optional eventDate (+ eventTime).
+        `completed` takes no event. `contract` is set only by adding a contract and `cancelled` only by
+        cancelling. Sending the current status updates its details (timeline entry `status_updated`).
+        Only the project's responsible manager and admins may change it (`403 project_edit_forbidden`).
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChangeProjectStatusRequest' }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/cancel:
+    post:
+      tags: [Projects]
+      operationId: cancelProject
+      summary: Cancel a project
+      description: >
+        Needs at least one reason; a comment is required when `other` is picked. Optionally cancels the
+        lead's scheduled calendar appointments. Received payments stay (refunds are handled outside the CRM).
+        The status it had is kept so Restore can bring it back.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CancelProjectRequest' }
+      responses:
+        '200':
+          description: Cancelled project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/restore:
+    post:
+      tags: [Projects]
+      operationId: restoreProject
+      summary: Restore a cancelled project to the status it had before
+      description: The event date and time are cleared; set the next event with Change status.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      responses:
+        '200':
+          description: Restored project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/contract:
+    post:
+      tags: [Projects]
+      operationId: addProjectContract
+      summary: Add the project's contract (sets status `contract`)
+      description: >
+        One contract per project (`409 contract_exists`). `fileId` is optional: the id returned by
+        POST /v1/projects/{projectId}/files/uploads with kind `contract`, uploaded before this call.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddProjectContractRequest' }
+      responses:
+        '201':
+          description: Project with the new contract
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/payments:
+    post:
+      tags: [Projects]
+      operationId: addProjectPayment
+      summary: Add a payment (in the contract's currency)
+      description: >
+        Needs a contract (`409 contract_required`). The amount can never exceed the remaining balance
+        (`400 validation_error`, fieldErrors.amount). `fileId` is optional: a receipt uploaded with kind `receipt`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddProjectPaymentRequest' }
+      responses:
+        '201':
+          description: Project with the new payment
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/files/uploads:
+    post:
+      tags: [Projects]
+      operationId: createProjectFileUpload
+      summary: Start a contract file / receipt upload
+      description: >
+        Validates the name and declared size (PDF, JPG, PNG, HEIC; at most 25 MB), creates a pending file and
+        returns a short-lived presigned URL. The browser PUTs the bytes straight to storage, then passes
+        `fileId` to addProjectContract or addProjectPayment, which verifies the object and marks it ready.
+        Downloads use GET /v1/files/{fileId}/download-url.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateProjectFileUploadRequest' }
+      responses:
+        '200':
+          description: Presigned upload
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectFileUpload' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '503': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/events/{eventId}/correction:
     patch:
       tags: [Leads]
@@ -1128,6 +1413,11 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1255,6 +1545,275 @@ components:
         uploadedBy: { type: string, format: uuid }
         uploadedByName: { type: string }
         createdAt: { type: string, format: date-time }
+    ProjectStatus:
+      type: string
+      description: >
+        Lifecycle order: none → express (Paid express evaluation) → measure (Paid measurement visit) → design
+        (Design in progress) → contract (Contract signed) → production → installation → completed. `cancelled`
+        is outside the order; `none` is "Status not set".
+      enum: [none, express, measure, design, contract, production, installation, completed, cancelled]
+    ProjectType:
+      type: string
+      description: Create project "Project type"; sets the first status.
+      enum: [express, measure, contract]
+    ProjectCancelReason:
+      type: string
+      enum: [chose_another_supplier, price_too_high, postponed_renovation, disagreed_design, not_relevant, other]
+    ProjectCurrency:
+      type: string
+      enum: [PLN, UAH, EUR, USD]
+    ProjectPerson:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+    ProjectFileRef:
+      type: object
+      additionalProperties: false
+      required: [id, fileName, sizeBytes]
+      properties:
+        id: { type: string, format: uuid, description: "Download with GET /v1/files/{fileId}/download-url." }
+        fileName: { type: string }
+        sizeBytes: { type: integer }
+    ProjectContract:
+      type: object
+      additionalProperties: false
+      required: [id, number, signedOn, totalAmount, currency, paidAmount, remainingAmount, file]
+      properties:
+        id: { type: string, format: uuid }
+        number: { type: string }
+        signedOn: { type: string, format: date }
+        totalAmount: { type: number, description: "Major units, at most 2 decimals." }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        paidAmount: { type: number }
+        remainingAmount: { type: number }
+        file:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectFileRef' }]
+    ProjectPayment:
+      type: object
+      additionalProperties: false
+      required: [id, amount, paidOn, note, createdAt, createdByName, file]
+      properties:
+        id: { type: string, format: uuid }
+        amount: { type: number, description: In the contract's currency. }
+        paidOn: { type: string, format: date }
+        note: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        createdByName: { type: string }
+        file:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectFileRef' }]
+    ProjectStageDetails:
+      type: object
+      description: >
+        Kept per stage so editing one does not erase the other. `express`: responsibleId, what, done, result.
+        `measure`: responsibleId, address, done, result. The dates are the project's eventDate / eventTime.
+      properties:
+        express:
+          type: object
+          properties:
+            responsibleId: { type: string, format: uuid }
+            what: { type: string }
+            done: { type: boolean }
+            result: { type: string }
+        measure:
+          type: object
+          properties:
+            responsibleId: { type: string, format: uuid }
+            address: { type: string }
+            done: { type: boolean }
+            result: { type: string }
+    ProjectCancellation:
+      type: object
+      additionalProperties: false
+      required: [cancelledAt, cancelledBy, cancelledByName, reasons, comment, statusBeforeCancel]
+      properties:
+        cancelledAt: { type: string, format: date-time }
+        cancelledBy: { type: [string, 'null'], format: uuid }
+        cancelledByName: { type: string }
+        reasons: { type: array, items: { $ref: '#/components/schemas/ProjectCancelReason' } }
+        comment: { type: [string, 'null'] }
+        statusBeforeCancel: { type: [string, 'null'], description: The status Restore returns to. }
+    Project:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - leadId
+        - officeId
+        - code
+        - status
+        - projectType
+        - eventDate
+        - eventTime
+        - statusDetails
+        - manager
+        - client
+        - createdAt
+        - createdByName
+        - statusChangedAt
+        - lastActivityAt
+        - cancellation
+        - contract
+        - payments
+        - permissions
+      properties:
+        id: { type: string, format: uuid }
+        leadId: { type: string, format: uuid }
+        officeId: { type: string, format: uuid }
+        code: { type: string, description: The lead's reference id (client code). }
+        status: { $ref: '#/components/schemas/ProjectStatus' }
+        projectType:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectType' }]
+        eventDate: { type: [string, 'null'], format: date, description: "Next event of the current status (deadline / visit / presentation ...), office local date." }
+        eventTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+        statusDetails: { $ref: '#/components/schemas/ProjectStageDetails' }
+        manager:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        client:
+          type: object
+          additionalProperties: false
+          required: [name, phone, email, cityRegion]
+          properties:
+            name: { type: string }
+            phone: { type: [string, 'null'] }
+            email: { type: [string, 'null'] }
+            cityRegion: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        createdByName: { type: string }
+        statusChangedAt: { type: string, format: date-time }
+        lastActivityAt: { type: string, format: date-time }
+        cancellation:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectCancellation' }]
+        contract:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectContract' }]
+        payments: { type: array, items: { $ref: '#/components/schemas/ProjectPayment' } }
+        permissions:
+          type: object
+          additionalProperties: false
+          required: [canEdit]
+          properties:
+            canEdit:
+              type: boolean
+              description: The responsible manager and admins can change the project; others can only view.
+    ProjectListItem:
+      type: object
+      additionalProperties: false
+      required: [id, leadId, code, clientName, products, status, projectType, eventDate, eventTime, manager, createdAt, lastComment]
+      properties:
+        id: { type: string, format: uuid }
+        leadId: { type: string, format: uuid }
+        code: { type: string }
+        clientName: { type: string }
+        products: { type: array, items: { type: string }, description: Product tags of the lead. }
+        status: { $ref: '#/components/schemas/ProjectStatus' }
+        projectType:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectType' }]
+        eventDate: { type: [string, 'null'], format: date }
+        eventTime: { type: [string, 'null'] }
+        manager:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        createdAt: { type: string, format: date-time }
+        lastComment:
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              additionalProperties: false
+              required: [text, at]
+              properties:
+                text: { type: string }
+                at: { type: string, format: date-time }
+    ProjectEvent:
+      type: object
+      additionalProperties: false
+      required: [id, type, actor, oldValue, newValue, comment, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        type:
+          type: string
+          enum: [created, status_changed, status_updated, contract_added, payment_added, cancelled, restored]
+        actor:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        oldValue: { type: [object, 'null'], additionalProperties: true }
+        newValue: { type: [object, 'null'], additionalProperties: true }
+        comment: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+    CreateProjectRequest:
+      type: object
+      additionalProperties: false
+      description: Send `{}` to take everything from the lead.
+      properties:
+        projectType:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectType' }]
+        managerId:
+          type: [string, 'null']
+          format: uuid
+          description: Must be an active member of the lead's office.
+    ChangeProjectStatusRequest:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/ProjectStatus' }
+        eventDate: { type: [string, 'null'], format: date }
+        eventTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$' }
+        responsibleId: { type: [string, 'null'], format: uuid }
+        what: { type: [string, 'null'], maxLength: 500 }
+        address: { type: [string, 'null'], maxLength: 500 }
+        done: { type: [boolean, 'null'] }
+        result: { type: [string, 'null'], maxLength: 500 }
+        comment: { type: [string, 'null'], maxLength: 1000, description: "Optional, goes to the timeline." }
+    CancelProjectRequest:
+      type: object
+      additionalProperties: false
+      required: [reasons]
+      properties:
+        reasons:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ProjectCancelReason' }
+        comment: { type: [string, 'null'], maxLength: 1000, description: Required when `other` is picked. }
+        cancelFutureEvents: { type: boolean, default: false }
+    AddProjectContractRequest:
+      type: object
+      additionalProperties: false
+      required: [number, signedOn, totalAmount, currency]
+      properties:
+        number: { type: string, minLength: 1, maxLength: 60 }
+        signedOn: { type: string, format: date }
+        totalAmount: { type: number, exclusiveMinimum: 0, description: "Major units, at most 2 decimals." }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        fileId: { type: [string, 'null'], format: uuid }
+    AddProjectPaymentRequest:
+      type: object
+      additionalProperties: false
+      required: [amount, paidOn]
+      properties:
+        amount: { type: number, exclusiveMinimum: 0, description: "Major units, at most 2 decimals." }
+        paidOn: { type: string, format: date }
+        note: { type: [string, 'null'], maxLength: 300 }
+        fileId: { type: [string, 'null'], format: uuid }
+    CreateProjectFileUploadRequest:
+      type: object
+      additionalProperties: false
+      required: [kind, fileName, sizeBytes]
+      properties:
+        kind: { type: string, enum: [contract, receipt] }
+        fileName: { type: string }
+        sizeBytes: { type: integer, minimum: 1, maximum: 26214400 }
+    ProjectFileUpload:
+      type: object
+      required: [fileId, uploadUrl, method, headers, expiresAt]
+      properties:
+        fileId: { type: string, format: uuid }
+        uploadUrl: { type: string, format: uri }
+        method: { type: string, examples: [PUT] }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+          description: Headers the upload request must send as-is (Content-Type is pinned by the signature).
+        expiresAt: { type: string, format: date-time }
     LeadEventCorrectionRequest:
       type: object
       additionalProperties: false

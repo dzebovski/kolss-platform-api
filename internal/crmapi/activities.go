@@ -325,6 +325,11 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A lead that became a project (CRM v2) is read-only: only comments and questions remain.
+	if lead.V2Status != nil && *lead.V2Status == "project" && req.Type != activityComment && req.Type != activityQuestion {
+		s.writeError(w, r, http.StatusConflict, "lead_terminal", "The lead became a project — work continues on the project", nil)
+		return
+	}
 	terminal := isTerminalClientStatus(lead.ClientStatus)
 	if req.Type == activityReopen {
 		if !terminal {
