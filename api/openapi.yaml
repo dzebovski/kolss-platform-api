@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.32.0
+  version: 2.33.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -699,6 +699,43 @@ paths:
       security: [{ bearerAuth: [] }]
       responses: { '200': { description: Dashboard aggregates } }
   /v1/tasks:
+    get:
+      tags: [Activities]
+      operationId: listTasks
+      summary: Task feed for the CRM v2 Tasks page
+      description: >
+        One office-local feed of standalone manual tasks (personal, list and linked tasks) and the
+        automatic items of `GET /v1/dashboard/manager-tasks` (call-backs, comment reminders,
+        showroom / measurement / office-work visits). "No next step" items (leads with nothing planned) exist in the schema
+        but are switched off and never returned for now. Automatic items are
+        read-only (`canManage: false`). Ordered by due date and time (Done: latest first), capped at
+        500 items (`truncated`). Canceled tasks are never returned.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: view
+          in: query
+          required: true
+          schema: { type: string, enum: [my_day, upcoming, all, done, list] }
+          description: >
+            `my_day` = the caller's open tasks due today or earlier plus tasks done today; `upcoming` = the caller's open tasks
+            due after today or without a date; `done` = the caller's done tasks; `all` = everyone's open tasks plus tasks done today
+            (super admins, office admins and curators only, else 403; each sees their own offices, a super admin all of them); `list` = every task of `listId` (visible to everyone).
+        - { name: listId, in: query, schema: { type: string, format: uuid }, description: Required for view `list`. }
+        - { name: assigneeId, in: query, schema: { type: string, format: uuid }, description: 'Only for view `all`: one person''s tasks.' }
+        - { name: officeId, in: query, schema: { type: string, format: uuid }, description: Optional accessible office. Ignored for view `list`. }
+        - name: kinds
+          in: query
+          schema: { type: string, examples: ['call,visit'] }
+          description: Comma-separated source chips - call, visit, comment, nonext, list, personal.
+        - { name: q, in: query, schema: { type: string, maxLength: 200 }, description: Case-insensitive search in title, lead name, lead code and list name. }
+      responses:
+        '200':
+          description: Task feed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskFeedResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
     post:
       tags: [Activities]
       operationId: createTask
@@ -737,6 +774,106 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/TaskMutationResponse' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+        '428': { $ref: '#/components/responses/CRMError' }
+    get:
+      tags: [Activities]
+      operationId: getTask
+      summary: One standalone manual task
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: taskId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The task, in the shape of a feed item
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskFeedItem' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/tasks/counts:
+    get:
+      tags: [Activities]
+      operationId: getTaskCounts
+      summary: Sidebar badges of the Tasks page
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, schema: { type: string, format: uuid }, description: Optional accessible office. }
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskCounts' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/task-lists:
+    get:
+      tags: [Activities]
+      operationId: listTaskLists
+      summary: Task lists (visible to every signed-in user), oldest first
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Task lists with progress and members
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/TaskList' } }
+    post:
+      tags: [Activities]
+      operationId: createTaskList
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateTaskListRequest' }
+      responses:
+        '201':
+          description: Task list created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskList' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/task-lists/{listId}:
+    parameters:
+      - { name: listId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Activities]
+      operationId: getTaskList
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Task list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskList' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [Activities]
+      operationId: updateTaskList
+      summary: Edit a task list (owner or super admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IfMatch' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateTaskListRequest' }
+      responses:
+        '200':
+          description: Task list updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TaskList' }
         '400': { $ref: '#/components/responses/CRMError' }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
@@ -1444,12 +1581,40 @@ components:
         assigneeId: { type: string, format: uuid }
         title: { type: string, minLength: 1, maxLength: 1000 }
         dueDate: { type: [string, 'null'], format: date, description: Office-local date. }
+        dueTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$', description: 'Office-local time of day (HH:MM). Needs dueDate.' }
+        note: { type: [string, 'null'], maxLength: 5000 }
+        listId: { type: [string, 'null'], format: uuid, description: Puts the task on a task list. Exclusive with `link`. }
+        link:
+          description: >
+            Links the task to one entity (exclusive with `listId`). Only `lead` is accepted for now (400 on `link` otherwise);
+            `project` and `client` are reserved until those features ship. The lead must belong to `officeId`.
+          oneOf:
+            - { $ref: '#/components/schemas/TaskLinkRequest' }
+            - { type: 'null' }
+    TaskLinkRequest:
+      type: object
+      additionalProperties: false
+      required: [type, id]
+      properties:
+        type: { type: string, enum: [lead, project, client] }
+        id: { type: string, format: uuid }
     UpdateTaskRequest:
       type: object
       additionalProperties: false
-      required: [status]
+      minProperties: 1
+      description: >
+        Partial update; send only what changes. `status` was required before 2.33.0 and still works on its own.
+        Changing the status to `done` or `canceled` clears `inProgress`; reopening (`open`) starts at "To do".
+        `title` and `note` may be edited by the creator, the assignee, the list owner, an office admin and a super admin (403 `task_edit_forbidden`).
+        Assignee, dates and status follow the v1 rule: any member of the task's office (or the list owner).
       properties:
         status: { type: string, enum: [open, done, canceled] }
+        inProgress: { type: boolean, description: Only an open task can be in progress. }
+        assigneeId: { type: string, format: uuid, description: "An active member of the task's office, or any active super admin." }
+        title: { type: string, minLength: 1, maxLength: 1000 }
+        note: { type: [string, 'null'], maxLength: 5000, description: Blank or null clears the note. }
+        dueDate: { type: [string, 'null'], format: date, description: Office-local date. null clears the date and the time. }
+        dueTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$', description: 'HH:MM, needs a due date. null clears it.' }
     TaskMutationResponse:
       type: object
       additionalProperties: false
@@ -1458,6 +1623,122 @@ components:
         id: { type: string, format: uuid }
         version: { type: integer, minimum: 1 }
         status: { type: string, enum: [open, done, canceled] }
+        inProgress: { type: boolean, description: Added in 2.33.0. }
+    TaskFeedLink:
+      type: object
+      additionalProperties: false
+      required: [type, id, name, code, phone]
+      description: Name, code and phone are filled for leads; project and client links carry only the id until those features ship.
+      properties:
+        type: { type: string, enum: [lead, project, client] }
+        id: { type: string, format: uuid }
+        name: { type: [string, 'null'] }
+        code: { type: [string, 'null'], description: Lead reference code (K0000 / W0000). }
+        phone: { type: [string, 'null'] }
+    TaskFeedList:
+      type: object
+      additionalProperties: false
+      required: [id, name, color]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        color: { type: string, pattern: '^#[0-9a-f]{6}$' }
+    TaskFeedItem:
+      type: object
+      additionalProperties: false
+      required: [id, sourceId, source, kind, subKind, title, note, status, inProgress, dueDate, dueTime, dueAt, overdueDays, office, assigneeId, assigneeName, createdById, createdByName, link, list, version, canManage, canEdit, updatedAt]
+      properties:
+        id: { type: string, description: 'Stable source-prefixed identifier (`manual:<uuid>`, `reminder:<kind>:<id>`, `appointment:<uuid>`, `lead:<uuid>`).' }
+        sourceId: { type: string }
+        source: { type: string, enum: [manual, reminder, appointment, lead] }
+        kind:
+          type: string
+          enum: [call, visit, comment, nonext, list, personal]
+          description: >
+            Source chip. Manual tasks: `list` when on a task list, `comment` when linked to a lead / project / client
+            (the boards call them "Task from comment"), else `personal`. Automatic items: `call` (call-back / thinking reminder),
+            `comment` (comment reminder), `visit`, `nonext` (lead with no next step; not returned while switched off).
+        subKind: { type: string, description: 'task, callback, thinking, comment, showroom, measurement, office_work or no_next_step.' }
+        title: { type: [string, 'null'], description: Null for automatic items without their own text; the CRM derives it from `subKind`. }
+        note: { type: [string, 'null'] }
+        status: { type: string, enum: [open, done], description: 'Visit items are `done` once visited. Automatic items other than visits are always open.' }
+        inProgress: { type: boolean }
+        dueDate: { type: [string, 'null'], format: date, description: Office-local date. "No next step" items (switched off) are due today. }
+        dueTime: { type: [string, 'null'], description: 'HH:MM office-local; null when the source has no time (date-only tasks and call-backs at midnight).' }
+        dueAt: { type: [string, 'null'], format: date-time }
+        overdueDays: { type: integer, minimum: 0, description: Whole office-local days past due for open items, else 0. }
+        office: { $ref: '#/components/schemas/DashboardTaskOffice' }
+        assigneeId: { type: [string, 'null'], format: uuid, description: The active office member (or super admin) responsible, or null. }
+        assigneeName: { type: [string, 'null'] }
+        createdById: { type: [string, 'null'], format: uuid }
+        createdByName: { type: [string, 'null'] }
+        link: { oneOf: [{ $ref: '#/components/schemas/TaskFeedLink' }, { type: 'null' }] }
+        list: { oneOf: [{ $ref: '#/components/schemas/TaskFeedList' }, { type: 'null' }] }
+        version: { type: [integer, 'null'], minimum: 1, description: 'If-Match value for `PATCH /v1/tasks/{taskId}`; manual tasks only.' }
+        canManage: { type: boolean, description: The caller may change status, progress, assignee, date and time (manual tasks only). }
+        canEdit: { type: boolean, description: The caller may also edit title and note (manual tasks only). }
+        updatedAt: { type: string, format: date-time }
+    TaskFeedResponse:
+      type: object
+      additionalProperties: false
+      required: [items, truncated]
+      properties:
+        items: { type: array, items: { $ref: '#/components/schemas/TaskFeedItem' } }
+        truncated: { type: boolean, description: True when more than 500 items matched and the rest were dropped. }
+    TaskCounts:
+      type: object
+      additionalProperties: false
+      required: [myDay, upcoming, overdue]
+      properties:
+        myDay: { type: integer, minimum: 0, description: The caller's open items due today or earlier. }
+        upcoming: { type: integer, minimum: 0, description: The caller's open items due after today or without a date. }
+        overdue: { type: [integer, 'null'], minimum: 0, description: Everyone's overdue open items in the caller's offices; null unless super admin or office admin. }
+    TaskListMember:
+      type: object
+      additionalProperties: false
+      required: [id, displayName]
+      properties:
+        id: { type: string, format: uuid }
+        displayName: { type: string }
+    TaskList:
+      type: object
+      additionalProperties: false
+      required: [id, name, description, datesText, ownerId, ownerName, color, version, taskCount, doneCount, overdueCount, members, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: [string, 'null'] }
+        datesText: { type: [string, 'null'], description: Free text such as "12-15 Nov 2026". }
+        ownerId: { type: [string, 'null'], format: uuid }
+        ownerName: { type: [string, 'null'] }
+        color: { type: string, pattern: '^#[0-9a-f]{6}$' }
+        version: { type: integer, minimum: 1 }
+        taskCount: { type: integer, minimum: 0, description: Non-canceled tasks on the list. }
+        doneCount: { type: integer, minimum: 0 }
+        overdueCount: { type: integer, minimum: 0 }
+        members: { type: array, items: { $ref: '#/components/schemas/TaskListMember' }, description: The assignees of the list's tasks. }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    CreateTaskListRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        datesText: { type: [string, 'null'], maxLength: 100 }
+        ownerId: { type: string, format: uuid, description: Defaults to the caller. An active user with an office (or a super admin). }
+        color: { type: string, pattern: '^#[0-9a-f]{6}$', description: Assigned automatically from the palette when omitted. }
+    UpdateTaskListRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        description: { type: [string, 'null'], maxLength: 2000 }
+        datesText: { type: [string, 'null'], maxLength: 100 }
+        ownerId: { type: string, format: uuid }
+        color: { type: string, pattern: '^#[0-9a-f]{6}$' }
     DashboardTaskOffice:
       type: object
       additionalProperties: false

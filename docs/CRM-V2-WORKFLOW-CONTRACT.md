@@ -520,3 +520,71 @@ Implementation decisions (user, 2026-09-24, before W2):
 - Add comment still has "Assign to"; D5 removed it for the first release. Its "Remind on" date is
   declared but not rendered.
 - "Handover details" is computed but has no markup and no trigger. Documents upload has no API (Later).
+
+## 8. Task lists and task fields (T1, OpenAPI 2.33.0)
+
+Serves the CRM v2 Tasks page (boards `Tasks-*`). Additive: one new table, new nullable / defaulted
+`public.tasks` columns, new endpoints, optional request fields. v1 and `GET /v1/dashboard/manager-tasks`
+read the same rows as before. No priority in v2 (owner decision); the `priority` column stays untouched.
+
+### 8.1 Database — `20260929140000_task_lists_and_task_fields.sql`
+
+- `public.task_lists`: `name`, `description`, `dates_text` (free text such as "12–15 Nov 2026"),
+  `owner_id`, `color` (`#rrggbb`), `created_by`, `version`, timestamps. RLS on: select for `authenticated`
+  (lists are visible to everyone), full access for `kolss_api`. No delete in T1.
+- `public.tasks` gains `due_time time`, `note text (≤ 5000)`, `in_progress boolean default false`, `list_id`
+  (FK to `task_lists`, `on delete restrict`), `link_lead_id` (FK to `leads`, `on delete set null`),
+  `link_project_id`, `link_client_id` (plain uuids, **no foreign key**: P1 / CL1 may not exist yet).
+- Checks: a task has at most one of `list_id` / `link_*` (the boards offer one link kind); `due_time` needs
+  `due_at`; `in_progress` only while `status = 'open'`.
+- "In progress" is a boolean, not a new `task_status` value: an extra enum value would hide such tasks from
+  every v1 query that filters `status = 'open'` (Rule zero).
+- Storage of the due moment: `due_at` stays the office-local date at midnight (v1 convention) or, when
+  `due_time` is set, the office-local date and time. `due_time` tells a date-only task from one due at 00:00.
+
+### 8.2 API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/tasks?view=my_day\|upcoming\|all\|done\|list` | Unified feed (manual tasks + call-backs, comment reminders, visits; "no next step" leads are switched off). Filters `listId`, `assigneeId` (view `all`), `officeId`, `kinds`, `q`. Capped at 500 (`truncated`). |
+| `GET /v1/tasks/counts` | Sidebar badges: `myDay`, `upcoming`, `overdue` (admins only, else null). |
+| `GET /v1/tasks/{taskId}` | One manual task in the feed-item shape. |
+| `POST /v1/tasks` | Existing; new optional `dueTime`, `note`, `listId`, `link {type,id}`. |
+| `PATCH /v1/tasks/{taskId}` | Existing; now a partial update: `status`, `inProgress`, `assigneeId`, `title`, `note`, `dueDate`, `dueTime` (`status` alone still works for v1). |
+| `GET/POST /v1/task-lists`, `GET/PATCH /v1/task-lists/{listId}` | Lists with `taskCount`, `doneCount`, `overdueCount` and `members`. |
+
+View rules (all dates office-local, per task office):
+
+- `my_day`: the caller's open items due today or earlier (undated items excluded) plus items done today.
+- `upcoming`: the caller's open items due after today or with no date.
+- `done`: the caller's done items, latest first (manual tasks and visits marked visited in the last 60 days).
+- `all`: everyone's open items plus items done today; super admin, office admin and curator only (403 otherwise; each sees their own offices, a super admin all).
+- `list`: every task of `listId`, any assignee or office.
+- Kinds: manual task → `list` (on a list), `comment` (linked to a lead / project / client, the boards' "Task from
+  comment") or `personal`; automatic → `call`, `comment`, `visit` (and `nonext`, see below). Automatic items are
+  read-only (`canManage: false`) and close through their lead action (Q-T4).
+- "No next step" items (a lead with nothing planned, due today, the set of the v1 dashboard "current" section) are
+  **switched off** by owner decision (2026-09-29): not in the feed, the counts or any view. The code stays behind
+  `taskFeedIncludeNoNextStep` in `internal/crmapi/task_feed.go`; flip it to bring them back (and update this text).
+- `dueTime` of automatic items is the office-local time; a call-back exactly at 00:00 has none.
+
+Rules for writes:
+
+- Status, `inProgress`, assignee, date and time: any member of the task's office (the v1 rule) or the owner of the
+  task's list. Done and canceled clear `inProgress`; reopening starts at "To do". The assignee must be an active
+  member of the task's office; a super admin can be assigned in any office without a membership (owner decision
+  2026-09-29). The v1 dashboard keeps its own manager rule and shows such a task as unassigned. A time needs a date; clearing the date clears the time.
+- Title and note (Q-T2 default): the creator, the assignee, the list owner, an office admin of the task's office and
+  a super admin; otherwise 403 `task_edit_forbidden`.
+- Deleting a task is `status: canceled` (soft delete, Q-T3 default); canceled tasks leave every view. No delete
+  endpoint, no UI was drawn.
+- Links: only `lead` is accepted (the lead must be active and belong to the task's office). `project` and `client`
+  return 400 on `link`; enable them in `taskLinkTypeAvailable` when P1 / CL1 can validate the id and office.
+- Lists: anyone signed in creates one (owner defaults to the caller, colour from a four-colour palette unless sent);
+  only the owner or a super admin edits (403 `task_list_forbidden`); optimistic `If-Match`. Members are derived
+  from the assignees of the list's tasks (Q-T1 default), not stored.
+
+### 8.3 Rollout
+
+Migration → API → CRM (T2–T4). CRM v1 needs no change. The API reads the new columns, so it must not ship before
+the migration.
