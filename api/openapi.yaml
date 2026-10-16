@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.33.0
+  version: 2.34.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -317,6 +317,41 @@ paths:
       security: [{ bearerAuth: [] }]
       responses:
         '204': { description: Marker removed }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/leads/{leadId}/reactions/{kind}:
+    description: >
+      Personal reactions (like / star / question), added in 2.34.0. Any office member may
+      add or remove their own reaction on an active lead; reactions never reset and do not
+      count as lead activity.
+    parameters:
+      - { $ref: '#/components/parameters/LeadId' }
+      - name: kind
+        in: path
+        required: true
+        schema: { $ref: '#/components/schemas/LeadReactionKind' }
+    put:
+      tags: [Leads]
+      operationId: setLeadReaction
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Current reaction state for this kind
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LeadReaction' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [Leads]
+      operationId: deleteLeadReaction
+      security: [{ bearerAuth: [] }]
+      responses:
+        '204': { description: Own reaction removed }
         '400': { $ref: '#/components/responses/CRMError' }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
@@ -2521,6 +2556,16 @@ components:
         markers:
           type: array
           items: { $ref: '#/components/schemas/LeadMarker' }
+        reactions:
+          description: Per-kind reaction summary (added in 2.34.0); kinds without reactions are omitted.
+          type: array
+          items: { $ref: '#/components/schemas/LeadReaction' }
+        last_activity_at:
+          description: >
+            Latest of the lead arrival time and its newest history event (added in 2.34.0).
+            Reactions and markers do not count.
+          type: string
+          format: date-time
     CallStatus:
       type: string
       enum: [reached, no_answer, callback_requested]
@@ -2610,6 +2655,18 @@ components:
         actor_id: { type: string, format: uuid }
         actor_name: { type: string }
         marked_at: { type: string, format: date-time }
+    LeadReactionKind:
+      type: string
+      enum: [like, star, question]
+    LeadReaction:
+      type: object
+      additionalProperties: false
+      required: [kind, count, user_ids, user_names]
+      properties:
+        kind: { $ref: '#/components/schemas/LeadReactionKind' }
+        count: { type: integer, minimum: 0 }
+        user_ids: { type: array, items: { type: string, format: uuid } }
+        user_names: { type: array, items: { type: string } }
     LatestTimelineComment:
       type: object
       additionalProperties: false

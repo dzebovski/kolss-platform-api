@@ -164,7 +164,29 @@ const leadJSONExpression = `
 			from public.lead_markers m
 			left join public.profiles mp on mp.id = m.actor_id
 			where m.lead_id = l.id
-		), '[]'::jsonb)
+		), '[]'::jsonb),
+		'reactions', coalesce((
+			select jsonb_agg(jsonb_build_object(
+				'kind', rx.kind,
+				'count', rx.user_count,
+				'user_ids', rx.user_ids,
+				'user_names', rx.user_names
+			) order by rx.kind)
+			from (
+				select lr.kind,
+					count(*) as user_count,
+					jsonb_agg(lr.user_id order by lr.created_at, lr.user_id) as user_ids,
+					jsonb_agg(coalesce(rp.display_name, '') order by lr.created_at, lr.user_id) as user_names
+				from public.lead_reactions lr
+				left join public.profiles rp on rp.id = lr.user_id
+				where lr.lead_id = l.id
+				group by lr.kind
+			) rx
+		), '[]'::jsonb),
+		'last_activity_at', greatest(
+			coalesce(l.source_created_at, l.created_at),
+			(select max(ae.created_at) from public.lead_events ae where ae.lead_id = l.id)
+		)
 	)
 `
 
