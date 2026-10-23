@@ -50,6 +50,7 @@ const projectDetailSQL = `
 	select jsonb_build_object(
 		'id', p.id,
 		'leadId', p.lead_id,
+		'clientId', p.client_id,
 		'officeId', p.office_id,
 		'code', l.reference_id,
 		'status', p.status,
@@ -310,6 +311,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		select jsonb_build_object(
 			'id', p.id,
 			'leadId', p.lead_id,
+			'clientId', p.client_id,
 			'code', l.reference_id,
 			'clientName', coalesce(l.name, ''),
 			'products', to_jsonb(l.products),

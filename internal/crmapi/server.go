@@ -161,6 +161,12 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/projects/{projectId}/contract", s.handleAddProjectContract)
 			r.Post("/v1/projects/{projectId}/payments", s.handleAddProjectPayment)
 			r.Post("/v1/projects/{projectId}/files/uploads", s.handleCreateProjectFileUpload)
+			r.Get("/v1/clients", s.handleListClients)
+			r.Get("/v1/clients/facets", s.handleClientFacets)
+			r.Get("/v1/clients/match", s.handleMatchClient)
+			r.Get("/v1/clients/{clientId}", s.handleGetClient)
+			r.Patch("/v1/clients/{clientId}", s.handleUpdateClient)
+			r.Post("/v1/clients/{clientId}/merge", s.handleMergeClients)
 		})
 
 		for _, pattern := range crmCORSRoutePatterns {
@@ -249,6 +255,11 @@ var crmCORSRoutePatterns = []string{
 	"/v1/projects/{projectId}/contract",
 	"/v1/projects/{projectId}/payments",
 	"/v1/projects/{projectId}/files/uploads",
+	"/v1/clients",
+	"/v1/clients/facets",
+	"/v1/clients/match",
+	"/v1/clients/{clientId}",
+	"/v1/clients/{clientId}/merge",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {
