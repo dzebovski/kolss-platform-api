@@ -669,3 +669,75 @@ client stay disabled in `taskLinkTypeAvailable`.
 Migration → API → CRM (CL2–CL4). CRM v1 needs no change: the extra `client_id` property of the lead JSON is ignored
 (`Lead` allows additional properties). The API reads the new tables and columns, so it must not ship before the
 migration. The backfill runs inside the migration transaction.
+
+## 10. Project pipeline 2.1 (P1b, OpenAPI 2.36.0)
+
+Owner decisions of 2026-10-23 (Q-P8…Q-P17). Replaces the P1 status vocabulary, adds the estimate, intro / main
+contracts, contract and payment edit / delete, comments, designer, lead info through the project and the kanban.
+Builds on the P1 projects (`20260929120000_projects_v2.sql`); the earlier projects section only lives in the OpenAPI.
+
+### 10.1 Database — `20261024120000_project_pipeline_2_1.sql`
+
+- `projects.status` (and `status_before_cancel`): `estimate`, `intro_contract`, `measure`, `design`, `main_contract`,
+  `prepayment`, `factory`, `production`, `final_payment`, `installation`, `completed`, `cancelled`; default `estimate`.
+  Existing rows: `none` / `express` -> `estimate`, `contract` -> `main_contract`, the rest unchanged.
+- **CRM v1 impact (checked 2026-10-23): none.** No v1 screen (`/projects` is a placeholder), no API v1 handler and no
+  RPC caller reads `projects.status`. The old dashboard SQL functions (`get_dashboard_stats`, `get_dashboard_overview`,
+  `get_workflow_dashboard`) mention stage codes of the pre-P1 vocabulary but nothing calls them.
+- `projects.designer_id` (nullable, `profiles`).
+- `offices.intro_contract_default_amount` / `_currency` (both or neither): Legionowo (office code `warsaw`) 500 PLN,
+  Kyiv empty (no prefill) until the owner gives the UAH amount (Q-P15b).
+- `project_estimate_lines (project_id, line, amount, currency, note)`, lines `kitchen|appliances|installation|countertop`,
+  one row per set line.
+- `project_contracts.kind` (`intro|main`, existing rows `main`), unique `(project_id, kind)` instead of one per project.
+- `project_payments.contract_id` (not null; existing payments attach to the project's contract).
+- `project_events.event_type` also allows `estimate_updated`, `contract_updated`, `contract_deleted`, `payment_updated`,
+  `payment_deleted`, `details_updated`, `lead_info_updated`, `comment`, `measurement_visit`.
+
+### 10.2 API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/projects/board` | Kanban: 12 columns in pipeline order, `count` + first `limit` (20, max 50) cards each, `nextCursor` per column (continue with `GET /v1/projects?status=<column>&cursor=`). Same filters as the list. |
+| `PATCH /v1/projects/{id}` | `managerId`, `designerId` (null clears). Active members of the project office. Event `details_updated`. |
+| `PATCH /v1/projects/{id}/lead-info` | Patches the linked lead with the logic of `PATCH /v1/leads/{id}/info` (`If-Match` optional). Event `lead_info_updated`. |
+| `PUT /v1/projects/{id}/estimate` | Lines replace / `null` removes. `409 estimate_locked` once a main contract exists. Event `estimate_updated` with old / new per line. |
+| `POST /v1/projects/{id}/comments` | Any user with office access, `Idempotency-Key`. Event `comment`. `409 project_cancelled`. |
+| `POST /v1/projects/{id}/contract` | Now takes `kind` (`intro|main`, default `main`). |
+| `PATCH` / `DELETE /v1/projects/{id}/contracts/{contractId}` | Edit / delete; events `contract_updated` / `contract_deleted`. Delete needs no payments on it (`409 contract_has_payments`). |
+| `POST /v1/projects/{id}/payments` | Now takes `contractId` (default: main, else intro). |
+| `PATCH` / `DELETE /v1/projects/{id}/payments/{paymentId}` | Edit / delete; events `payment_updated` / `payment_deleted`. |
+
+Rules:
+
+- **Stages.** Moved by hand with `POST …/status` to any stage except `intro_contract`, `main_contract` (only by adding a
+  contract) and `cancelled` (only by Cancel); backwards is allowed. Adding a contract moves the stage **forward only**
+  (intro -> `intro_contract`, main -> `main_contract`); a project already further along keeps its stage. Payments never
+  change the stage. `measure` keeps its details (responsible, date + time, address, done + result); the express rules are
+  gone; every other stage takes an optional event date. The API does **not** book the 1-hour calendar visit (it did not
+  in P1 either): the CRM books it through `POST /v1/appointments`.
+- **Money.** Amounts are per contract and in the contract's currency. The paid intro amount is **credited** to the main
+  contract when both have the same currency (at most the main total). Per contract the card gives `paidAmount` (own
+  payments), `creditedAmount` (main only), `remainingAmount` (= total - paid - credited, not below 0) and
+  `target50Amount` (main only, 50% of the total rounded up to the cent; a target, not a gate). A payment never exceeds
+  the remaining amount of its contract; an intro payment also may not push the main contract past its total. A contract
+  total cannot be edited below what is paid, and a currency cannot change while payments exist.
+- **Intro amount.** Free per project; `Project.introDefault` (`{amount, currency}` or `null`) is the office default for the
+  CRM to prefill.
+- **Card shape.** `Project` adds `designer`, `estimate {lines, totals[], locked}`, `introDefault`, `contracts {intro, main}`;
+  `contract` stays as a deprecated alias of the main contract; payments carry `contractId` / `contractKind`.
+  `ProjectListItem` adds `designer` and `estimateTotals[]`. Client card `contractValue` and project rows use the main
+  contract only (intro payments of the same currency count as paid); intro-only projects have no contract value.
+- **Permissions.** Everything but the comment needs `CanEditProject` (the project manager, office admin of the office,
+  super admin); `403 project_edit_forbidden` otherwise. A cancelled project is read-only (`409 project_cancelled`).
+- **Create project.** Always starts in `estimate`; `projectType` is only stored.
+- **Timeline of the lead.** The `project_created` lead event exists behind the constant `leadEventProjectCreatedEnabled`
+  (off): CRM v1 prints unknown event types raw. Switch it on after the CRM ships the `event.project_created` i18n fallback.
+- **Measurement visit.** Marking a measurement appointment `visited` (`PATCH /v1/appointments/{id}`) writes
+  `measurement_visit` on the lead's project (no-op without a project).
+
+### 10.3 Rollout
+
+CRM (v1 needs nothing; v2 client gets the new statuses and shapes) -> migration -> API. The API must not ship before the
+migration (new columns and statuses); the previous API fails on the new status values and on `contract_id`, so run the
+migration and deploy the API back to back. Production has 2 projects; the migration maps them.

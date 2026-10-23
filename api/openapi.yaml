@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.35.0
+  version: 2.36.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1125,9 +1125,10 @@ paths:
         Creates the lead's single project, links it (`leads.converted_project_id`) and moves the lead to
         v2 status `project`, after which the lead only accepts comments and questions (`409 lead_terminal`).
         `projectType` and `managerId` default to the lead's stored project type and responsible manager,
-        then to the lead's owner, then to the caller. The first project status follows the type:
-        express → `express`, measure → `measure`, contract → `design`, no type → `none`.
-        The lead's own data is not copied: the project card reads it from the lead.
+        then to the lead's owner, then to the caller. Since 2.36.0 every project starts in `estimate`
+        whatever the type (the type is only stored). The lead's own data is not copied: the project
+        card reads it from the lead. The lead timeline entry `project_created` is not written yet
+        (CRM v1 needs its i18n fallback first).
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/LeadId' }
@@ -1210,6 +1211,31 @@ paths:
                     description: Project status code → count. Statuses without projects are absent.
         '400': { $ref: '#/components/responses/CRMError' }
         '403': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/board:
+    get:
+      tags: [Projects]
+      operationId: getProjectBoard
+      summary: Projects kanban (CRM v2, 2.36.0)
+      description: >
+        One column per status in pipeline order (all 12, empty ones included) with the number of matching
+        projects and the first `limit` cards of each, newest first. Takes the listProjects filters (a
+        `status` filter leaves the other columns empty). More cards of a column: listProjects with
+        `status=<column>` and the column's `nextCursor` (same filters).
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: managerId, in: query, schema: { type: string, format: uuid } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: limit, in: query, description: Cards per column., schema: { type: integer, minimum: 1, maximum: 50, default: 20 } }
+      responses:
+        '200':
+          description: Board
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectBoard' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
   /v1/projects/{projectId}:
     get:
       tags: [Projects]
@@ -1219,12 +1245,122 @@ paths:
       parameters: [{ $ref: '#/components/parameters/ProjectId' }]
       responses:
         '200':
-          description: Project with contract, payments and the caller's permissions
+          description: Project with estimate, contracts, payments and the caller's permissions
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Project' }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [Projects]
+      operationId: updateProjectDetails
+      summary: Edit details - manager and designer (2.36.0)
+      description: >
+        Partial: send `managerId` (cannot be cleared) and/or `designerId` (`null` clears it). Both must be
+        active members of the project's office. Writes `details_updated` with the old and new ids.
+        Only the project manager and admins (`403 project_edit_forbidden`); a cancelled project is
+        read-only (`409 project_cancelled`).
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectDetailsRequest' }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/lead-info:
+    patch:
+      tags: [Projects]
+      operationId: updateProjectLeadInfo
+      summary: Edit the lead info from the project card (2.36.0)
+      description: >
+        Patches the linked lead with exactly the logic of PATCH /v1/leads/{leadId}/info (same body, same
+        validation, one `lead_edited` event on the lead, lead version +1); nothing is copied onto the project.
+        `If-Match` (the lead version) is optional here: without it the sent fields are applied on top of the
+        current lead. Only the project manager and admins (`403 project_edit_forbidden`). Writes
+        `lead_info_updated` on the project timeline when something changed.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { name: If-Match, in: header, required: false, schema: { type: string }, description: Lead version. }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateLeadInfoRequest' }
+      responses:
+        '200':
+          description: Project (the client block shows the new lead data)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/estimate:
+    put:
+      tags: [Projects]
+      operationId: updateProjectEstimate
+      summary: Edit the estimate lines (2.36.0)
+      description: >
+        Four optional lines: `kitchen`, `appliances`, `installation`, `countertop`, each amount + currency +
+        note. A sent line replaces the stored one, `null` removes it, an omitted line is untouched. Allowed
+        until a main contract exists (`409 estimate_locked`). One `estimate_updated` event carries the old
+        and new value of every changed line. The totals per currency are on the project (`estimate.totals`).
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ProjectId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectEstimateRequest' }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/comments:
+    post:
+      tags: [Projects]
+      operationId: addProjectComment
+      summary: Add a comment to the project timeline (2.36.0)
+      description: >
+        Any user with access to the project's office (not only the manager). Writes a `comment` event.
+        A cancelled project answers `409 project_cancelled`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AddProjectCommentRequest' }
+      responses:
+        '201':
+          description: Project (the comment is the newest timeline entry)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/projects/{projectId}/timeline:
     get:
       tags: [Projects]
@@ -1252,12 +1388,15 @@ paths:
       operationId: changeProjectStatus
       summary: Change status (or update the details of the current one)
       description: >
-        Per status: `express` needs responsibleId, what and eventDate (the deadline); `measure` needs
-        responsibleId, eventDate, eventTime and address; both take `done` and a `result` that is required
-        once `done`. `design`, `production` and `installation` take an optional eventDate (+ eventTime).
-        `completed` takes no event. `contract` is set only by adding a contract and `cancelled` only by
-        cancelling. Sending the current status updates its details (timeline entry `status_updated`).
-        Only the project's responsible manager and admins may change it (`403 project_edit_forbidden`).
+        Moves the project by hand to any stage (forwards or backwards) except `intro_contract` /
+        `main_contract` (set only by adding a contract) and `cancelled` (only by cancelling) - those answer
+        `400 validation_error` on `status`. `measure` needs responsibleId, eventDate, eventTime and address
+        and takes `done` + a `result` that is required once `done`; `completed` takes no event; every other
+        stage takes an optional eventDate (+ eventTime). Since 2.36.0 the express rules are gone (`what` is
+        accepted and ignored). The API does not create the 1-hour calendar visit: the CRM books it through
+        the appointments API. Sending the current status updates its details (timeline entry
+        `status_updated`). Only the project's responsible manager and admins may change it
+        (`403 project_edit_forbidden`).
       security: [{ bearerAuth: [] }]
       parameters: [{ $ref: '#/components/parameters/ProjectId' }]
       requestBody:
@@ -1322,10 +1461,15 @@ paths:
     post:
       tags: [Projects]
       operationId: addProjectContract
-      summary: Add the project's contract (sets status `contract`)
+      summary: Add the project's intro or main contract (moves the status forward)
       description: >
-        One contract per project (`409 contract_exists`). `fileId` is optional: the id returned by
+        `kind` is `intro` or `main` (default `main`, for clients written before 2.36.0); at most one of
+        each per project (`409 contract_exists`). Adding an intro contract moves the project to
+        `intro_contract`, a main contract to `main_contract` - only forwards: a project already further
+        along keeps its status. The intro amount is free; `introDefault` on the project is the office
+        default for the CRM to prefill. `fileId` is optional: the id returned by
         POST /v1/projects/{projectId}/files/uploads with kind `contract`, uploaded before this call.
+        A main total below what is already paid (the paid intro amount counts) is refused.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/ProjectId' }
@@ -1349,10 +1493,14 @@ paths:
     post:
       tags: [Projects]
       operationId: addProjectPayment
-      summary: Add a payment (in the contract's currency)
+      summary: Add a payment to a contract (in the contract's currency)
       description: >
-        Needs a contract (`409 contract_required`). The amount can never exceed the remaining balance
-        (`400 validation_error`, fieldErrors.amount). `fileId` is optional: a receipt uploaded with kind `receipt`.
+        `contractId` picks the contract; omitted, the main contract is used (the intro one when it is the
+        only contract). Needs a contract (`409 contract_required`). The amount can never exceed the
+        contract's remaining balance - for the main contract the credited intro amount counts as paid, and an
+        intro payment may not push the main contract past its total (`400 validation_error`,
+        fieldErrors.amount). Payments never change the project status. `fileId` is optional: a receipt
+        uploaded with kind `receipt`.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/ProjectId' }
@@ -1369,6 +1517,95 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Project' }
         '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/contracts/{contractId}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/ContractId' }
+    patch:
+      tags: [Projects]
+      operationId: updateProjectContract
+      summary: Edit a contract (2.36.0)
+      description: >
+        Partial. The total cannot drop below what is already paid on the contract (for the main contract the
+        paid intro amount counts), the currency cannot change while payments exist on it. Writes
+        `contract_updated` with the old and new value of each changed field. Project manager and admins.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectContractRequest' }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [Projects]
+      operationId: deleteProjectContract
+      summary: Delete a contract (2.36.0)
+      description: >
+        Only a contract without payments (`409 contract_has_payments`: delete the payments first). The
+        project status is left as it is; deleting the main contract unlocks the estimate. Writes
+        `contract_deleted`. Project manager and admins.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/payments/{paymentId}:
+    parameters:
+      - { $ref: '#/components/parameters/ProjectId' }
+      - { $ref: '#/components/parameters/PaymentId' }
+    patch:
+      tags: [Projects]
+      operationId: updateProjectPayment
+      summary: Edit a payment (2.36.0)
+      description: >
+        Partial: amount, paidOn, note (empty string clears it), fileId (replaces the receipt). The amount is
+        checked against the contract balance without this payment. A payment cannot move to another
+        contract. Writes `payment_updated`. Project manager and admins.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateProjectPaymentRequest' }
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [Projects]
+      operationId: deleteProjectPayment
+      summary: Delete a payment (2.36.0)
+      description: Writes `payment_deleted` with the removed values. Project manager and admins.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Updated project
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Project' }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
         '409': { $ref: '#/components/responses/CRMError' }
@@ -1774,6 +2011,16 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    ContractId:
+      name: contractId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    PaymentId:
+      name: paymentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
     ClientId:
       name: clientId
       in: path
@@ -2053,13 +2300,15 @@ components:
     ProjectStatus:
       type: string
       description: >
-        Lifecycle order: none → express (Paid express evaluation) → measure (Paid measurement visit) → design
-        (Design in progress) → contract (Contract signed) → production → installation → completed. `cancelled`
-        is outside the order; `none` is "Status not set".
-      enum: [none, express, measure, design, contract, production, installation, completed, cancelled]
+        Pipeline order (2.36.0): estimate → intro_contract → measure → design → main_contract → prepayment
+        (target 50%) → factory (sent to factory) → production → final_payment → installation → completed.
+        `cancelled` is outside the order. Stages move by hand (Change status, backwards allowed); only adding
+        a contract sets intro_contract / main_contract, only Cancel sets cancelled; payments never move the
+        stage. Replaces none / express / contract of 2.35.0 (none, express -> estimate; contract -> main_contract).
+      enum: [estimate, intro_contract, measure, design, main_contract, prepayment, factory, production, final_payment, installation, completed, cancelled]
     ProjectType:
       type: string
-      description: Create project "Project type"; sets the first status.
+      description: Create project "Project type"; stored only, it no longer sets the first status (2.36.0).
       enum: [express, measure, contract]
     ProjectCancelReason:
       type: string
@@ -2082,26 +2331,41 @@ components:
         id: { type: string, format: uuid, description: "Download with GET /v1/files/{fileId}/download-url." }
         fileName: { type: string }
         sizeBytes: { type: integer }
+    ProjectContractKind:
+      type: string
+      enum: [intro, main]
+      description: The intro contract covers the measurement and the design and is credited to the main one.
     ProjectContract:
       type: object
       additionalProperties: false
-      required: [id, number, signedOn, totalAmount, currency, paidAmount, remainingAmount, file]
+      required: [id, kind, number, signedOn, totalAmount, currency, paidAmount, creditedAmount, remainingAmount, target50Amount, file]
       properties:
         id: { type: string, format: uuid }
+        kind: { $ref: '#/components/schemas/ProjectContractKind' }
         number: { type: string }
         signedOn: { type: string, format: date }
         totalAmount: { type: number, description: "Major units, at most 2 decimals." }
         currency: { $ref: '#/components/schemas/ProjectCurrency' }
-        paidAmount: { type: number }
-        remainingAmount: { type: number }
+        paidAmount: { type: number, description: Payments recorded on this contract. }
+        creditedAmount:
+          type: number
+          description: >
+            Main contract: the paid intro amount credited to it (same currency, at most the main total);
+            0 for the intro contract.
+        remainingAmount: { type: number, description: total - paidAmount - creditedAmount, never below 0. }
+        target50Amount:
+          type: [number, 'null']
+          description: Main contract only - 50% of the total (rounded up to the cent), a target shown on the card, not a gate.
         file:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectFileRef' }]
     ProjectPayment:
       type: object
       additionalProperties: false
-      required: [id, amount, paidOn, note, createdAt, createdByName, file]
+      required: [id, contractId, contractKind, amount, paidOn, note, createdAt, createdByName, file]
       properties:
         id: { type: string, format: uuid }
+        contractId: { type: string, format: uuid }
+        contractKind: { $ref: '#/components/schemas/ProjectContractKind' }
         amount: { type: number, description: In the contract's currency. }
         paidOn: { type: string, format: date }
         note: { type: [string, 'null'] }
@@ -2112,16 +2376,9 @@ components:
     ProjectStageDetails:
       type: object
       description: >
-        Kept per stage so editing one does not erase the other. `express`: responsibleId, what, done, result.
-        `measure`: responsibleId, address, done, result. The dates are the project's eventDate / eventTime.
+        Kept per stage. `measure`: responsibleId, address, done, result. The dates are the project's
+        eventDate / eventTime. Old projects may still carry an `express` entry (no longer written or used).
       properties:
-        express:
-          type: object
-          properties:
-            responsibleId: { type: string, format: uuid }
-            what: { type: string }
-            done: { type: boolean }
-            result: { type: string }
         measure:
           type: object
           properties:
@@ -2155,12 +2412,16 @@ components:
         - eventTime
         - statusDetails
         - manager
+        - designer
         - client
         - createdAt
         - createdByName
         - statusChangedAt
         - lastActivityAt
         - cancellation
+        - estimate
+        - introDefault
+        - contracts
         - contract
         - payments
         - permissions
@@ -2178,6 +2439,9 @@ components:
         statusDetails: { $ref: '#/components/schemas/ProjectStageDetails' }
         manager:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        designer:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+          description: Optional, chosen in Edit details (2.36.0).
         client:
           type: object
           additionalProperties: false
@@ -2193,9 +2457,29 @@ components:
         lastActivityAt: { type: string, format: date-time }
         cancellation:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectCancellation' }]
+        estimate: { $ref: '#/components/schemas/ProjectEstimate' }
+        introDefault:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectMoney' }]
+          description: >
+            The office's default intro contract amount, for the CRM to prefill (editable per project).
+            Legionowo 500 PLN; null where none is configured yet (Kyiv: amount still open).
+        contracts:
+          type: object
+          additionalProperties: false
+          required: [intro, main]
+          properties:
+            intro:
+              oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectContract' }]
+            main:
+              oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectContract' }]
         contract:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectContract' }]
-        payments: { type: array, items: { $ref: '#/components/schemas/ProjectPayment' } }
+          deprecated: true
+          description: The main contract (kept for clients written before 2.36.0); use `contracts`.
+        payments:
+          type: array
+          description: Payments of both contracts, oldest first; `contractId` / `contractKind` tell them apart.
+          items: { $ref: '#/components/schemas/ProjectPayment' }
         permissions:
           type: object
           additionalProperties: false
@@ -2204,10 +2488,44 @@ components:
             canEdit:
               type: boolean
               description: The responsible manager and admins can change the project; others can only view.
+    ProjectMoney:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount: { type: number, description: "Major units, at most 2 decimals." }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+    ProjectEstimateLine:
+      type: object
+      additionalProperties: false
+      required: [amount, currency, note]
+      properties:
+        amount: { type: number, exclusiveMinimum: 0 }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        note: { type: [string, 'null'], maxLength: 300 }
+    ProjectEstimate:
+      type: object
+      additionalProperties: false
+      required: [lines, totals, locked]
+      properties:
+        lines:
+          type: object
+          additionalProperties: false
+          required: [kitchen, appliances, installation, countertop]
+          properties:
+            kitchen: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLine' }] }
+            appliances: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLine' }] }
+            installation: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLine' }] }
+            countertop: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLine' }] }
+        totals:
+          type: array
+          description: Sum of the lines per currency (a line may have its own currency).
+          items: { $ref: '#/components/schemas/ProjectMoney' }
+        locked: { type: boolean, description: True once a main contract exists - the estimate is then read-only. }
     ProjectListItem:
       type: object
       additionalProperties: false
-      required: [id, leadId, clientId, code, clientName, products, status, projectType, eventDate, eventTime, manager, createdAt, lastComment]
+      required: [id, leadId, clientId, code, clientName, products, status, projectType, eventDate, eventTime, manager, designer, estimateTotals, createdAt, lastComment]
       properties:
         id: { type: string, format: uuid }
         leadId: { type: string, format: uuid }
@@ -2222,6 +2540,12 @@ components:
         eventTime: { type: [string, 'null'] }
         manager:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        designer:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        estimateTotals:
+          type: array
+          description: Estimate total per currency (empty when no line is set). Added in 2.36.0.
+          items: { $ref: '#/components/schemas/ProjectMoney' }
         createdAt: { type: string, format: date-time }
         lastComment:
           oneOf:
@@ -2405,7 +2729,28 @@ components:
         id: { type: string, format: uuid }
         type:
           type: string
-          enum: [created, status_changed, status_updated, contract_added, payment_added, cancelled, restored]
+          enum:
+            - created
+            - status_changed
+            - status_updated
+            - cancelled
+            - restored
+            - estimate_updated
+            - contract_added
+            - contract_updated
+            - contract_deleted
+            - payment_added
+            - payment_updated
+            - payment_deleted
+            - details_updated
+            - lead_info_updated
+            - comment
+            - measurement_visit
+          description: >
+            Since 2.36.0: estimate_updated (old / new value per changed line), contract_updated / contract_deleted,
+            payment_updated / payment_deleted, details_updated (managerId / designerId), lead_info_updated
+            (fields), comment (text in `comment`), measurement_visit (a measurement appointment of the
+            lead was marked held; newValue has appointmentId and startsAt).
         actor:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
         oldValue: { type: [object, 'null'], additionalProperties: true }
@@ -2432,7 +2777,7 @@ components:
         eventDate: { type: [string, 'null'], format: date }
         eventTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$' }
         responsibleId: { type: [string, 'null'], format: uuid }
-        what: { type: [string, 'null'], maxLength: 500 }
+        what: { type: [string, 'null'], maxLength: 500, deprecated: true, description: "Express leftover, accepted and ignored since 2.36.0." }
         address: { type: [string, 'null'], maxLength: 500 }
         done: { type: [boolean, 'null'] }
         result: { type: [string, 'null'], maxLength: 500 }
@@ -2453,6 +2798,7 @@ components:
       additionalProperties: false
       required: [number, signedOn, totalAmount, currency]
       properties:
+        kind: { $ref: '#/components/schemas/ProjectContractKind' }
         number: { type: string, minLength: 1, maxLength: 60 }
         signedOn: { type: string, format: date }
         totalAmount: { type: number, exclusiveMinimum: 0, description: "Major units, at most 2 decimals." }
@@ -2463,10 +2809,85 @@ components:
       additionalProperties: false
       required: [amount, paidOn]
       properties:
+        contractId: { type: [string, 'null'], format: uuid, description: "Defaults to the main contract (the intro one when it is the only contract)." }
         amount: { type: number, exclusiveMinimum: 0, description: "Major units, at most 2 decimals." }
         paidOn: { type: string, format: date }
         note: { type: [string, 'null'], maxLength: 300 }
         fileId: { type: [string, 'null'], format: uuid }
+    UpdateProjectDetailsRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        managerId: { type: string, format: uuid }
+        designerId: { type: [string, 'null'], format: uuid, description: "null clears the designer." }
+    UpdateProjectEstimateRequest:
+      type: object
+      additionalProperties: false
+      required: [lines]
+      properties:
+        lines:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          description: A line replaces the stored one, null removes it, an omitted line is untouched.
+          properties:
+            kitchen: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLineInput' }] }
+            appliances: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLineInput' }] }
+            installation: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLineInput' }] }
+            countertop: { oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectEstimateLineInput' }] }
+    ProjectEstimateLineInput:
+      type: object
+      additionalProperties: false
+      required: [amount, currency]
+      properties:
+        amount: { type: number, exclusiveMinimum: 0, description: "Major units, at most 2 decimals." }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        note: { type: [string, 'null'], maxLength: 300 }
+    AddProjectCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 1000 }
+    UpdateProjectContractRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        number: { type: string, minLength: 1, maxLength: 60 }
+        signedOn: { type: string, format: date }
+        totalAmount: { type: number, exclusiveMinimum: 0 }
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        fileId: { type: string, format: uuid, description: "Replaces the contract file (uploaded with kind contract). It cannot be cleared yet." }
+    UpdateProjectPaymentRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        amount: { type: number, exclusiveMinimum: 0 }
+        paidOn: { type: string, format: date }
+        note: { type: string, maxLength: 300, description: "Empty string clears the note." }
+        fileId: { type: string, format: uuid, description: "Replaces the receipt (uploaded with kind receipt). It cannot be cleared yet." }
+    ProjectBoardColumn:
+      type: object
+      additionalProperties: false
+      required: [status, count, items, nextCursor]
+      properties:
+        status: { $ref: '#/components/schemas/ProjectStatus' }
+        count: { type: integer, description: All matching projects in this status. }
+        items: { type: array, items: { $ref: '#/components/schemas/ProjectListItem' } }
+        nextCursor: { type: string, description: "Empty when all cards are shown; else the cursor for listProjects with status=<column>." }
+    ProjectBoard:
+      type: object
+      additionalProperties: false
+      required: [total, columns]
+      properties:
+        total: { type: integer }
+        columns:
+          type: array
+          description: All 12 statuses in pipeline order, cancelled last.
+          items: { $ref: '#/components/schemas/ProjectBoardColumn' }
     CreateProjectFileUploadRequest:
       type: object
       additionalProperties: false
