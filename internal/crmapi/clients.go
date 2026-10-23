@@ -97,9 +97,12 @@ var clientCardSQL = `
 				from (
 					select ct.currency, sum(ct.total_amount) as total, sum(coalesce(pay.paid, 0)) as paid
 					from public.projects p
-					join public.project_contracts ct on ct.project_id = p.id
+					join public.project_contracts ct on ct.project_id = p.id and ct.kind = 'main'
 					left join lateral (
-						select sum(pp.amount) as paid from public.project_payments pp where pp.project_id = p.id
+						select sum(pp.amount) as paid
+						from public.project_payments pp
+						join public.project_contracts pc on pc.id = pp.contract_id
+						where pp.project_id = p.id and pc.currency = ct.currency
 					) pay on true
 					where p.client_id = c.id and p.status <> 'cancelled'
 					group by ct.currency
@@ -139,8 +142,12 @@ var clientCardSQL = `
 					select jsonb_build_object(
 						'currency', ct.currency,
 						'totalAmount', ct.total_amount,
-						'paidAmount', coalesce((select sum(pp.amount) from public.project_payments pp where pp.project_id = y.id), 0))
-					from public.project_contracts ct where ct.project_id = y.id))
+						'paidAmount', coalesce((
+							select sum(pp.amount)
+							from public.project_payments pp
+							join public.project_contracts pc on pc.id = pp.contract_id
+							where pp.project_id = y.id and pc.currency = ct.currency), 0))
+					from public.project_contracts ct where ct.project_id = y.id and ct.kind = 'main'))
 				order by y.created_at desc, y.id desc)
 			from (
 				select * from public.projects p

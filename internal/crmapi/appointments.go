@@ -783,6 +783,12 @@ func (s *Server) updateAppointment(
 	); err != nil {
 		return appointment{}, err
 	}
+	// Pipeline 2.1 (Q-PC1): a measurement marked held is a timeline entry of the lead's project.
+	if currentKind == appointmentKindMeasurement && nextStatus == "visited" && currentStatus != "visited" {
+		if err := s.recordMeasurementVisit(r.Context(), tx, actor.ID, leadID, appointmentID, nextStart.UTC().Format(time.RFC3339)); err != nil {
+			return appointment{}, err
+		}
+	}
 	return loadAppointmentTx(r, tx, appointmentID)
 }
 

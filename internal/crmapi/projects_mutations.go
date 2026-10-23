@@ -20,8 +20,10 @@ import (
 //	POST /v1/projects/{projectId}/status           Change status (per-status details, Q-P2)
 //	POST /v1/projects/{projectId}/cancel           Cancel project (reasons, Q-P6)
 //	POST /v1/projects/{projectId}/restore          Restore a cancelled project
-//	POST /v1/projects/{projectId}/contract         Add contract (sets status `contract`)
-//	POST /v1/projects/{projectId}/payments         Add payment (never above the remaining balance)
+//	POST /v1/projects/{projectId}/contract         Add contract, kind intro | main (moves the status forward)
+//	POST /v1/projects/{projectId}/payments         Add payment to a contract (never above the remaining balance)
+// Pipeline 2.1 (projects_pipeline.go) adds estimate, contract / payment edit and delete, comments,
+// details (manager, designer), lead info and the board.
 //	POST /v1/projects/{projectId}/files/uploads    Presigned upload for a contract file / receipt
 //
 // All of them need CanEditProject (the responsible manager or an admin, Q-P4).
@@ -238,7 +240,7 @@ func (s *Server) handleRestoreProject(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusConflict, "project_not_cancelled", "Only a cancelled project can be restored", nil)
 		return
 	}
-	restored := projectStatusNone
+	restored := projectStatusEstimate
 	if h.StatusBeforeCancel != nil {
 		restored = *h.StatusBeforeCancel
 	}
@@ -277,7 +279,7 @@ func (s *Server) handleAddProjectContract(w http.ResponseWriter, r *http.Request
 	}
 	const operation = "project.contract.add"
 	tx, key, ok := s.beginIdempotentTx(w, r, actor, operation,
-		r.PathValue("projectId"), in.Number, in.SignedOn, in.Currency, formatMoneyCents(in.TotalCents), trimmedText(req.FileID))
+		r.PathValue("projectId"), in.Kind, in.Number, in.SignedOn, in.Currency, formatMoneyCents(in.TotalCents), trimmedText(req.FileID))
 	if !ok {
 		return
 	}
@@ -286,13 +288,20 @@ func (s *Server) handleAddProjectContract(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	var exists bool
-	if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.project_contracts where project_id = $1)`, h.ID).Scan(&exists); err != nil {
+	rows, err := loadProjectContracts(r.Context(), tx, h.ID, nil)
+	if err != nil {
 		s.projectFail(w, r)
 		return
 	}
-	if exists {
-		s.writeError(w, r, http.StatusConflict, "contract_exists", "The project already has a contract", nil)
+	for _, row := range rows {
+		if row.Kind == in.Kind {
+			s.writeError(w, r, http.StatusConflict, "contract_exists", "The project already has a "+in.Kind+" contract", nil)
+			return
+		}
+	}
+	candidate := append(rows, projectContractRow{Kind: in.Kind, TotalCents: in.TotalCents, Currency: in.Currency})
+	if field, message := moneyFromContracts(candidate).overpaid(); field != "" {
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract", map[string]string{"totalAmount": message})
 		return
 	}
 	if in.FileID != nil {
@@ -302,22 +311,26 @@ func (s *Server) handleAddProjectContract(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into public.project_contracts (project_id, number, signed_on, total_amount, currency, file_id, created_by)
-		values ($1,$2,$3::date,$4::bigint::numeric / 100,$5,$6,$7)
-	`, h.ID, in.Number, in.SignedOn, in.TotalCents, in.Currency, in.FileID, actor.ID); err != nil {
+		insert into public.project_contracts (project_id, kind, number, signed_on, total_amount, currency, file_id, created_by)
+		values ($1,$2,$3,$4::date,$5::bigint::numeric / 100,$6,$7,$8)
+	`, h.ID, in.Kind, in.Number, in.SignedOn, in.TotalCents, in.Currency, in.FileID, actor.ID); err != nil {
 		s.projectFail(w, r)
 		return
 	}
-	if _, err := tx.Exec(r.Context(), `
-		update public.projects
-		set status = 'contract', status_changed_at = now(), event_date = null, event_time = null, last_activity_at = now()
-		where id = $1
-	`, h.ID); err != nil {
-		s.projectFail(w, r)
-		return
+	// Automatic stage move (intro -> intro_contract, main -> main_contract), forward only.
+	nextStatus := statusAfterContract(h.Status, in.Kind)
+	if nextStatus != h.Status {
+		if _, err := tx.Exec(r.Context(), `
+			update public.projects
+			set status = $2, status_changed_at = now(), event_date = null, event_time = null, last_activity_at = now()
+			where id = $1
+		`, h.ID, nextStatus); err != nil {
+			s.projectFail(w, r)
+			return
+		}
 	}
 	newValue := map[string]any{
-		"status": projectStatusContract, "number": in.Number, "signedOn": in.SignedOn,
+		"status": nextStatus, "kind": in.Kind, "number": in.Number, "signedOn": in.SignedOn,
 		"totalAmount": centsToMoney(in.TotalCents), "currency": in.Currency,
 	}
 	if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "contract_added",
@@ -325,7 +338,7 @@ func (s *Server) handleAddProjectContract(w http.ResponseWriter, r *http.Request
 		s.projectFail(w, r)
 		return
 	}
-	h.Status = projectStatusContract
+	h.Status = nextStatus
 	raw, err := s.projectDetailJSON(r.Context(), tx, actor, h)
 	if err != nil {
 		s.projectFail(w, r)
@@ -352,7 +365,7 @@ func (s *Server) handleAddProjectPayment(w http.ResponseWriter, r *http.Request)
 	}
 	const operation = "project.payment.add"
 	tx, key, ok := s.beginIdempotentTx(w, r, actor, operation,
-		r.PathValue("projectId"), formatMoneyCents(in.AmountCents), in.PaidOn, trimmedText(req.Note), trimmedText(req.FileID))
+		r.PathValue("projectId"), trimmedText(req.ContractID), formatMoneyCents(in.AmountCents), in.PaidOn, trimmedText(req.Note), trimmedText(req.FileID))
 	if !ok {
 		return
 	}
@@ -361,24 +374,26 @@ func (s *Server) handleAddProjectPayment(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	var totalCents, paidCents int64
-	var currency string
-	err := tx.QueryRow(r.Context(), `
-		select (c.total_amount * 100)::bigint, c.currency,
-		  (select coalesce(sum(pp.amount * 100), 0)::bigint from public.project_payments pp where pp.project_id = c.project_id)
-		from public.project_contracts c where c.project_id = $1
-	`, h.ID).Scan(&totalCents, &currency, &paidCents)
-	if errors.Is(err, pgx.ErrNoRows) {
-		s.writeError(w, r, http.StatusConflict, "contract_required", "Add the contract before recording payments", nil)
-		return
-	}
+	rows, err := loadProjectContracts(r.Context(), tx, h.ID, nil)
 	if err != nil {
 		s.projectFail(w, r)
 		return
 	}
-	if remaining := totalCents - paidCents; in.AmountCents > remaining {
+	target, found := pickPaymentContract(rows, in.ContractID)
+	if !found {
+		if in.ContractID != nil {
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid payment", map[string]string{
+				"contractId": "Not a contract of this project",
+			})
+			return
+		}
+		s.writeError(w, r, http.StatusConflict, "contract_required", "Add the contract before recording payments", nil)
+		return
+	}
+	money := moneyFromContracts(rows)
+	if limit := money.maxPayment(target.Kind); in.AmountCents > limit {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid payment", map[string]string{
-			"amount": "More than the remaining " + formatMoneyCents(remaining) + " " + currency + " — check the amount",
+			"amount": "More than the remaining " + formatMoneyCents(limit) + " " + target.Currency + " — check the amount",
 		})
 		return
 	}
@@ -389,15 +404,16 @@ func (s *Server) handleAddProjectPayment(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into public.project_payments (project_id, amount, paid_on, note, file_id, created_by)
-		values ($1,$2::bigint::numeric / 100,$3::date,$4,$5,$6)
-	`, h.ID, in.AmountCents, in.PaidOn, in.Note, in.FileID, actor.ID); err != nil {
+		insert into public.project_payments (project_id, contract_id, amount, paid_on, note, file_id, created_by)
+		values ($1,$2,$3::bigint::numeric / 100,$4::date,$5,$6,$7)
+	`, h.ID, target.ID, in.AmountCents, in.PaidOn, in.Note, in.FileID, actor.ID); err != nil {
 		s.projectFail(w, r)
 		return
 	}
 	newValue := map[string]any{
-		"amount": centsToMoney(in.AmountCents), "currency": currency, "paidOn": in.PaidOn,
-		"paidAfter": centsToMoney(paidCents + in.AmountCents), "total": centsToMoney(totalCents),
+		"contractId": target.ID.String(), "contractKind": target.Kind,
+		"amount": centsToMoney(in.AmountCents), "currency": target.Currency, "paidOn": in.PaidOn,
+		"paidAfter": centsToMoney(target.PaidCents + in.AmountCents), "total": centsToMoney(target.TotalCents),
 	}
 	if in.Note != nil {
 		newValue["note"] = *in.Note

@@ -44,9 +44,43 @@ func scanProjectHeader(row pgx.Row) (projectHeader, error) {
 	return h, err
 }
 
+// projectContractSelect builds the sub-select for one contract kind of the card. paidAmount is
+// the contract's own payments; for the main contract creditedAmount is the paid intro amount
+// credited to it (same currency, at most the main total) and target50Amount is half of its total
+// (a target shown on the card, not a gate). Mirrors projectMoney in projects_logic.go.
+func projectContractSelect(kind string) string {
+	return `select jsonb_build_object(
+				'id', c.id,
+				'kind', c.kind,
+				'number', c.number,
+				'signedOn', c.signed_on,
+				'totalAmount', c.total_amount,
+				'currency', c.currency,
+				'paidAmount', own.total,
+				'creditedAmount', cr.total,
+				'remainingAmount', greatest(c.total_amount - own.total - cr.total, 0),
+				'target50Amount', case when c.kind = 'main' then ceil(c.total_amount * 50) / 100 end,
+				'file', (select jsonb_build_object('id', f.id, 'fileName', f.file_name, 'sizeBytes', f.size_bytes)
+					from public.project_files f where f.id = c.file_id and f.status = 'ready'))
+			from public.project_contracts c
+			cross join lateral (
+				select coalesce(sum(pp.amount), 0) as total from public.project_payments pp where pp.contract_id = c.id
+			) own
+			cross join lateral (
+				select case when c.kind = 'main' then coalesce((
+					select least(coalesce(sum(ip.amount), 0), c.total_amount)
+					from public.project_payments ip
+					join public.project_contracts ic on ic.id = ip.contract_id
+					where ic.project_id = c.project_id and ic.kind = 'intro' and ic.currency = c.currency), 0)
+				else 0 end as total
+			) cr
+			where c.project_id = p.id and c.kind = '` + kind + `'`
+}
+
 // projectDetailSQL builds the card JSON. $1 = project id, $2 = whether the viewer may edit it.
-// Money stays numeric all the way (jsonb keeps 2 decimals exactly).
-const projectDetailSQL = `
+// Money stays numeric all the way (jsonb keeps 2 decimals exactly). `contract` is the main
+// contract, kept for clients written before pipeline 2.1.
+var projectDetailSQL = `
 	select jsonb_build_object(
 		'id', p.id,
 		'leadId', p.lead_id,
@@ -60,6 +94,8 @@ const projectDetailSQL = `
 		'statusDetails', p.status_details,
 		'manager', case when p.assigned_to is null then null
 			else jsonb_build_object('id', p.assigned_to, 'name', coalesce(m.display_name, '')) end,
+		'designer', case when p.designer_id is null then null
+			else jsonb_build_object('id', p.designer_id, 'name', coalesce(d.display_name, '')) end,
 		'client', jsonb_build_object(
 			'name', coalesce(l.name, ''), 'phone', l.phone, 'email', l.email, 'cityRegion', l.city_region),
 		'createdAt', p.created_at,
@@ -73,25 +109,20 @@ const projectDetailSQL = `
 			'reasons', to_jsonb(p.cancel_reasons),
 			'comment', p.cancel_comment,
 			'statusBeforeCancel', p.status_before_cancel) end,
-		'contract', (
-			select jsonb_build_object(
-				'id', c.id,
-				'number', c.number,
-				'signedOn', c.signed_on,
-				'totalAmount', c.total_amount,
-				'currency', c.currency,
-				'paidAmount', paid.total,
-				'remainingAmount', c.total_amount - paid.total,
-				'file', (select jsonb_build_object('id', f.id, 'fileName', f.file_name, 'sizeBytes', f.size_bytes)
-					from public.project_files f where f.id = c.file_id and f.status = 'ready'))
-			from public.project_contracts c
-			cross join lateral (
-				select coalesce(sum(pp.amount), 0) as total from public.project_payments pp where pp.project_id = p.id
-			) paid
-			where c.project_id = p.id),
+		'estimate', ` + projectEstimateJSON + `,
+		'introDefault', (
+			select jsonb_build_object('amount', o.intro_contract_default_amount, 'currency', o.intro_contract_default_currency)
+			from public.offices o
+			where o.id = p.office_id and o.intro_contract_default_amount is not null),
+		'contracts', jsonb_build_object(
+			'intro', (` + projectContractSelect("intro") + `),
+			'main', (` + projectContractSelect("main") + `)),
+		'contract', (` + projectContractSelect("main") + `),
 		'payments', coalesce((
 			select jsonb_agg(jsonb_build_object(
 				'id', pp.id,
+				'contractId', pp.contract_id,
+				'contractKind', pc.kind,
 				'amount', pp.amount,
 				'paidOn', pp.paid_on,
 				'note', pp.note,
@@ -101,6 +132,7 @@ const projectDetailSQL = `
 					from public.project_files f where f.id = pp.file_id and f.status = 'ready'))
 				order by pp.paid_on, pp.created_at)
 			from public.project_payments pp
+			join public.project_contracts pc on pc.id = pp.contract_id
 			left join public.profiles pb on pb.id = pp.created_by
 			where pp.project_id = p.id), '[]'::jsonb),
 		'permissions', jsonb_build_object('canEdit', $2::boolean)
@@ -108,9 +140,33 @@ const projectDetailSQL = `
 	from public.projects p
 	join public.leads l on l.id = p.lead_id
 	left join public.profiles m on m.id = p.assigned_to
+	left join public.profiles d on d.id = p.designer_id
 	left join public.profiles cb on cb.id = p.created_by
 	left join public.profiles xb on xb.id = p.cancelled_by
 	where p.id = $1`
+
+// projectEstimateJSON is the estimate block of the card: the four lines (null when not set),
+// the total per currency and whether it is locked (a main contract exists).
+var projectEstimateJSON = `jsonb_build_object(
+			'lines', jsonb_build_object(
+				'kitchen', ` + estimateLineSQL("kitchen") + `,
+				'appliances', ` + estimateLineSQL("appliances") + `,
+				'installation', ` + estimateLineSQL("installation") + `,
+				'countertop', ` + estimateLineSQL("countertop") + `),
+			'totals', ` + estimateTotalsSQL + `,
+			'locked', exists(select 1 from public.project_contracts mc where mc.project_id = p.id and mc.kind = 'main'))`
+
+const estimateTotalsSQL = `coalesce((
+				select jsonb_agg(jsonb_build_object('currency', t.currency, 'amount', t.total) order by t.currency)
+				from (
+					select el.currency, sum(el.amount) as total
+					from public.project_estimate_lines el where el.project_id = p.id group by el.currency
+				) t), '[]'::jsonb)`
+
+func estimateLineSQL(line string) string {
+	return `(select jsonb_build_object('amount', el.amount, 'currency', el.currency, 'note', el.note)
+					from public.project_estimate_lines el where el.project_id = p.id and el.line = '` + line + `')`
+}
 
 func (s *Server) projectDetailJSON(ctx context.Context, q appointmentQuerier, actor Actor, h projectHeader) (json.RawMessage, error) {
 	var raw []byte
@@ -274,10 +330,42 @@ func projectListWhere(actor Actor, query map[string][]string, skip string) ([]st
 	return where, args, nil
 }
 
-const projectListFrom = `
-	from public.projects p
+const projectItemJoins = `
 	join public.leads l on l.id = p.lead_id
-	left join public.profiles m on m.id = p.assigned_to`
+	left join public.profiles m on m.id = p.assigned_to
+	left join public.profiles dg on dg.id = p.designer_id`
+
+const projectListFrom = `
+	from public.projects p` + projectItemJoins
+
+// projectListItemSQL is the ProjectListItem JSON of the list and of the kanban cards.
+const projectListItemSQL = `jsonb_build_object(
+			'id', p.id,
+			'leadId', p.lead_id,
+			'clientId', p.client_id,
+			'code', l.reference_id,
+			'clientName', coalesce(l.name, ''),
+			'products', to_jsonb(l.products),
+			'status', p.status,
+			'projectType', p.project_type,
+			'eventDate', p.event_date,
+			'eventTime', to_char(p.event_time, 'HH24:MI'),
+			'manager', case when p.assigned_to is null then null
+				else jsonb_build_object('id', p.assigned_to, 'name', coalesce(m.display_name, '')) end,
+			'designer', case when p.designer_id is null then null
+				else jsonb_build_object('id', p.designer_id, 'name', coalesce(dg.display_name, '')) end,
+			'estimateTotals', coalesce((
+				select jsonb_agg(jsonb_build_object('currency', t.currency, 'amount', t.total) order by t.currency)
+				from (
+					select el.currency, sum(el.amount) as total
+					from public.project_estimate_lines el where el.project_id = p.id group by el.currency
+				) t), '[]'::jsonb),
+			'createdAt', p.created_at,
+			'lastComment', (
+				select jsonb_build_object('text', e.comment, 'at', e.created_at)
+				from public.project_events e
+				where e.project_id = p.id and e.comment is not null
+				order by e.created_at desc, e.id desc limit 1))`
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
@@ -308,25 +396,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	args = append(args, limit+1)
 	rows, err := s.pool.Query(r.Context(), `
-		select jsonb_build_object(
-			'id', p.id,
-			'leadId', p.lead_id,
-			'clientId', p.client_id,
-			'code', l.reference_id,
-			'clientName', coalesce(l.name, ''),
-			'products', to_jsonb(l.products),
-			'status', p.status,
-			'projectType', p.project_type,
-			'eventDate', p.event_date,
-			'eventTime', to_char(p.event_time, 'HH24:MI'),
-			'manager', case when p.assigned_to is null then null
-				else jsonb_build_object('id', p.assigned_to, 'name', coalesce(m.display_name, '')) end,
-			'createdAt', p.created_at,
-			'lastComment', (
-				select jsonb_build_object('text', e.comment, 'at', e.created_at)
-				from public.project_events e
-				where e.project_id = p.id and e.comment is not null
-				order by e.created_at desc, e.id desc limit 1)),
+		select `+projectListItemSQL+`,
 			p.created_at, p.id`+projectListFrom+`
 		where `+strings.Join(where, " and ")+`
 		order by p.created_at desc, p.id desc
@@ -404,7 +474,114 @@ func (s *Server) handleProjectFacets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "status": statuses})
 }
 
+// ---- board (kanban) ------------------------------------------------------------------------
+
+// handleProjectBoard returns the kanban: one column per status in pipeline order with the number
+// of matching projects and the first `limit` cards (newest first). It takes the listProjects
+// filters; more cards of a column come from listProjects with status=<column> and the column
+// nextCursor.
+func (s *Server) handleProjectBoard(w http.ResponseWriter, r *http.Request) {
+	actor, _ := actorFromContext(r.Context())
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			limit = min(parsed, 50)
+		}
+	}
+	where, args, filterErr := projectListWhere(actor, r.URL.Query(), "")
+	if filterErr != nil {
+		s.writeError(w, r, filterErr.status, filterErr.code, filterErr.message, filterErr.fields)
+		return
+	}
+	fail := func() {
+		s.writeError(w, r, http.StatusInternalServerError, "projects_load_failed", "Could not load the board", nil)
+	}
+	whereSQL := strings.Join(where, " and ")
+
+	counts := map[string]int{}
+	countRows, err := s.pool.Query(r.Context(), `select p.status, count(*) `+projectListFrom+` where `+whereSQL+` group by p.status`, args...)
+	if err != nil {
+		fail()
+		return
+	}
+	defer countRows.Close()
+	total := 0
+	for countRows.Next() {
+		var status string
+		var count int
+		if err := countRows.Scan(&status, &count); err != nil {
+			fail()
+			return
+		}
+		counts[status] = count
+		total += count
+	}
+	if err := countRows.Err(); err != nil {
+		fail()
+		return
+	}
+	countRows.Close()
+
+	cardArgs := append(append([]any{}, args...), limit)
+	cardRows, err := s.pool.Query(r.Context(), `
+		with ranked as (
+			select p.id, row_number() over (partition by p.status order by p.created_at desc, p.id desc) as rn
+			`+projectListFrom+`
+			where `+whereSQL+`
+		)
+		select `+projectListItemSQL+`, p.status, p.created_at, p.id
+		from ranked r
+		join public.projects p on p.id = r.id`+projectItemJoins+`
+		where r.rn <= $`+strconv.Itoa(len(cardArgs))+`
+		order by p.status, r.rn`, cardArgs...)
+	if err != nil {
+		fail()
+		return
+	}
+	defer cardRows.Close()
+	items := map[string][]json.RawMessage{}
+	lastCursor := map[string]leadCursor{}
+	for cardRows.Next() {
+		var raw []byte
+		var status string
+		var createdAt time.Time
+		var id uuid.UUID
+		if err := cardRows.Scan(&raw, &status, &createdAt, &id); err != nil {
+			fail()
+			return
+		}
+		items[status] = append(items[status], json.RawMessage(raw))
+		lastCursor[status] = leadCursor{CreatedAt: createdAt, ID: id}
+	}
+	if err := cardRows.Err(); err != nil {
+		fail()
+		return
+	}
+
+	columns := make([]map[string]any, 0, len(projectStatuses))
+	for _, status := range projectStatuses {
+		cards := items[status]
+		if cards == nil {
+			cards = []json.RawMessage{}
+		}
+		nextCursor := ""
+		if counts[status] > len(cards) {
+			nextCursor = encodeLeadCursor(lastCursor[status])
+		}
+		columns = append(columns, map[string]any{
+			"status": status, "count": counts[status], "items": cards, "nextCursor": nextCursor,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"total": total, "columns": columns})
+}
+
 // ---- create --------------------------------------------------------------------------------
+
+// leadEventProjectCreatedEnabled gates the project_created entry on the lead timeline (Q-P14).
+// CRM v1 prints unknown lead event types raw, so it stays off until v1 has an i18n fallback for
+// event.project_created (uk / pl / en) and the CRM v2 timeline mapper knows it.
+// TODO(v2): switch on after the CRM ships that fallback.
+const leadEventProjectCreatedEnabled = false
 
 type createProjectRequest struct {
 	ProjectType *string `json:"projectType"`
@@ -481,7 +658,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	fields := map[string]string{}
 	var projectType *string
 	if text := trimmedText(req.ProjectType); text != "" {
-		if _, ok := projectTypeFirstStatus[text]; !ok {
+		if _, ok := projectTypes[text]; !ok {
 			fields["projectType"] = "Must be express, measure, or contract"
 		}
 		projectType = &text
@@ -568,7 +745,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := projectFirstStatus(projectType)
+	status := projectFirstStatus()
 	var projectID uuid.UUID
 	if err := tx.QueryRow(r.Context(), `
 		insert into public.projects (lead_id, office_id, status, project_type, assigned_to, created_by)
@@ -591,6 +768,15 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 	`, leadID, projectID, projectType, managerID); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "project_create_failed", "Could not create the project", nil)
 		return
+	}
+	if leadEventProjectCreatedEnabled {
+		if _, err := tx.Exec(r.Context(), `
+			insert into public.lead_events (lead_id, actor_id, event_type, new_value)
+			values ($1, $2, 'project_created', $3)
+		`, leadID, actor.ID, map[string]any{"projectId": projectID.String(), "managerId": managerID.String()}); err != nil {
+			s.writeError(w, r, http.StatusInternalServerError, "project_create_failed", "Could not create the project", nil)
+			return
+		}
 	}
 	newValue := map[string]any{"status": status, "managerId": managerID.String()}
 	if projectType != nil {

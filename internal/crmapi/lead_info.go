@@ -340,6 +340,134 @@ func equalTimePtr(a, b *time.Time) bool {
 	return a.Equal(*b)
 }
 
+// leadInfoUpdateError is a ready API error returned by applyLeadInfoPatch.
+type leadInfoUpdateError struct {
+	status  int
+	code    string
+	message string
+	fields  map[string]string
+}
+
+func (e *leadInfoUpdateError) write(s *Server, w http.ResponseWriter, r *http.Request) {
+	s.writeError(w, r, e.status, e.code, e.message, e.fields)
+}
+
+// applyLeadInfoPatch is the body of PATCH /v1/leads/{leadId}/info, shared with the project
+// endpoint PATCH /v1/projects/{projectId}/lead-info. It runs inside the caller's transaction and
+// does not commit. authorize decides who may edit (nil error = allowed); version is the
+// If-Match lead version, or nil to skip the optimistic check. changed is empty when the request
+// changes nothing (nextVersion is then the current version).
+func (s *Server) applyLeadInfoPatch(
+	r *http.Request,
+	tx pgx.Tx,
+	actor Actor,
+	leadID uuid.UUID,
+	version *int64,
+	req leadInfoRequest,
+	authorize func(officeID uuid.UUID) *leadInfoUpdateError,
+) (nextVersion int64, changed []string, apiErr *leadInfoUpdateError) {
+	fail := func(status int, code, message string, fields map[string]string) (int64, []string, *leadInfoUpdateError) {
+		return 0, nil, &leadInfoUpdateError{status, code, message, fields}
+	}
+	var officeID uuid.UUID
+	var currentVersion int64
+	var current leadInfo
+	err := tx.QueryRow(r.Context(), `
+		select l.office_id, l.version, l.estimated_budget_text, l.estimated_budget,
+		  l.estimated_budget_currency, l.city_region, l.products, l.material_fronts,
+		  l.material_worktop, l.material_appliances, l.expected_lead_time,
+		  l.preferred_measurement_at, o.code, l.about_client, l.referred_by,
+		  l.checklist_budget, l.checklist_location, l.checklist_period, l.checklist_materials,
+		  l.checklist_product, l.client_informed, l.project_type, l.responsible_manager_id
+		from public.leads l join public.offices o on o.id = l.office_id
+		where l.id=$1 and l.archived_at is null
+		for update of l
+	`, leadID).Scan(
+		&officeID, &currentVersion, &current.BudgetText, &current.Budget, &current.BudgetCurrency,
+		&current.CityRegion, &current.Products, &current.Fronts, &current.Worktop, &current.Appliances,
+		&current.LeadTime, &current.MeasurementAt, &current.OfficeCode, &current.AboutClient, &current.ReferredBy,
+		&current.ChecklistBudget, &current.ChecklistLocation, &current.ChecklistPeriod, &current.ChecklistMaterials,
+		&current.ChecklistProduct, &current.ClientInformed, &current.ProjectType, &current.ResponsibleManagerID,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(http.StatusNotFound, "lead_not_found", "Lead not found", nil)
+	}
+	if err != nil {
+		return fail(http.StatusInternalServerError, "lead_update_failed", "Could not update lead info", nil)
+	}
+	if denied := authorize(officeID); denied != nil {
+		return 0, nil, denied
+	}
+	if version != nil && currentVersion != *version {
+		return fail(http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
+	}
+	// W9: responsibleManagerId is not assigned_to (the CRM v2 owner-of-record concept, G4); it is
+	// the manager the popup names for the planned project. Same active-office-member rule as
+	// GET /v1/managers and assignedToId (G4).
+	if req.ResponsibleManagerID != nil {
+		if text := strings.TrimSpace(*req.ResponsibleManagerID); text != "" {
+			id, _ := uuid.Parse(text) // format already checked by validateLeadInfo
+			if err := validateLeadAssignee(r, tx, id, officeID); err != nil {
+				if errors.Is(err, errCommentAssigneeInvalid) {
+					return fail(http.StatusBadRequest, "validation_error", "Invalid lead info", map[string]string{
+						"responsibleManagerId": "Must be an active member of the lead's office",
+					})
+				}
+				return fail(http.StatusInternalServerError, "lead_update_failed", "Could not verify responsible manager", nil)
+			}
+		}
+	}
+
+	next, changed, values := applyLeadInfo(current, req)
+	if len(changed) == 0 {
+		return currentVersion, nil, nil
+	}
+
+	var rateSetID *uuid.UUID
+	rateSetKeep := !next.BudgetRateChanged
+	if next.BudgetRateChanged && next.Budget != nil {
+		rates, rateErr := loadCurrencyRateSetAt(r.Context(), tx, time.Now().UTC())
+		if rateErr != nil {
+			return fail(http.StatusInternalServerError, "lead_update_failed", "Could not load currency rates", nil)
+		}
+		rateSetID = &rates.ID
+	}
+	products := next.Products
+	if products == nil {
+		products = []string{}
+	}
+	err = tx.QueryRow(r.Context(), `
+		update public.leads set
+		  estimated_budget_text=$3, estimated_budget=$4, estimated_budget_currency=$5,
+		  estimated_budget_rate_set_id=case when $6 then estimated_budget_rate_set_id else $7 end,
+		  city_region=$8, products=$9, material_fronts=$10, material_worktop=$11,
+		  material_appliances=$12, expected_lead_time=$13, preferred_measurement_at=$14,
+		  about_client=$15, referred_by=$16, checklist_budget=$17, checklist_location=$18,
+		  checklist_period=$19, checklist_materials=$20, checklist_product=$21,
+		  client_informed=$22, project_type=$23, responsible_manager_id=$24,
+		  updated_at=now(), version=version+1
+		where id=$1 and version=$2 and archived_at is null
+		returning version
+	`, leadID, currentVersion, next.BudgetText, next.Budget, next.BudgetCurrency, rateSetKeep, rateSetID,
+		next.CityRegion, products, next.Fronts, next.Worktop, next.Appliances, next.LeadTime,
+		next.MeasurementAt, next.AboutClient, next.ReferredBy, next.ChecklistBudget, next.ChecklistLocation,
+		next.ChecklistPeriod, next.ChecklistMaterials, next.ChecklistProduct, next.ClientInformed,
+		next.ProjectType, next.ResponsibleManagerID).Scan(&nextVersion)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fail(http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
+	}
+	if err == nil {
+		_, err = tx.Exec(r.Context(), `
+			insert into public.lead_events (lead_id, actor_id, event_type, new_value)
+			values ($1, $2, 'lead_edited', $3)
+		`, leadID, actor.ID, map[string]any{"fields": changed, "edited_by_name": actor.DisplayName, "info": values})
+	}
+	if err != nil {
+		return fail(http.StatusInternalServerError, "lead_update_failed", "Could not update lead info", nil)
+	}
+	return nextVersion, changed, nil
+}
+
 func (s *Server) handleUpdateLeadInfo(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
 	leadID, err := uuid.Parse(r.PathValue("leadId"))
@@ -365,113 +493,21 @@ func (s *Server) handleUpdateLeadInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	var officeID uuid.UUID
-	var currentVersion int64
-	var current leadInfo
-	err = tx.QueryRow(r.Context(), `
-		select l.office_id, l.version, l.estimated_budget_text, l.estimated_budget,
-		  l.estimated_budget_currency, l.city_region, l.products, l.material_fronts,
-		  l.material_worktop, l.material_appliances, l.expected_lead_time,
-		  l.preferred_measurement_at, o.code, l.about_client, l.referred_by,
-		  l.checklist_budget, l.checklist_location, l.checklist_period, l.checklist_materials,
-		  l.checklist_product, l.client_informed, l.project_type, l.responsible_manager_id
-		from public.leads l join public.offices o on o.id = l.office_id
-		where l.id=$1 and l.archived_at is null
-		for update of l
-	`, leadID).Scan(
-		&officeID, &currentVersion, &current.BudgetText, &current.Budget, &current.BudgetCurrency,
-		&current.CityRegion, &current.Products, &current.Fronts, &current.Worktop, &current.Appliances,
-		&current.LeadTime, &current.MeasurementAt, &current.OfficeCode, &current.AboutClient, &current.ReferredBy,
-		&current.ChecklistBudget, &current.ChecklistLocation, &current.ChecklistPeriod, &current.ChecklistMaterials,
-		&current.ChecklistProduct, &current.ClientInformed, &current.ProjectType, &current.ResponsibleManagerID,
-	)
-	if errors.Is(err, pgx.ErrNoRows) {
-		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
-		return
-	}
-	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not update lead info", nil)
-		return
-	}
-	if !actor.CanEditLead(officeID) {
-		s.writeError(w, r, http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil)
-		return
-	}
-	if currentVersion != version {
-		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
-		return
-	}
-	// W9: responsibleManagerId is not assigned_to (the CRM v2 owner-of-record concept, G4); it is
-	// the manager the popup names for the planned project. Same active-office-member rule as
-	// GET /v1/managers and assignedToId (G4).
-	if req.ResponsibleManagerID != nil {
-		if text := strings.TrimSpace(*req.ResponsibleManagerID); text != "" {
-			id, _ := uuid.Parse(text) // format already checked by validateLeadInfo
-			if err := validateLeadAssignee(r, tx, id, officeID); err != nil {
-				if errors.Is(err, errCommentAssigneeInvalid) {
-					s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid lead info", map[string]string{
-						"responsibleManagerId": "Must be an active member of the lead's office",
-					})
-					return
-				}
-				s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not verify responsible manager", nil)
-				return
-			}
+	nextVersion, changed, apiErr := s.applyLeadInfoPatch(r, tx, actor, leadID, &version, req, func(officeID uuid.UUID) *leadInfoUpdateError {
+		if !actor.CanEditLead(officeID) {
+			return &leadInfoUpdateError{http.StatusForbidden, "lead_edit_forbidden", "Lead editing is not allowed", nil}
 		}
+		return nil
+	})
+	if apiErr != nil {
+		apiErr.write(s, w, r)
+		return
 	}
-
-	next, changed, values := applyLeadInfo(current, req)
 	if len(changed) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"version": currentVersion})
+		writeJSON(w, http.StatusOK, map[string]any{"version": nextVersion})
 		return
 	}
-
-	var rateSetID *uuid.UUID
-	rateSetKeep := !next.BudgetRateChanged
-	if next.BudgetRateChanged && next.Budget != nil {
-		rates, rateErr := loadCurrencyRateSetAt(r.Context(), tx, time.Now().UTC())
-		if rateErr != nil {
-			s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not load currency rates", nil)
-			return
-		}
-		rateSetID = &rates.ID
-	}
-	products := next.Products
-	if products == nil {
-		products = []string{}
-	}
-	var nextVersion int64
-	err = tx.QueryRow(r.Context(), `
-		update public.leads set
-		  estimated_budget_text=$3, estimated_budget=$4, estimated_budget_currency=$5,
-		  estimated_budget_rate_set_id=case when $6 then estimated_budget_rate_set_id else $7 end,
-		  city_region=$8, products=$9, material_fronts=$10, material_worktop=$11,
-		  material_appliances=$12, expected_lead_time=$13, preferred_measurement_at=$14,
-		  about_client=$15, referred_by=$16, checklist_budget=$17, checklist_location=$18,
-		  checklist_period=$19, checklist_materials=$20, checklist_product=$21,
-		  client_informed=$22, project_type=$23, responsible_manager_id=$24,
-		  updated_at=now(), version=version+1
-		where id=$1 and version=$2 and archived_at is null
-		returning version
-	`, leadID, version, next.BudgetText, next.Budget, next.BudgetCurrency, rateSetKeep, rateSetID,
-		next.CityRegion, products, next.Fronts, next.Worktop, next.Appliances, next.LeadTime,
-		next.MeasurementAt, next.AboutClient, next.ReferredBy, next.ChecklistBudget, next.ChecklistLocation,
-		next.ChecklistPeriod, next.ChecklistMaterials, next.ChecklistProduct, next.ClientInformed,
-		next.ProjectType, next.ResponsibleManagerID).Scan(&nextVersion)
-	if errors.Is(err, pgx.ErrNoRows) {
-		s.writeError(w, r, http.StatusConflict, "version_conflict", "Lead was changed by another user", nil)
-		return
-	}
-	if err == nil {
-		_, err = tx.Exec(r.Context(), `
-			insert into public.lead_events (lead_id, actor_id, event_type, new_value)
-			values ($1, $2, 'lead_edited', $3)
-		`, leadID, actor.ID, map[string]any{"fields": changed, "edited_by_name": actor.DisplayName, "info": values})
-	}
-	if err == nil {
-		err = tx.Commit(r.Context())
-	}
-	if err != nil {
+	if err := tx.Commit(r.Context()); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "lead_update_failed", "Could not update lead info", nil)
 		return
 	}
