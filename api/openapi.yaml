@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.34.0
+  version: 2.35.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -18,6 +18,7 @@ tags:
   - name: Appointments
   - name: Workflow
   - name: Projects
+  - name: Clients
   - name: Users
   - name: Reports
   - name: Settings
@@ -1546,6 +1547,189 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /v1/clients:
+    get:
+      tags: [Clients]
+      operationId: listClients
+      summary: Clients list (CRM v2), newest client first
+      description: >
+        A client is created by the database when a lead arrives (matched by phone, then email, inside the
+        office) and links the client's leads and projects. Merged-away clients are not listed. `manager` is
+        the manager of the latest project, otherwise of the latest lead. Counts ignore archived leads.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string }, description: "Matches the name, code or phone (digits are compared without formatting)." }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: filter, in: query, schema: { $ref: '#/components/schemas/ClientListFilter' } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 30 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Page of clients
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, nextCursor]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/ClientSummary' } }
+                  nextCursor: { type: string, description: Empty when there is no next page. }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/clients/facets:
+    get:
+      tags: [Clients]
+      operationId: getClientFacets
+      summary: Clients list chip counts
+      description: >
+        `total` counts with every filter; `filter` counts each chip under the current `q` and `officeId`
+        (the chip filter itself is left out). Takes the listClients filters; `limit` and `cursor` are ignored.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: q, in: query, schema: { type: string } }
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: filter, in: query, schema: { $ref: '#/components/schemas/ClientListFilter' } }
+      responses:
+        '200':
+          description: Counts
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [total, filter]
+                properties:
+                  total: { type: integer }
+                  filter:
+                    type: object
+                    additionalProperties: false
+                    required: [all, with_projects, leads_only]
+                    properties:
+                      all: { type: integer }
+                      with_projects: { type: integer }
+                      leads_only: { type: integer }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/clients/match:
+    get:
+      tags: [Clients]
+      operationId: matchClient
+      summary: Returning-client hint for Create lead
+      description: >
+        Looks for a client of the office with this phone (either number), then with this email, the same
+        order the database uses when it attaches a new lead. A phone needs at least 9 digits and is compared
+        by its last 9 digits, so formatting and the country prefix do not matter. `match` is null when
+        nothing was found. `officeId` may be omitted only for a user with exactly one office.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, schema: { type: string, format: uuid } }
+        - { name: phone, in: query, schema: { type: string } }
+        - { name: email, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: Match
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [match]
+                properties:
+                  match:
+                    oneOf:
+                      - { type: 'null' }
+                      - type: object
+                        additionalProperties: false
+                        required: [matchedBy, client]
+                        properties:
+                          matchedBy: { type: string, enum: [phone, email] }
+                          client: { $ref: '#/components/schemas/ClientSummary' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/clients/{clientId}:
+    get:
+      tags: [Clients]
+      operationId: getClient
+      summary: Client card (CRM v2)
+      description: >
+        Contacts, stats, the client's leads and projects, and duplicate candidates (same phone or email in
+        the office). Requesting the id of a client that was merged away returns the surviving client with
+        `redirectedFrom` set, so an old link keeps working.
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/ClientId' }]
+      responses:
+        '200':
+          description: Client card
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Client' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [Clients]
+      operationId: updateClient
+      summary: Edit client
+      description: >
+        Partial update: an absent field is unchanged, `null` or empty text clears an optional field. Phones
+        accept +48 and +380 numbers with 9 digits after the country code (spaces, dashes and brackets are
+        allowed) and are stored compact. Any user with access to the client's office may edit. `If-Match`
+        (the client `version`) is optional; a stale value returns `409 version_conflict`. Changed fields are
+        logged. A merged-away client returns `409 client_merged`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ClientId' }
+        - { name: If-Match, in: header, required: false, schema: { type: integer, minimum: 1 } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateClientRequest' }
+      responses:
+        '200':
+          description: Updated client card
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Client' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/clients/{clientId}/merge:
+    post:
+      tags: [Clients]
+      operationId: mergeClients
+      summary: Merge a duplicate client (irreversible)
+      description: >
+        Merges `duplicateId` and the client in the path (same office). The older client (by `createdAt`)
+        survives whichever of the two is in the path: leads, projects and linked tasks move to it, documents
+        and timelines follow their lead or project, and the other client stays as a tombstone whose code
+        resolves to the survivor. Name and phone come from the survivor; email, address and note follow
+        `keep` per field (default `older`). An empty language is filled from the other client, and the other
+        client's phone becomes the second phone when that is empty and the number differs. Moved leads get a
+        new `updated_at`. Logged as a `merged` event on both clients. Super admin and office admin only
+        (`403 client_merge_forbidden`). Returns the survivor's card.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ClientId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MergeClientsRequest' }
+      responses:
+        '200':
+          description: Surviving client card
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Client' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409':
+          description: '`client_merged` (one of the clients was already merged) or `idempotency_conflict`'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CRMErrorResponse' }
 components:
   securitySchemes:
     bearerAuth:
@@ -1587,6 +1771,11 @@ components:
       schema: { type: string, format: uuid }
     ProjectId:
       name: projectId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ClientId:
+      name: clientId
       in: path
       required: true
       schema: { type: string, format: uuid }
@@ -1957,6 +2146,7 @@ components:
       required:
         - id
         - leadId
+        - clientId
         - officeId
         - code
         - status
@@ -1977,6 +2167,7 @@ components:
       properties:
         id: { type: string, format: uuid }
         leadId: { type: string, format: uuid }
+        clientId: { type: [string, 'null'], format: uuid, description: "The client (added in 2.35.0); open it with GET /v1/clients/{clientId}." }
         officeId: { type: string, format: uuid }
         code: { type: string, description: The lead's reference id (client code). }
         status: { $ref: '#/components/schemas/ProjectStatus' }
@@ -2016,10 +2207,11 @@ components:
     ProjectListItem:
       type: object
       additionalProperties: false
-      required: [id, leadId, code, clientName, products, status, projectType, eventDate, eventTime, manager, createdAt, lastComment]
+      required: [id, leadId, clientId, code, clientName, products, status, projectType, eventDate, eventTime, manager, createdAt, lastComment]
       properties:
         id: { type: string, format: uuid }
         leadId: { type: string, format: uuid }
+        clientId: { type: [string, 'null'], format: uuid, description: Added in 2.35.0. }
         code: { type: string }
         clientName: { type: string }
         products: { type: array, items: { type: string }, description: Product tags of the lead. }
@@ -2040,6 +2232,171 @@ components:
               properties:
                 text: { type: string }
                 at: { type: string, format: date-time }
+    ClientListFilter:
+      type: string
+      enum: [all, with_projects, leads_only]
+      description: All clients; clients with at least one project; clients without a project.
+    ClientOffice:
+      type: object
+      additionalProperties: false
+      required: [id, code, nameUk, namePl]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        nameUk: { type: string }
+        namePl: { type: string }
+    ClientSummary:
+      type: object
+      description: Shared by the list, the match hint and duplicate candidates; the card (Client) extends it.
+      required: [id, code, name, phone, secondPhone, email, officeId, office, createdAt, firstChannel, leadsCount, projectsCount, manager]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string, pattern: '^[kw][0-9]{4,}$', description: "The code of the client's first lead (leads.reference_id)." }
+        name: { type: string, description: "The first lead's name (first + last name joined); editable." }
+        phone: { type: [string, 'null'] }
+        secondPhone: { type: [string, 'null'] }
+        email: { type: [string, 'null'] }
+        officeId: { type: string, format: uuid }
+        office: { $ref: '#/components/schemas/ClientOffice' }
+        createdAt: { type: string, format: date-time, description: '"Client since".' }
+        firstChannel:
+          type: [string, 'null']
+          description: Channel of the client's first lead (read-only).
+        leadsCount: { type: integer, description: Active (not archived) leads. }
+        projectsCount: { type: integer }
+        manager:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+          description: Manager of the latest project, otherwise of the latest lead.
+    ClientDuplicate:
+      allOf:
+        - { $ref: '#/components/schemas/ClientSummary' }
+        - type: object
+          required: [matchedBy]
+          properties:
+            matchedBy:
+              type: array
+              items: { type: string, enum: [phone, email] }
+              description: Why it is a candidate. Compare `createdAt`; the older client survives a merge.
+    ClientContractValue:
+      type: object
+      additionalProperties: false
+      required: [currency, total, paid, remaining]
+      properties:
+        currency: { $ref: '#/components/schemas/ProjectCurrency' }
+        total: { type: number }
+        paid: { type: number }
+        remaining: { type: number }
+    ClientLeadRow:
+      type: object
+      additionalProperties: false
+      required: [id, code, name, createdAt, channel, v2Status, rating, products, manager, projectId]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        name: { type: string }
+        createdAt: { type: string, format: date-time }
+        channel: { type: [string, 'null'] }
+        v2Status: { type: [string, 'null'] }
+        rating: { type: [string, 'null'] }
+        products: { type: array, items: { type: string } }
+        manager:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        projectId: { type: [string, 'null'], format: uuid, description: The lead's project, if it became one. }
+    ClientProjectRow:
+      type: object
+      additionalProperties: false
+      required: [id, leadId, code, title, status, projectType, createdAt, manager, contract]
+      properties:
+        id: { type: string, format: uuid }
+        leadId: { type: string, format: uuid }
+        code: { type: string, description: The lead's code. }
+        title: { type: array, items: { type: string }, description: Product tags of the lead. }
+        status: { $ref: '#/components/schemas/ProjectStatus' }
+        projectType:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectType' }]
+        createdAt: { type: string, format: date-time }
+        manager:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
+        contract:
+          oneOf:
+            - { type: 'null' }
+            - type: object
+              additionalProperties: false
+              required: [currency, totalAmount, paidAmount]
+              properties:
+                currency: { $ref: '#/components/schemas/ProjectCurrency' }
+                totalAmount: { type: number }
+                paidAmount: { type: number }
+    Client:
+      allOf:
+        - { $ref: '#/components/schemas/ClientSummary' }
+        - type: object
+          required: [address, language, about, version, firstLeadId, stats, leads, projects, duplicates, redirectedFrom, permissions]
+          properties:
+            address: { type: [string, 'null'] }
+            language: { type: [string, 'null'], enum: [pl, uk, en, ru, null] }
+            about: { type: [string, 'null'], description: The note about the client. }
+            version: { type: integer, description: Optimistic-lock counter for updateClient. }
+            firstLeadId: { type: [string, 'null'], format: uuid }
+            stats:
+              type: object
+              additionalProperties: false
+              required: [leadsCount, projectsCount, contractValue]
+              properties:
+                leadsCount: { type: integer }
+                projectsCount: { type: integer }
+                contractValue:
+                  type: array
+                  items: { $ref: '#/components/schemas/ClientContractValue' }
+                  description: >
+                    Contract total, paid and remaining summed per currency over the client's projects that have a
+                    contract (cancelled projects are left out). Empty when none has a contract.
+            leads: { type: array, items: { $ref: '#/components/schemas/ClientLeadRow' }, description: Active leads, newest first (up to 200). }
+            projects: { type: array, items: { $ref: '#/components/schemas/ClientProjectRow' }, description: Newest first (up to 200). }
+            duplicates: { type: array, items: { $ref: '#/components/schemas/ClientDuplicate' } }
+            redirectedFrom:
+              oneOf:
+                - { type: 'null' }
+                - type: object
+                  additionalProperties: false
+                  required: [id, code]
+                  properties:
+                    id: { type: string, format: uuid }
+                    code: { type: string }
+              description: Set when the requested client was merged into this one.
+            permissions:
+              type: object
+              additionalProperties: false
+              required: [canEdit, canMerge]
+              properties:
+                canEdit: { type: boolean, description: Any user with access to the office. }
+                canMerge: { type: boolean, description: Super admin and office admin of the client's office. }
+    UpdateClientRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        phone: { type: string, description: "+48 or +380 with 9 digits after the country code; required when sent." }
+        secondPhone: { type: [string, 'null'] }
+        email: { type: [string, 'null'], maxLength: 254 }
+        address: { type: [string, 'null'], maxLength: 300 }
+        language: { type: [string, 'null'], enum: [pl, uk, en, ru, null] }
+        about: { type: [string, 'null'], maxLength: 2000 }
+    MergeClientsRequest:
+      type: object
+      additionalProperties: false
+      required: [duplicateId]
+      properties:
+        duplicateId: { type: string, format: uuid, description: The other client (same office). }
+        keep:
+          type: object
+          additionalProperties: false
+          description: Which client's value survives per field; the default is `older`.
+          properties:
+            email: { type: string, enum: [older, newer] }
+            address: { type: string, enum: [older, newer] }
+            about: { type: string, enum: [older, newer] }
     ProjectEvent:
       type: object
       additionalProperties: false
@@ -2387,6 +2744,7 @@ components:
         source_system: { type: string }
         source_channel: { type: [string, 'null'] }
         external_lead_id: { type: string }
+        client_id: { type: [string, 'null'], format: uuid, description: "The lead's client (added in 2.35.0); set by the database when the lead is created." }
         # W6: columns the API already returns through to_jsonb(leads), declared for typed clients.
         # Nullable as in the table.
         name: { type: [string, 'null'] }

@@ -588,3 +588,84 @@ Rules for writes:
 
 Migration → API → CRM (T2–T4). CRM v1 needs no change. The API reads the new columns, so it must not ship before
 the migration.
+
+## 9. Clients (CL1, OpenAPI 2.35.0)
+
+Serves the CRM v2 Clients list, Client card, Edit client, Merge clients and the returning-client hint of Create
+lead (boards `Clients-list`, `Client-card`, `Client-edit`, `Client-merge`, `Create-lead-existing-client`). Additive:
+two new tables, two new nullable columns, triggers, new endpoints, one new read field on `Lead`, `Project` and
+`ProjectListItem`. v1 reads and writes leads exactly as before.
+
+### 9.1 Database — `20261023120000_clients.sql`
+
+- `public.clients`: `office_id`, `code` (unique, **the code of the client's first lead**, `leads.reference_id`),
+  `name`, `phone`, `second_phone`, `email`, `address`, `language` (`pl|uk|en|ru`), `about`, generated match keys
+  `phone_key` / `second_phone_key` / `email_key`, `version`, `merged_into_id` + `merged_at` (tombstone of a merged
+  client), `created_at` ("Client since"), `updated_at`. RLS: select by office for `authenticated`, full access for
+  `kolss_api`.
+- `public.client_events`: `updated` (changed contact fields, old/new) and `merged`.
+- `leads.client_id` and `projects.client_id`: nullable FKs, `on delete restrict`.
+- Match keys: phone = the last 9 digits of a number with at least 9 digits (`public.client_phone_key`), so
+  `+48 601 334 812`, `601334812` and `0048601334812` are the same phone; email = trimmed, lower-cased
+  (`public.client_email_key`).
+- **Attach rule (Q-CL7), one rule for every insert path.** `before insert` trigger `leads_v2_client_attach` on
+  `public.leads` (fires after the reference-id and channel triggers): inside the lead's office it takes the oldest
+  non-merged client whose phone or second phone matches, otherwise the one whose email matches, otherwise creates a
+  client (name, phone, email and address `city_region` from the lead; `created_at` of the lead). So manual Create
+  lead, website forms, Meta Lead Ads and the sheet import all attach silently with no Go change. A row skipped by
+  `on conflict do nothing` creates no client. Simultaneous leads with the same phone / email are serialised with
+  advisory locks. Attaching never edits the existing client. A lead with fewer than 9 phone digits and no email
+  always gets its own client. Later edits of the lead's own phone / email do not move it between clients.
+- `projects.client_id` is copied from the lead by a `before insert` trigger on `public.projects`.
+- **Backfill (same migration, idempotent):** leads without a client, oldest first, go through the same rule, so a
+  client's code is its oldest lead's code. `leads.updated_at` is not touched (trigger disabled during the update,
+  as in the channel migration), `version` and markers are not touched. Archived leads are included.
+
+### 9.2 API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/clients` | List: `q` (name, code, phone digits), `officeId`, `filter=all\|with_projects\|leads_only`, `limit` (30), `cursor`. Newest client first. Items are `ClientSummary`: contacts, office, `createdAt`, `firstChannel`, `leadsCount`, `projectsCount`, `manager`. |
+| `GET /v1/clients/facets` | `total` plus the `filter` chip counts under the current `q` / `officeId`. |
+| `GET /v1/clients/match?officeId&phone&email` | `{match: {matchedBy: phone\|email, client} \| null}`; phone first, then email. |
+| `GET /v1/clients/{clientId}` | Card: summary + `address`, `language`, `about`, `version`, `firstLeadId`, `stats` (leads, projects, contract value per currency), `leads`, `projects`, `duplicates`, `redirectedFrom`, `permissions {canEdit, canMerge}`. |
+| `PATCH /v1/clients/{clientId}` | Edit client. Partial; optional `If-Match` (client `version`). |
+| `POST /v1/clients/{clientId}/merge` | `{duplicateId, keep: {email, address, about}}`, `Idempotency-Key` required. |
+
+Rules:
+
+- **Manager column (Q-CL6):** manager of the latest project (by creation); if it has none, manager of the latest
+  active lead. Name = the lead's name (the first + last name joined, as the lead already stores it).
+- **Contract value (Q-CL2):** `total`, `paid` and `remaining` summed **per currency** over the client's projects that
+  have a contract. Cancelled projects are left out (deviation from the literal default, see open questions).
+- **Phones (Q-CL5):** Edit client accepts the same masks as Create lead, `+48` or `+380` plus 9 digits (spaces, dashes,
+  brackets and a leading `00` are tolerated) and stores them compact (`+48601334812`). The first phone is required;
+  `null` clears the second phone. `language` is one of `pl|uk|en|ru`.
+- **Edit rights:** any user with access to the client's office. Changed fields are written to `client_events`.
+  A merged-away client answers `409 client_merged`.
+- **Duplicate candidates:** other non-merged clients of the same office that share a phone (either number) or the
+  email. This happens when a lead matched one client by phone but its email belongs to another, or after a phone
+  was edited.
+- **Merge:** super admin, or office admin of the client's office (`403 client_merge_forbidden`); both clients must be
+  in the same office. The **older** client (by `createdAt`, then id) survives whichever of the two is in the path.
+  Leads, projects and `tasks.link_client_id` move to it; documents, timelines and project data follow their lead or
+  project. Name and phone stay with the survivor; email, address and note follow `keep` per field (`older|newer`,
+  default `older`); an empty language is filled from the other client; the other client's phone becomes the second
+  phone when that is empty and the number differs (nothing is silently lost). The other client stays as a tombstone
+  (`merged_into_id`); `GET` on its id returns the survivor with `redirectedFrom {id, code}`. Moved leads get a new
+  `updated_at` (the lead update trigger); their `version` is unchanged, so open lead dialogs keep working. A
+  `merged` event is logged on both clients. Irreversible.
+- `Lead.client_id`, `Project.clientId` and `ProjectListItem.clientId` are new read fields.
+
+### 9.3 Not in CL1
+
+No client timeline endpoint (events are stored), no endpoint to create or delete a client, no change to lead contact
+editing: `PATCH /v1/leads/{leadId}` still edits the lead's own name / phone / email, which do not flow into the
+client (board note "Edit contact info on a lead edits the same record" is open, see the owner file). Task links to a
+client stay disabled in `taskLinkTypeAvailable`.
+
+### 9.4 Rollout
+
+Migration → API → CRM (CL2–CL4). CRM v1 needs no change: the extra `client_id` property of the lead JSON is ignored
+(`Lead` allows additional properties). The API reads the new tables and columns, so it must not ship before the
+migration. The backfill runs inside the migration transaction.
