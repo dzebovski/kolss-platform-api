@@ -1164,9 +1164,14 @@ func TestV2StatusFilterWhere(t *testing.T) {
 	}
 }
 
-func TestCreateSourceKeepsPromoExpoChannel(t *testing.T) {
-	system, channel := createSource("promo_expo")
-	if system != "manual" || channel != "promo_expo" {
-		t.Fatalf("createSource(promo_expo) = %q, %q; want manual, promo_expo", system, channel)
+func TestCreateSourceKeepsManualChannel(t *testing.T) {
+	for _, source := range []string{"website", "promo_expo", "other"} {
+		system, channel := createSource(source)
+		if system != "manual" || channel != source {
+			t.Errorf("createSource(%s) = %q, %q; want manual, %s", source, system, channel, source)
+		}
+	}
+	if system, channel := createSource("office"); system != "manual" || channel != "manual" {
+		t.Errorf("createSource(office) = %q, %q; want manual, manual", system, channel)
 	}
 }

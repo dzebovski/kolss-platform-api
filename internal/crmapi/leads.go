@@ -1451,8 +1451,8 @@ func createSource(source string) (string, string) {
 		return "meta_lead_ads", "facebook"
 	case "google":
 		return "google_ads", "google"
-	case "promo_expo":
-		return "manual", "promo_expo"
+	case "website", "promo_expo", "other":
+		return "manual", source
 	default:
 		return "manual", "manual"
 	}
