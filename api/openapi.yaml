@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.38.0
+  version: 2.39.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -3944,7 +3944,7 @@ components:
       required: [officeId, source, name, phone, cityRegion, productInterest, initialMessage, sourceCreatedAtLocal]
       properties:
         officeId: { type: string, format: uuid }
-        source: { type: string, enum: [website, facebook, office, other] }
+        source: { type: string, enum: [website, facebook, office, promo_expo, other], description: promo_expo since 2.39.0. }
         name: { type: string }
         phone: { type: string }
         email: { type: [string, 'null'], format: email }

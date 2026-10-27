@@ -1163,3 +1163,10 @@ func TestV2StatusFilterWhere(t *testing.T) {
 		t.Fatal("v1 status codes must be rejected")
 	}
 }
+
+func TestCreateSourceKeepsPromoExpoChannel(t *testing.T) {
+	system, channel := createSource("promo_expo")
+	if system != "manual" || channel != "promo_expo" {
+		t.Fatalf("createSource(promo_expo) = %q, %q; want manual, promo_expo", system, channel)
+	}
+}
