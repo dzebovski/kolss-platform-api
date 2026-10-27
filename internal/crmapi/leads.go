@@ -1398,8 +1398,8 @@ func (s *Server) handleDeleteLead(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 
-	var archivedAt *time.Time
-	err = tx.QueryRow(r.Context(), `select archived_at from public.leads where id=$1 for update`, leadID).Scan(&archivedAt)
+	// Super admin may delete any lead, archived or not.
+	err = tx.QueryRow(r.Context(), `select 1 from public.leads where id=$1 for update`, leadID).Scan(new(int))
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
@@ -1408,11 +1408,6 @@ func (s *Server) handleDeleteLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
 		return
 	}
-	if archivedAt == nil {
-		s.writeError(w, r, http.StatusConflict, "not_archived", "Only archived leads can be permanently deleted", nil)
-		return
-	}
-
 	if _, err := tx.Exec(r.Context(), `update public.leads set converted_project_id=null where id=$1`, leadID); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
 		return
@@ -1421,13 +1416,8 @@ func (s *Server) handleDeleteLead(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
 		return
 	}
-	result, err := tx.Exec(r.Context(), `delete from public.leads where id=$1 and archived_at is not null`, leadID)
-	if err != nil {
+	if _, err := tx.Exec(r.Context(), `delete from public.leads where id=$1`, leadID); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, "delete_failed", "Could not delete lead", nil)
-		return
-	}
-	if result.RowsAffected() == 0 {
-		s.writeError(w, r, http.StatusConflict, "not_archived", "Only archived leads can be permanently deleted", nil)
 		return
 	}
 	if err := tx.Commit(r.Context()); err != nil {

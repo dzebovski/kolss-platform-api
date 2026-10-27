@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.39.0
+  version: 2.40.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -580,14 +580,17 @@ paths:
     post:
       tags: [Leads]
       operationId: deleteLead
+      description: >
+        Super admin only. Permanently deletes the lead with its project; since 2.40.0 the lead
+        does not have to be archived first.
       security: [{ bearerAuth: [] }]
       parameters:
         - { $ref: '#/components/parameters/LeadId' }
         - { $ref: '#/components/parameters/IdempotencyKey' }
       responses:
-        '200': { description: Archived lead permanently deleted }
+        '200': { description: Lead permanently deleted }
         '403': { $ref: '#/components/responses/CRMError' }
-        '409': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
   /v1/appointments:
     get:
       tags: [Appointments]
