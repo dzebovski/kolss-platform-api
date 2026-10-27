@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseLeadReactionKind(t *testing.T) {
-	for _, value := range []string{"like", "star", "question"} {
+	for _, value := range []string{"like", "star", "question", "cross"} {
 		kind, ok := parseLeadReactionKind(value)
 		if !ok || string(kind) != value {
 			t.Fatalf("parseLeadReactionKind(%q) = %q, %v", value, kind, ok)
@@ -54,5 +54,15 @@ func TestLeadJSONExpressionEmbedsReactionsAndActivity(t *testing.T) {
 		if !strings.Contains(expr, fragment) {
 			t.Fatalf("leadJSONExpression missing %q\n%s", fragment, expr)
 		}
+	}
+}
+
+func TestLeadReactionCrossMigrationAllowsCross(t *testing.T) {
+	content, err := os.ReadFile("../../supabase/migrations/20261027120000_lead_reaction_cross.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "kind in ('like', 'star', 'question', 'cross')") {
+		t.Error("cross reaction migration must allow every reaction kind")
 	}
 }

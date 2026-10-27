@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.37.0
+  version: 2.38.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -326,7 +326,7 @@ paths:
         '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/reactions/{kind}:
     description: >
-      Personal reactions (like / star / question), added in 2.34.0. Any office member may
+      Personal reactions (like / star / question / cross), added in 2.34.0. Any office member may
       add or remove their own reaction on an active lead; reactions never reset and do not
       count as lead activity.
     parameters:
@@ -3438,7 +3438,8 @@ components:
         marked_at: { type: string, format: date-time }
     LeadReactionKind:
       type: string
-      enum: [like, star, question]
+      description: cross (negative) since 2.38.0.
+      enum: [like, star, question, cross]
     LeadReaction:
       type: object
       additionalProperties: false

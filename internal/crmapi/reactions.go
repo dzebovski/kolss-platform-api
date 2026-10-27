@@ -16,11 +16,13 @@ const (
 	leadReactionLike     leadReactionKind = "like"
 	leadReactionStar     leadReactionKind = "star"
 	leadReactionQuestion leadReactionKind = "question"
+	leadReactionCross    leadReactionKind = "cross"
 )
 
 func parseLeadReactionKind(value string) (leadReactionKind, bool) {
 	kind := leadReactionKind(strings.TrimSpace(value))
-	return kind, kind == leadReactionLike || kind == leadReactionStar || kind == leadReactionQuestion
+	return kind, kind == leadReactionLike || kind == leadReactionStar || kind == leadReactionQuestion ||
+		kind == leadReactionCross
 }
 
 type leadReactionResponse struct {
