@@ -403,7 +403,7 @@ func buildLeadReportQuery(criteria reportCriteria, officeIDs []uuid.UUID) (strin
 	} else if group != "" {
 		where = append(where, group)
 	}
-	if group, ok := clientStatusFilterWhereMulti(criteria.ClientStatuses, addArg); !ok {
+	if group, ok := clientStatusFilterWhereMulti(criteria.ClientStatuses, false, addArg); !ok {
 		fields["clientStatus"] = "Unknown status"
 	} else if group != "" {
 		where = append(where, group)

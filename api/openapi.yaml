@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.36.0
+  version: 2.37.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -147,6 +147,7 @@ paths:
         - { name: workflow, in: query, deprecated: true, schema: { type: string } }
         - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
         - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: clientStatusEver, in: query, description: '(2.37.0) When true, concrete clientStatus values also match leads that held that status earlier (status history); new_lead, in_work and active stay current-only.', schema: { type: boolean, default: false } }
         - { name: rating, in: query, style: form, explode: false, description: CRM v2 rating, OR'd together when multiple are given; leads without a rating never match, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }
@@ -194,6 +195,7 @@ paths:
         - { name: source, in: query, schema: { type: string } }
         - { name: callStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/CallStatusFilter' } } }
         - { name: clientStatus, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/ClientStatusFilter' } } }
+        - { name: clientStatusEver, in: query, description: '(2.37.0) When true, concrete clientStatus values also match leads that held that status earlier (status history); new_lead, in_work and active stay current-only.', schema: { type: boolean, default: false } }
         - { name: rating, in: query, style: form, explode: false, schema: { type: array, items: { $ref: '#/components/schemas/LeadRating' } } }
         - { name: assignedTo, in: query, schema: { type: string, format: uuid } }
         - { name: archived, in: query, schema: { type: string, enum: [only, all] } }

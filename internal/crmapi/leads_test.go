@@ -66,7 +66,7 @@ func TestClientStatusFilterWhere(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := clientStatusFilterWhere(test.raw, addArg)
+			got, ok := clientStatusFilterWhere(test.raw, false, addArg)
 			if ok != test.wantOK {
 				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
 			}
@@ -219,6 +219,7 @@ func TestClientStatusFilterWhereMulti(t *testing.T) {
 	tests := []struct {
 		name    string
 		values  []string
+		ever    bool
 		wantOK  bool
 		wantSQL string
 	}{
@@ -240,11 +241,18 @@ func TestClientStatusFilterWhereMulti(t *testing.T) {
 			values: []string{"thinking", "taken"},
 			wantOK: false,
 		},
+		{
+			name:    "ever also matches past client_status events; cohorts stay current-only",
+			values:  []string{"measurement_scheduled", "new_lead"},
+			ever:    true,
+			wantOK:  true,
+			wantSQL: `((l.client_status = "measurement_scheduled" or exists (select 1 from public.lead_events e where e.lead_id = l.id and e.event_category = 'client_status' and e.status_code = "measurement_scheduled")) or (l.client_status = "new_lead" and l.call_status is null))`,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got, ok := clientStatusFilterWhereMulti(test.values, addArg)
+			got, ok := clientStatusFilterWhereMulti(test.values, test.ever, addArg)
 			if ok != test.wantOK {
 				t.Fatalf("ok=%v, want %v", ok, test.wantOK)
 			}
@@ -421,7 +429,7 @@ func TestClientStatusFilterWhereActive(t *testing.T) {
 		return fmt.Sprintf("%q", value)
 	}
 
-	got, ok := clientStatusFilterWhere("active", addArg)
+	got, ok := clientStatusFilterWhere("active", false, addArg)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -446,7 +454,7 @@ func TestDigestGroupOneCombinesCallStatusNoneWithClientStatusActive(t *testing.T
 	if !ok {
 		t.Fatal("expected callStatus ok=true")
 	}
-	clientSQL, ok := clientStatusFilterWhereMulti([]string{"active"}, addArg)
+	clientSQL, ok := clientStatusFilterWhereMulti([]string{"active"}, false, addArg)
 	if !ok {
 		t.Fatal("expected clientStatus ok=true")
 	}

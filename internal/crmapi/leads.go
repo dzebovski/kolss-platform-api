@@ -242,7 +242,9 @@ func leadSearchWhere(search string, addArg func(any) string) string {
 // clientStatusFilterWhere maps list filter values to SQL clauses.
 // new_lead means truly new (no call yet); in_work is new_lead with a recorded call;
 // active means anything not terminal (closed_lost, contract_signed).
-func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, bool) {
+// With ever, a concrete status also matches leads that held it before (a client_status
+// event with that status_code); new_lead, in_work and active stay current-only.
+func clientStatusFilterWhere(raw string, ever bool, addArg func(any) string) ([]string, bool) {
 	switch raw {
 	case "new_lead":
 		return []string{
@@ -265,7 +267,12 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 		"postponed",
 		"closed_lost",
 		"contract_signed":
-		return []string{"l.client_status = " + addArg(raw)}, true
+		status := addArg(raw)
+		if !ever {
+			return []string{"l.client_status = " + status}, true
+		}
+		return []string{"(l.client_status = " + status + " or exists (select 1 from public.lead_events e" +
+			" where e.lead_id = l.id and e.event_category = 'client_status' and e.status_code = " + status + "))"}, true
 	default:
 		return nil, false
 	}
@@ -274,10 +281,10 @@ func clientStatusFilterWhere(raw string, addArg func(any) string) ([]string, boo
 // clientStatusFilterWhereMulti OR's together the clause group for each selected
 // value (each group's own clauses stay AND'd), e.g. ["new_lead", "thinking"] ->
 // "((l.client_status = $1 and l.call_status is null) or l.client_status = $2)".
-func clientStatusFilterWhereMulti(values []string, addArg func(any) string) (string, bool) {
+func clientStatusFilterWhereMulti(values []string, ever bool, addArg func(any) string) (string, bool) {
 	groups := make([]string, 0, len(values))
 	for _, v := range values {
-		clauses, ok := clientStatusFilterWhere(v, addArg)
+		clauses, ok := clientStatusFilterWhere(v, ever, addArg)
 		if !ok {
 			return "", false
 		}
@@ -434,7 +441,8 @@ func leadListWhere(actor Actor, query url.Values, skip string) ([]string, []any,
 		}
 	}
 	if raw := strings.TrimSpace(query.Get("clientStatus")); raw != "" {
-		group, ok := clientStatusFilterWhereMulti(splitQueryValues(raw), addArg)
+		ever := query.Get("clientStatusEver") == "true"
+		group, ok := clientStatusFilterWhereMulti(splitQueryValues(raw), ever, addArg)
 		if !ok {
 			return nil, nil, &leadListFilterError{http.StatusBadRequest, "validation_error", "Invalid status filter", map[string]string{"clientStatus": "Unknown status"}}
 		}
