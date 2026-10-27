@@ -153,6 +153,7 @@ func (s *Server) handleDashboardOverview(w http.ResponseWriter, r *http.Request)
 			count(*) filter (where l.archived_at is null and l.workflow_status='successful')
 		from public.leads l
 		where ($1::uuid[] is null or l.office_id=any($1))
+			and l.duplicate_of_lead_id is null
 	`, nullableUUIDs(officeIDs)).Scan(&total, &active, &successful)
 	if err == nil {
 		err = s.pool.QueryRow(r.Context(), `
@@ -394,6 +395,7 @@ func buildLeadReportQuery(criteria reportCriteria, officeIDs []uuid.UUID) (strin
 	}
 	where := []string{
 		"l.archived_at is null",
+		"l.duplicate_of_lead_id is null",
 		"($1::uuid[] is null or l.office_id=any($1))",
 	}
 	fields := map[string]string{}

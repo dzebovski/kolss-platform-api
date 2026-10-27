@@ -22,6 +22,9 @@ const leadJSONExpression = `
 	to_jsonb(l) || jsonb_build_object(
 		'offices', to_jsonb(o),
 		'profiles', case when p.id is null then null else jsonb_build_object('display_name', p.display_name) end,
+		'duplicate_of_reference_id', (
+			select d.reference_id from public.leads d where d.id = l.duplicate_of_lead_id
+		),
 		'first_contact_attempt', (
 			select jsonb_build_object(
 				'result', a.result,

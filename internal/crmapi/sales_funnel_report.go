@@ -216,6 +216,7 @@ func buildSalesFunnelQuery(officeIDs []uuid.UUID) string {
 			from public.leads l
 			join public.offices o on o.id=l.office_id
 			where ($1::uuid[] is null or l.office_id=any($1))
+			  and l.duplicate_of_lead_id is null
 			  and (coalesce(l.source_created_at,l.created_at) at time zone o.timezone_name)::date
 				between $2::date and $3::date
 		), evidence as (

@@ -265,28 +265,7 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var lead activityLead
-	err = tx.QueryRow(r.Context(), `
-		select l.office_id, l.assigned_to, l.call_status, l.client_status, l.callback_due_at, l.archived_at,
-		  l.version, l.rating, l.v2_status, l.no_answer_attempts, l.estimated_budget,
-		  l.estimated_budget_currency, o.code
-		from public.leads l join public.offices o on o.id = l.office_id
-		where l.id=$1 for update of l
-	`, leadID).Scan(
-		&lead.OfficeID,
-		&lead.AssignedTo,
-		&lead.CallStatus,
-		&lead.ClientStatus,
-		&lead.CallbackDueAt,
-		&lead.ArchivedAt,
-		&lead.CurrentVersion,
-		&lead.Rating,
-		&lead.V2Status,
-		&lead.NoAnswerAttempts,
-		&lead.Budget,
-		&lead.BudgetCurrency,
-		&lead.OfficeCode,
-	)
+	lead, err := loadActivityLeadForUpdate(r, tx, leadID)
 	if errors.Is(err, pgx.ErrNoRows) || lead.ArchivedAt != nil {
 		s.writeError(w, r, http.StatusNotFound, "lead_not_found", "Lead not found", nil)
 		return
@@ -384,6 +363,33 @@ func (s *Server) handleLeadActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+// loadActivityLeadForUpdate locks the lead row for an activity-style change.
+func loadActivityLeadForUpdate(r *http.Request, tx pgx.Tx, leadID uuid.UUID) (activityLead, error) {
+	var lead activityLead
+	err := tx.QueryRow(r.Context(), `
+		select l.office_id, l.assigned_to, l.call_status, l.client_status, l.callback_due_at, l.archived_at,
+		  l.version, l.rating, l.v2_status, l.no_answer_attempts, l.estimated_budget,
+		  l.estimated_budget_currency, o.code
+		from public.leads l join public.offices o on o.id = l.office_id
+		where l.id=$1 for update of l
+	`, leadID).Scan(
+		&lead.OfficeID,
+		&lead.AssignedTo,
+		&lead.CallStatus,
+		&lead.ClientStatus,
+		&lead.CallbackDueAt,
+		&lead.ArchivedAt,
+		&lead.CurrentVersion,
+		&lead.Rating,
+		&lead.V2Status,
+		&lead.NoAnswerAttempts,
+		&lead.Budget,
+		&lead.BudgetCurrency,
+		&lead.OfficeCode,
+	)
+	return lead, err
 }
 
 func clientStatusUnchanged(current string, req leadActivityRequest) bool {
@@ -936,6 +942,12 @@ func (s *Server) applyLeadActivity(r *http.Request, tx pgx.Tx, actor Actor, lead
 	`, leadID, actor.ID, eventType, eventCategory, statusCode, comment, oldValue, newValue)
 	if err != nil {
 		return err
+	}
+	if req.Type == activityReopen {
+		// Reopening a duplicate undoes "Duplicate of…": it becomes a lead of its own again.
+		if _, err := tx.Exec(r.Context(), `update public.leads set duplicate_of_lead_id=null where id=$1 and duplicate_of_lead_id is not null`, leadID); err != nil {
+			return err
+		}
 	}
 	if (req.Type == activityClientStatus && isTerminalClientStatus(req.Status)) ||
 		(req.Type == activityV2Status && req.Status == v2StatusLost) {

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.40.0
+  version: 2.41.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -576,6 +576,39 @@ paths:
         - { $ref: '#/components/parameters/LeadId' }
         - { $ref: '#/components/parameters/IdempotencyKey' }
       responses: { '200': { description: Lead restored }, '403': { $ref: '#/components/responses/CRMError' } }
+  /v1/leads/{leadId}/duplicate:
+    post:
+      tags: [Leads]
+      operationId: markLeadDuplicate
+      summary: Mark the lead as a repeat request of another lead
+      description: >
+        Added in 2.41.0. Any user with access to the lead's office. Closes the lead (client status
+        closed_lost, loss reason `duplicate`; an already closed lead only gets the reason), sets
+        duplicate_of_lead_id and logs `marked_duplicate` on it, and logs `repeat_request` on the
+        original (new_value: duplicate_lead_id, duplicate_reference_id, message, source_channel,
+        source_created_at). Both leads must be active and in the same office; a lead with a contract
+        or a project cannot be a duplicate, and a duplicate cannot be an original. Reports skip
+        duplicates. Reopening the duplicate (client status activity `reopen`) clears the link.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/LeadId' }
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [originalLeadId]
+              properties:
+                originalLeadId: { type: string, format: uuid }
+      responses:
+        '200': { description: Lead marked as a duplicate }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
   /v1/leads/{leadId}/delete:
     post:
       tags: [Leads]
@@ -3183,6 +3216,8 @@ components:
         source_note: { type: [string, 'null'] }
         source_created_at: { type: [string, 'null'], format: date-time, description: When the lead arrived (list date column). }
         loss_reason: { type: [string, 'null'], description: loss_reasons.code of a closed_lost lead. }
+        duplicate_of_lead_id: { type: [string, 'null'], format: uuid, description: "Set on a lead marked as a repeat request of another lead (2.41.0)." }
+        duplicate_of_reference_id: { type: [string, 'null'], description: "reference_id of duplicate_of_lead_id (2.41.0)." }
         loss_reasons:
           type: array
           items: { type: string }
