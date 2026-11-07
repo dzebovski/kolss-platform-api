@@ -15,18 +15,17 @@ import (
 // validation and money maths, unit-tested without a database.
 
 const (
-	projectStatusEstimate      = "estimate"
-	projectStatusIntroContract = "intro_contract"
-	projectStatusMeasure       = "measure"
-	projectStatusDesign        = "design"
-	projectStatusMainContract  = "main_contract"
-	projectStatusPrepayment    = "prepayment"
-	projectStatusFactory       = "factory"
-	projectStatusProduction    = "production"
-	projectStatusFinalPayment  = "final_payment"
-	projectStatusInstallation  = "installation"
-	projectStatusCompleted     = "completed"
-	projectStatusCancelled     = "cancelled"
+	projectStatusEstimate        = "estimate"
+	projectStatusShowroomMeeting = "showroom_meeting"
+	projectStatusIntroContract   = "intro_contract"
+	projectStatusDesign          = "design" // measurement and design together (pipeline 3)
+	projectStatusFactoryReview   = "factory_review"
+	projectStatusPresentation    = "presentation"
+	projectStatusMainContract    = "main_contract"
+	projectStatusProduction      = "production"
+	projectStatusInstallation    = "installation"
+	projectStatusCompleted       = "completed"
+	projectStatusCancelled       = "cancelled"
 
 	contractKindIntro = "intro"
 	contractKindMain  = "main"
@@ -39,21 +38,59 @@ const (
 	maxMoneyCents           = int64(100_000_000_000) // 1 000 000 000.00
 )
 
-// projectStatuses is the pipeline order shown by the stage tracker and the kanban (cancelled is
-// outside it). Owner decision 2026-10-23.
+// projectStatuses is the pipeline order shown by the stage tracker and the kanban columns;
+// cancelled is last and outside the pipeline (a filter, not a column). Pipeline 3, owner decision
+// 2026-11-07.
 var projectStatuses = []string{
-	projectStatusEstimate, projectStatusIntroContract, projectStatusMeasure, projectStatusDesign,
-	projectStatusMainContract, projectStatusPrepayment, projectStatusFactory, projectStatusProduction,
-	projectStatusFinalPayment, projectStatusInstallation, projectStatusCompleted, projectStatusCancelled,
+	projectStatusEstimate, projectStatusShowroomMeeting, projectStatusIntroContract, projectStatusDesign,
+	projectStatusFactoryReview, projectStatusPresentation, projectStatusMainContract,
+	projectStatusProduction, projectStatusInstallation, projectStatusCompleted, projectStatusCancelled,
 }
+
+// projectBoardStatuses are the kanban columns: the pipeline without cancelled.
+var projectBoardStatuses = projectStatuses[:len(projectStatuses)-1]
 
 // projectChangeableStatuses can be picked in Change status (by hand, forwards or backwards).
 // `intro_contract` / `main_contract` are set only by adding a contract and `cancelled` only by
 // Cancel project (Q-P15…Q-P17).
 var projectChangeableStatuses = map[string]struct{}{
-	projectStatusEstimate: {}, projectStatusMeasure: {}, projectStatusDesign: {}, projectStatusPrepayment: {},
-	projectStatusFactory: {}, projectStatusProduction: {}, projectStatusFinalPayment: {},
+	projectStatusEstimate: {}, projectStatusShowroomMeeting: {}, projectStatusDesign: {},
+	projectStatusFactoryReview: {}, projectStatusPresentation: {}, projectStatusProduction: {},
 	projectStatusInstallation: {}, projectStatusCompleted: {},
+}
+
+// needsPrepayment: moving from a stage before production to production or later needs at least
+// 50% of the main contract paid (the credited intro amount counts). Pipeline 3, 2026-11-07.
+func needsPrepayment(current, next string) bool {
+	production := projectStatusIndex(projectStatusProduction)
+	return projectStatusIndex(current) < production && projectStatusIndex(next) >= production
+}
+
+// Prepayment check outcomes for Change status.
+const (
+	prepaymentOK              = ""
+	prepaymentBlocked         = "blocked"          // manager: 409 prepayment_required
+	prepaymentNeedsComment    = "needs_comment"    // admin override without a comment
+	prepaymentOverrideAllowed = "override_allowed" // admin override with a comment (logged)
+)
+
+// prepaymentCheck applies the 50% rule (Q-P19 default): a manager cannot move the project to
+// production or later with less than 50% of the main contract paid (or without a main contract);
+// an office admin / super admin can, with a required comment written to the timeline.
+func prepaymentCheck(current, next string, m projectMoney, isAdmin, hasComment bool) string {
+	if !needsPrepayment(current, next) {
+		return prepaymentOK
+	}
+	if m.HasMain && m.MainTotal > 0 && m.mainPaidTotal() >= m.target50() {
+		return prepaymentOK
+	}
+	if !isAdmin {
+		return prepaymentBlocked
+	}
+	if !hasComment {
+		return prepaymentNeedsComment
+	}
+	return prepaymentOverrideAllowed
 }
 
 // projectStatusIndex is the position in the pipeline (-1 for unknown / cancelled).
@@ -118,11 +155,12 @@ func (a Actor) CanEditProject(officeID uuid.UUID, managerID *uuid.UUID) bool {
 func projectFirstStatus() string { return projectStatusEstimate }
 
 type projectStatusRequest struct {
-	Status        string  `json:"status"`
-	EventDate     *string `json:"eventDate"`
-	EventTime     *string `json:"eventTime"`
+	Status    string  `json:"status"`
+	EventDate *string `json:"eventDate"`
+	EventTime *string `json:"eventTime"`
+	// Legacy measure / express fields: accepted and ignored since pipeline 3.
 	ResponsibleID *string `json:"responsibleId"`
-	What          *string `json:"what"` // legacy (express); accepted and ignored since pipeline 2.1
+	What          *string `json:"what"`
 	Address       *string `json:"address"`
 	Done          *bool   `json:"done"`
 	Result        *string `json:"result"`
@@ -131,12 +169,10 @@ type projectStatusRequest struct {
 
 // projectStatusInput is a validated Change status request.
 type projectStatusInput struct {
-	Status        string
-	EventDate     *string // YYYY-MM-DD
-	EventTime     *string // HH:MM
-	ResponsibleID *uuid.UUID
-	Details       map[string]any // stored under status_details[status] for measure
-	Comment       *string
+	Status    string
+	EventDate *string // YYYY-MM-DD
+	EventTime *string // HH:MM
+	Comment   *string
 }
 
 func parseProjectDate(value string) (string, bool) {
@@ -162,9 +198,10 @@ func trimmedText(value *string) string {
 	return strings.TrimSpace(*value)
 }
 
-// validateProjectStatus applies the per-status rules of the Change status popup: measure —
-// responsible, date + time, address, took place + result; completed — nothing but the optional
-// comment; every other stage — an optional event date (+ time). The express rules are gone.
+// validateProjectStatus applies the per-status rules of the Change status popup: completed —
+// nothing but the optional comment; every other stage — an optional event date (+ time). Since
+// pipeline 3 the measurement is a calendar visit linked to the project, so the old measure fields
+// (responsible, address, took place, result) are accepted and ignored.
 func validateProjectStatus(req projectStatusRequest) (projectStatusInput, map[string]string) {
 	fields := map[string]string{}
 	in := projectStatusInput{Status: strings.TrimSpace(req.Status)}
@@ -175,7 +212,7 @@ func validateProjectStatus(req projectStatusRequest) (projectStatusInput, map[st
 		case projectStatusCancelled:
 			fields["status"] = "Use Cancel project"
 		default:
-			fields["status"] = "Must be estimate, measure, design, prepayment, factory, production, final_payment, installation, or completed"
+			fields["status"] = "Must be estimate, showroom_meeting, design, factory_review, presentation, production, installation, or completed"
 		}
 		return in, fields
 	}
@@ -205,57 +242,10 @@ func validateProjectStatus(req projectStatusRequest) (projectStatusInput, map[st
 		fields["eventDate"] = "Required when a time is set"
 	}
 
-	switch in.Status {
-	case projectStatusCompleted:
-		if in.EventDate != nil || in.EventTime != nil {
-			fields["eventDate"] = "Not allowed for this status"
-		}
-	case projectStatusMeasure:
-		validateMeasureDetails(&in, req, fields)
-	default:
-		// The remaining stages keep the optional event parsed above.
+	if in.Status == projectStatusCompleted && (in.EventDate != nil || in.EventTime != nil) {
+		fields["eventDate"] = "Not allowed for this status"
 	}
 	return in, fields
-}
-
-func validateMeasureDetails(in *projectStatusInput, req projectStatusRequest, fields map[string]string) {
-	details := map[string]any{}
-
-	if id, err := uuid.Parse(trimmedText(req.ResponsibleID)); err != nil {
-		fields["responsibleId"] = "Required"
-	} else {
-		in.ResponsibleID = &id
-		details["responsibleId"] = id.String()
-	}
-
-	if in.EventDate == nil && fields["eventDate"] == "" {
-		fields["eventDate"] = "Required"
-	}
-	if in.EventTime == nil && fields["eventTime"] == "" {
-		fields["eventTime"] = "Required"
-	}
-	address := trimmedText(req.Address)
-	switch {
-	case address == "":
-		fields["address"] = "Required"
-	case len([]rune(address)) > maxProjectTextLength:
-		fields["address"] = "Must be at most 500 characters"
-	default:
-		details["address"] = address
-	}
-
-	done := req.Done != nil && *req.Done
-	details["done"] = done
-	result := trimmedText(req.Result)
-	switch {
-	case done && result == "":
-		fields["result"] = "Required once it is done"
-	case len([]rune(result)) > maxProjectTextLength:
-		fields["result"] = "Must be at most 500 characters"
-	case result != "":
-		details["result"] = result
-	}
-	in.Details = details
 }
 
 type projectCancelRequest struct {
@@ -264,7 +254,8 @@ type projectCancelRequest struct {
 	CancelFutureEvents bool     `json:"cancelFutureEvents"`
 }
 
-// validateProjectCancel: at least one known reason; a comment is required when "other" is picked.
+// validateProjectCancel: at least one known reason and always a comment describing it in detail
+// (pipeline 3, 2026-11-07; before, only "other" needed one).
 func validateProjectCancel(req projectCancelRequest) ([]string, *string, map[string]string) {
 	fields := map[string]string{}
 	seen := map[string]struct{}{}
@@ -285,8 +276,8 @@ func validateProjectCancel(req projectCancelRequest) ([]string, *string, map[str
 		fields["reasons"] = "Pick at least one reason"
 	}
 	comment := trimmedText(req.Comment)
-	if _, other := seen["other"]; other && comment == "" {
-		fields["comment"] = "Describe the reason in a few words"
+	if comment == "" {
+		fields["comment"] = "Describe the reason in detail"
 	}
 	if len([]rune(comment)) > maxProjectCommentLength {
 		fields["comment"] = "Must be at most 1000 characters"
@@ -566,8 +557,9 @@ func validateProjectPaymentPatch(req projectPaymentPatch) (projectPaymentChange,
 // ---- money: intro credited to main -------------------------------------------------------------
 
 // projectMoney is the money state of one project in integer cents. The paid intro amount is
-// credited to the main contract when both are in the same currency; 50% of the main total is a
-// target shown on the card, never a gate (owner decision 2026-10-23).
+// credited to the main contract when both are in the same currency, so the amount still due on the
+// main contract is its total minus the paid intro amount. 50% of the main total must be paid before
+// production (pipeline 3, 2026-11-07; prepaymentCheck).
 type projectMoney struct {
 	HasIntro, HasMain           bool
 	IntroTotal, IntroPaid       int64

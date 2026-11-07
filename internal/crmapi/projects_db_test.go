@@ -184,12 +184,15 @@ func TestProjectsDB(t *testing.T) {
 	}
 
 	// Change status: by hand, both directions; contract stages and cancelled are not pickable.
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"measure"}`, nil); code != http.StatusBadRequest || fieldErr(res, "address") == "" {
-		t.Fatalf("measure without details: %d %v", code, res)
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"showroom_meeting","eventDate":"2026-10-05","eventTime":"10:00"}`, nil); code != http.StatusOK || res["eventTime"] != "10:00" {
+		t.Fatalf("showroom meeting: %d %v", code, res)
 	}
-	measure := `{"status":"measure","responsibleId":"` + managerID.String() + `","eventDate":"2026-10-05","eventTime":"10:00","address":"Legionowo, Parkowa 12","done":true,"result":"Measured"}`
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, measure, nil); code != http.StatusOK || res["eventTime"] != "10:00" {
-		t.Fatalf("measure details: %d %v", code, res)
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"factory_review"}`, nil); code != http.StatusOK || res["status"] != "factory_review" {
+		t.Fatalf("factory review: %d %v", code, res)
+	}
+	// Pipeline 3: production needs 50% of a main contract; none exists yet.
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"production"}`, nil); code != http.StatusConflict || res["code"] != "prepayment_required" {
+		t.Fatalf("production without a main contract: %d %v", code, res)
 	}
 	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"design","eventDate":"2026-10-08","comment":"Handed over to design"}`, nil); code != http.StatusOK || res["status"] != "design" {
 		t.Fatalf("design: %d %v", code, res)
@@ -230,6 +233,14 @@ func TestProjectsDB(t *testing.T) {
 	}
 	if code, res := call(manager, server.handleAddProjectContract, http.MethodPost, "/", pid, contractBody, idem()); code != http.StatusConflict || res["code"] != "contract_exists" {
 		t.Fatalf("second main contract: %d %v", code, res)
+	}
+
+	// 50% before production: the manager is refused, an admin needs a comment.
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"installation"}`, nil); code != http.StatusConflict || res["code"] != "prepayment_required" {
+		t.Fatalf("installation below 50%%: %d %v", code, res)
+	}
+	if code, res := call(admin, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"production"}`, nil); code != http.StatusBadRequest || fieldErr(res, "comment") == "" {
+		t.Fatalf("admin override without a comment: %d %v", code, res)
 	}
 
 	// Payments on the main contract: never above the remaining balance (the credit counts).
@@ -339,7 +350,7 @@ func TestProjectsDB(t *testing.T) {
 	}
 
 	// Cancel needs reasons; restore returns the previous status.
-	if code, res := call(manager, server.handleCancelProject, http.MethodPost, "/", pid, `{"reasons":["other"]}`, nil); code != http.StatusBadRequest || fieldErr(res, "comment") == "" {
+	if code, res := call(manager, server.handleCancelProject, http.MethodPost, "/", pid, `{"reasons":["price_too_high"]}`, nil); code != http.StatusBadRequest || fieldErr(res, "comment") == "" {
 		t.Fatalf("cancel without comment: %d %v", code, res)
 	}
 	code, card = call(manager, server.handleCancelProject, http.MethodPost, "/", pid, `{"reasons":["postponed_renovation"],"comment":"Moving to spring","cancelFutureEvents":true}`, nil)
@@ -373,7 +384,7 @@ func TestProjectsDB(t *testing.T) {
 	}
 	code, board := call(admin, server.handleProjectBoard, http.MethodGet, "/?"+url.Values{"q": {clientName}, "limit": {"5"}}.Encode(), nil, ``, nil)
 	columns, _ := board["columns"].([]any)
-	if code != http.StatusOK || len(columns) != len(projectStatuses) || board["total"] != float64(1) {
+	if code != http.StatusOK || len(columns) != len(projectBoardStatuses) || board["total"] != float64(1) || board["cancelledCount"] != float64(0) {
 		t.Fatalf("board: %d %v", code, board)
 	}
 	for _, column := range columns {

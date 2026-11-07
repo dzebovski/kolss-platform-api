@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.41.0
+  version: 2.42.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1253,10 +1253,11 @@ paths:
     get:
       tags: [Projects]
       operationId: getProjectBoard
-      summary: Projects kanban (CRM v2, 2.36.0)
+      summary: Projects kanban (CRM v2, 2.36.0; pipeline 3 since 2.42.0)
       description: >
-        One column per status in pipeline order (all 12, empty ones included) with the number of matching
-        projects and the first `limit` cards of each, newest first. Takes the listProjects filters (a
+        One column per pipeline stage in order (the 10 stages, empty ones included; since 2.42.0 no
+        `cancelled` column - cancelled is a filter and only `cancelledCount` is returned) with the number of
+        matching projects and the first `limit` cards of each, newest first. Takes the listProjects filters (a
         `status` filter leaves the other columns empty). More cards of a column: listProjects with
         `status=<column>` and the column's `nextCursor` (same filters).
       security: [{ bearerAuth: [] }]
@@ -1428,11 +1429,14 @@ paths:
       description: >
         Moves the project by hand to any stage (forwards or backwards) except `intro_contract` /
         `main_contract` (set only by adding a contract) and `cancelled` (only by cancelling) - those answer
-        `400 validation_error` on `status`. `measure` needs responsibleId, eventDate, eventTime and address
-        and takes `done` + a `result` that is required once `done`; `completed` takes no event; every other
-        stage takes an optional eventDate (+ eventTime). Since 2.36.0 the express rules are gone (`what` is
-        accepted and ignored). The API does not create the 1-hour calendar visit: the CRM books it through
-        the appointments API. Sending the current status updates its details (timeline entry
+        `400 validation_error` on `status`. `completed` takes no event; every other stage takes an optional
+        eventDate (+ eventTime). Since 2.42.0 (pipeline 3) the measure fields (`responsibleId`, `address`,
+        `done`, `result`) and `what` are accepted and ignored: the measurement is a calendar visit the CRM
+        books through the appointments API. 50% rule (2.42.0): moving from a stage before `production` to
+        `production` or later needs at least 50% of the main contract total paid (the credited intro amount
+        counts; no main contract = 0%). A manager gets `409 prepayment_required`; an office admin / super
+        admin may override, but then `comment` is required (`400 validation_error` on `comment`) and the
+        timeline entry carries `newValue.prepaymentOverride = true`. Sending the current status updates its details (timeline entry
         `status_updated`). Only the project's responsible manager and admins may change it
         (`403 project_edit_forbidden`).
       security: [{ bearerAuth: [] }]
@@ -1458,7 +1462,8 @@ paths:
       operationId: cancelProject
       summary: Cancel a project
       description: >
-        Needs at least one reason; a comment is required when `other` is picked. Optionally cancels the
+        Needs at least one reason and, since 2.42.0, always a comment describing the reason in detail.
+        The stage the project was cancelled from is kept in `cancellation.statusBeforeCancel`. Optionally cancels the
         lead's scheduled calendar appointments. Received payments stay (refunds are handled outside the CRM).
         The status it had is kept so Restore can bring it back.
       security: [{ bearerAuth: [] }]
@@ -2338,12 +2343,15 @@ components:
     ProjectStatus:
       type: string
       description: >
-        Pipeline order (2.36.0): estimate → intro_contract → measure → design → main_contract → prepayment
-        (target 50%) → factory (sent to factory) → production → final_payment → installation → completed.
+        Pipeline 3 (2.42.0, owner decision 2026-11-07): estimate → showroom_meeting → intro_contract →
+        design (measurement and design together) → factory_review → presentation (to the client, approval,
+        changes) → main_contract → production → installation (delivery and installation) → completed.
         `cancelled` is outside the order. Stages move by hand (Change status, backwards allowed); only adding
         a contract sets intro_contract / main_contract, only Cancel sets cancelled; payments never move the
-        stage. Replaces none / express / contract of 2.35.0 (none, express -> estimate; contract -> main_contract).
-      enum: [estimate, intro_contract, measure, design, main_contract, prepayment, factory, production, final_payment, installation, completed, cancelled]
+        stage; production or later needs 50% of the main contract paid (changeProjectStatus). 2.41.0 stages
+        were mapped: measure -> design, prepayment -> main_contract, factory -> production,
+        final_payment -> installation.
+      enum: [estimate, showroom_meeting, intro_contract, design, factory_review, presentation, main_contract, production, installation, completed, cancelled]
     ProjectType:
       type: string
       description: Create project "Project type"; stored only, it no longer sets the first status (2.36.0).
@@ -2393,7 +2401,7 @@ components:
         remainingAmount: { type: number, description: total - paidAmount - creditedAmount, never below 0. }
         target50Amount:
           type: [number, 'null']
-          description: Main contract only - 50% of the total (rounded up to the cent), a target shown on the card, not a gate.
+          description: Main contract only - 50% of the total (rounded up to the cent); paidAmount + creditedAmount must reach it before production (2.42.0).
         file:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectFileRef' }]
     ProjectPayment:
@@ -2414,8 +2422,8 @@ components:
     ProjectStageDetails:
       type: object
       description: >
-        Kept per stage. `measure`: responsibleId, address, done, result. The dates are the project's
-        eventDate / eventTime. Old projects may still carry an `express` entry (no longer written or used).
+        Legacy: no longer written since 2.42.0. Old projects may still carry `measure` / `express` entries.
+        The dates are the project's eventDate / eventTime.
       properties:
         measure:
           type: object
@@ -2814,22 +2822,22 @@ components:
         status: { $ref: '#/components/schemas/ProjectStatus' }
         eventDate: { type: [string, 'null'], format: date }
         eventTime: { type: [string, 'null'], pattern: '^[0-2][0-9]:[0-5][0-9]$' }
-        responsibleId: { type: [string, 'null'], format: uuid }
+        responsibleId: { type: [string, 'null'], format: uuid, deprecated: true, description: "Accepted and ignored since 2.42.0." }
         what: { type: [string, 'null'], maxLength: 500, deprecated: true, description: "Express leftover, accepted and ignored since 2.36.0." }
-        address: { type: [string, 'null'], maxLength: 500 }
-        done: { type: [boolean, 'null'] }
-        result: { type: [string, 'null'], maxLength: 500 }
-        comment: { type: [string, 'null'], maxLength: 1000, description: "Optional, goes to the timeline." }
+        address: { type: [string, 'null'], maxLength: 500, deprecated: true, description: "Accepted and ignored since 2.42.0." }
+        done: { type: [boolean, 'null'], deprecated: true, description: "Accepted and ignored since 2.42.0." }
+        result: { type: [string, 'null'], maxLength: 500, deprecated: true, description: "Accepted and ignored since 2.42.0." }
+        comment: { type: [string, 'null'], maxLength: 1000, description: "Optional, goes to the timeline; required for an admin's 50% override." }
     CancelProjectRequest:
       type: object
       additionalProperties: false
-      required: [reasons]
+      required: [reasons, comment]
       properties:
         reasons:
           type: array
           minItems: 1
           items: { $ref: '#/components/schemas/ProjectCancelReason' }
-        comment: { type: [string, 'null'], maxLength: 1000, description: Required when `other` is picked. }
+        comment: { type: [string, 'null'], minLength: 1, maxLength: 1000, description: Required for every reason since 2.42.0. }
         cancelFutureEvents: { type: boolean, default: false }
     AddProjectContractRequest:
       type: object
@@ -2919,12 +2927,13 @@ components:
     ProjectBoard:
       type: object
       additionalProperties: false
-      required: [total, columns]
+      required: [total, columns, cancelledCount]
       properties:
-        total: { type: integer }
+        total: { type: integer, description: Matching projects in the columns (cancelled excluded since 2.42.0). }
+        cancelledCount: { type: integer, description: Matching cancelled projects (2.42.0). }
         columns:
           type: array
-          description: All 12 statuses in pipeline order, cancelled last.
+          description: The 10 pipeline stages in order (no cancelled column since 2.42.0).
           items: { $ref: '#/components/schemas/ProjectBoardColumn' }
     CreateProjectFileUploadRequest:
       type: object
@@ -3036,6 +3045,7 @@ components:
         - endsAt
         - status
         - comment
+        - purpose
         - version
         - hasConflict
         - isOutsideWorkingHours
@@ -3055,6 +3065,9 @@ components:
         endsAt: { type: string, format: date-time }
         status: { $ref: '#/components/schemas/AppointmentStatus' }
         comment: { type: [string, 'null'] }
+        purpose:
+          oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/AppointmentPurpose' }]
+          description: Showroom meetings only (2.42.0).
         version: { type: integer, minimum: 1 }
         hasConflict: { type: boolean }
         isOutsideWorkingHours: { type: boolean }
@@ -3103,6 +3116,16 @@ components:
           multipleOf: 15
         responsibleManagerId: { type: string, format: uuid }
         comment: { type: string, maxLength: 5000 }
+        purpose:
+          type: string
+          enum: [intro, presentation, '']
+          description: Showroom meetings only (2.42.0); another kind answers 400 on `purpose`.
+    AppointmentPurpose:
+      type: string
+      description: >
+        Why a showroom meeting takes place (pipeline 3, 2.42.0): `intro` - getting to know the client,
+        `presentation` - presenting the project.
+      enum: [intro, presentation]
     UpdateAppointmentRequest:
       type: object
       additionalProperties: false
@@ -3118,6 +3141,10 @@ components:
           multipleOf: 15
         responsibleManagerId: { type: string, format: uuid }
         comment: { type: string, maxLength: 5000 }
+        purpose:
+          type: string
+          enum: [intro, presentation, '']
+          description: Showroom meetings only (2.42.0); an empty string clears it.
         status:
           type: string
           enum: [visited, no_show, canceled]

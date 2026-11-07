@@ -31,7 +31,7 @@ func TestStatusAfterContract(t *testing.T) {
 
 func TestValidateProjectStatus(t *testing.T) {
 	manager := uuid.NewString()
-	yes, no := true, false
+	yes := true
 	cases := []struct {
 		name   string
 		req    projectStatusRequest
@@ -42,11 +42,12 @@ func TestValidateProjectStatus(t *testing.T) {
 		{"cancelled is not pickable", projectStatusRequest{Status: "cancelled"}, []string{"status"}},
 		{"express is gone", projectStatusRequest{Status: "express"}, []string{"status"}},
 		{"estimate ok", projectStatusRequest{Status: "estimate"}, nil},
-		{"measure done needs a result", projectStatusRequest{Status: "measure", ResponsibleID: &manager, EventDate: ptr("2026-10-02"), EventTime: ptr("10:30"), Address: ptr("Legionowo"), Done: &yes}, []string{"result"}},
-		{"measure needs time and address", projectStatusRequest{Status: "measure", ResponsibleID: &manager, EventDate: ptr("2026-10-02")}, []string{"eventTime", "address"}},
-		{"measure ok", projectStatusRequest{Status: "measure", ResponsibleID: &manager, EventDate: ptr("2026-10-02"), EventTime: ptr("10:30"), Address: ptr("Legionowo"), Done: &no}, nil},
-		{"design event is optional", projectStatusRequest{Status: "design"}, nil},
-		{"factory event is optional", projectStatusRequest{Status: "factory", EventDate: ptr("2026-10-02")}, nil},
+		{"2.1 stages are gone", projectStatusRequest{Status: "measure"}, []string{"status"}},
+		{"prepayment is gone", projectStatusRequest{Status: "prepayment"}, []string{"status"}},
+		{"legacy measure fields are ignored", projectStatusRequest{Status: "design", ResponsibleID: &manager, Address: ptr("Legionowo"), Done: &yes}, nil},
+		{"showroom meeting event is optional", projectStatusRequest{Status: "showroom_meeting", EventDate: ptr("2026-10-02"), EventTime: ptr("10:30")}, nil},
+		{"factory review ok", projectStatusRequest{Status: "factory_review"}, nil},
+		{"presentation ok", projectStatusRequest{Status: "presentation", EventDate: ptr("2026-10-02")}, nil},
 		{"time needs a date", projectStatusRequest{Status: "production", EventTime: ptr("09:00")}, []string{"eventDate"}},
 		{"completed takes no event", projectStatusRequest{Status: "completed", EventDate: ptr("2026-10-02")}, []string{"eventDate"}},
 		{"completed ok", projectStatusRequest{Status: "completed", Comment: ptr("Done")}, nil},
@@ -184,11 +185,11 @@ func TestValidateProjectCancel(t *testing.T) {
 	if _, _, fields := validateProjectCancel(projectCancelRequest{}); fields["reasons"] == "" {
 		t.Error("at least one reason is required")
 	}
-	if _, _, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"other"}}); fields["comment"] == "" {
-		t.Error("other requires a comment")
+	if _, _, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"price_too_high"}}); fields["comment"] == "" {
+		t.Error("every reason requires a comment (pipeline 3)")
 	}
-	reasons, comment, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"price_too_high", "price_too_high", "not_relevant"}})
-	if len(fields) != 0 || len(reasons) != 2 || comment != nil {
+	reasons, comment, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"price_too_high", "price_too_high", "not_relevant"}, Comment: ptr("Chose a cheaper offer from IKEA")})
+	if len(fields) != 0 || len(reasons) != 2 || comment == nil {
 		t.Errorf("valid cancel: %v %v %v", reasons, comment, fields)
 	}
 }
@@ -233,6 +234,32 @@ func TestCanEditProject(t *testing.T) {
 	} {
 		if got := tc.actor.CanEditProject(tc.office, &manager); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestPrepaymentCheck(t *testing.T) {
+	half := projectMoney{HasMain: true, MainTotal: 8_000_000, MainPaid: 3_950_000, HasIntro: true, IntroPaid: 50_000, IntroCurrency: "PLN", MainCurrency: "PLN"}
+	low := projectMoney{HasMain: true, MainTotal: 8_000_000, MainPaid: 800_000}
+	cases := []struct {
+		name           string
+		current, next  string
+		money          projectMoney
+		admin, comment bool
+		want           string
+	}{
+		{"before production is free", "design", "presentation", projectMoney{}, false, false, prepaymentOK},
+		{"credited intro counts toward 50%", "main_contract", "production", half, false, false, prepaymentOK},
+		{"10% blocks a manager", "main_contract", "production", low, false, false, prepaymentBlocked},
+		{"skipping to installation is checked too", "presentation", "installation", low, false, false, prepaymentBlocked},
+		{"no main contract blocks", "factory_review", "production", projectMoney{}, false, false, prepaymentBlocked},
+		{"admin needs a comment", "main_contract", "production", low, true, false, prepaymentNeedsComment},
+		{"admin override with a comment", "main_contract", "production", low, true, true, prepaymentOverrideAllowed},
+		{"already in production", "production", "installation", low, false, false, prepaymentOK},
+	}
+	for _, tc := range cases {
+		if got := prepaymentCheck(tc.current, tc.next, tc.money, tc.admin, tc.comment); got != tc.want {
+			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
 }

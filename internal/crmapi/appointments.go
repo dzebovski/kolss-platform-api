@@ -54,6 +54,8 @@ type appointmentMutationRequest struct {
 	ResponsibleManagerID *uuid.UUID `json:"responsibleManagerId"`
 	Comment              *string    `json:"comment"`
 	Status               *string    `json:"status"`
+	// Purpose of a showroom meeting: intro | presentation; "" clears it (pipeline 3, 2026-11-07).
+	Purpose *string `json:"purpose"`
 }
 
 type appointmentLeadSummary struct {
@@ -85,6 +87,7 @@ type appointment struct {
 	EndsAt                time.Time                  `json:"endsAt"`
 	Status                string                     `json:"status"`
 	Comment               *string                    `json:"comment"`
+	Purpose               *string                    `json:"purpose"`
 	Version               int64                      `json:"version"`
 	HasConflict           bool                       `json:"hasConflict"`
 	IsOutsideWorkingHours bool                       `json:"isOutsideWorkingHours"`
@@ -123,6 +126,7 @@ const appointmentSelect = `
 	  v.ends_at,
 	  v.status,
 	  v.comment,
+	  v.purpose,
 	  v.version,
 	  v.created_at,
 	  v.updated_at
@@ -426,6 +430,7 @@ var (
 	errAppointmentManagerBusy    = errors.New("appointment manager busy")
 	errAppointmentTerminal       = errors.New("appointment terminal")
 	errOfficeWorkStatus          = errors.New("office work status is immutable")
+	errAppointmentPurposeKind    = errors.New("only a showroom meeting has a purpose")
 	errAppointmentVersion        = errors.New("appointment version conflict")
 )
 
@@ -573,11 +578,13 @@ func (s *Server) createAppointment(
 		  comment,
 		  responsible_manager_id,
 		  created_by,
-		  updated_by
+		  updated_by,
+		  purpose
 		)
-		values ($1,$2,$3,$4,'scheduled',$5,$6,$7,$7)
+		values ($1,$2,$3,$4,'scheduled',$5,$6,$7,$7,$8)
 		returning id
-	`, req.LeadID, kind, startsAt, endsAt, cleanOptional(req.Comment), *req.ResponsibleManagerID, actor.ID).Scan(&appointmentID)
+	`, req.LeadID, kind, startsAt, endsAt, cleanOptional(req.Comment), *req.ResponsibleManagerID, actor.ID,
+		cleanOptional(req.Purpose)).Scan(&appointmentID)
 	if err != nil {
 		return appointment{}, err
 	}
@@ -729,6 +736,9 @@ func (s *Server) updateAppointment(
 	if req.Status != nil {
 		nextStatus = *req.Status
 	}
+	if req.Purpose != nil && currentKind != appointmentKindShowroom && strings.TrimSpace(*req.Purpose) != "" {
+		return appointment{}, errAppointmentPurposeKind
+	}
 
 	// Only re-check availability when the booking actually moves; a comment-only
 	// edit must stay possible on rows that already overlapped before this rule.
@@ -755,11 +765,13 @@ func (s *Server) updateAppointment(
 		  responsible_manager_id=$4,
 		  comment=$5,
 		  status=$6,
+		  purpose=case when $9::boolean then $10::text else purpose end,
 		  updated_by=$7,
 		  updated_at=now(),
 		  version=version+1
 		where id=$1 and version=$8
-	`, appointmentID, nextStart, nextEnd, nextManager, nextComment, nextStatus, actor.ID, version)
+	`, appointmentID, nextStart, nextEnd, nextManager, nextComment, nextStatus, actor.ID, version,
+		req.Purpose != nil, cleanOptional(req.Purpose))
 	if err != nil {
 		return appointment{}, err
 	}
@@ -813,6 +825,8 @@ func (s *Server) writeAppointmentMutationError(
 		s.writeError(w, r, http.StatusConflict, "manager_busy", "Manager already has an appointment in this time range", nil)
 	case errors.Is(err, errAppointmentTerminal):
 		s.writeError(w, r, http.StatusConflict, "appointment_terminal", "Completed appointment status cannot be changed", nil)
+	case errors.Is(err, errAppointmentPurposeKind):
+		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid appointment purpose", map[string]string{"purpose": "Only a showroom meeting has a purpose"})
 	case errors.Is(err, errOfficeWorkStatus):
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Office work has no manual status actions", map[string]string{"status": "Office work status cannot be changed manually"})
 	case errors.Is(err, errAppointmentVersion):
@@ -850,7 +864,28 @@ func validateCreateAppointment(req appointmentMutationRequest) map[string]string
 	if req.Status != nil {
 		fields["status"] = "Status is assigned automatically"
 	}
+	validateAppointmentPurpose(req.Purpose, fields)
+	if req.Purpose != nil && strings.TrimSpace(*req.Purpose) != "" && req.Kind != nil && *req.Kind != appointmentKindShowroom {
+		fields["purpose"] = "Only a showroom meeting has a purpose"
+	}
 	return fields
+}
+
+// appointmentPurposes: a showroom meeting is an intro meeting or a project presentation
+// (pipeline 3, 2026-11-07). Optional.
+var appointmentPurposes = map[string]struct{}{"intro": {}, "presentation": {}}
+
+func validateAppointmentPurpose(purpose *string, fields map[string]string) {
+	if purpose == nil {
+		return
+	}
+	value := strings.TrimSpace(*purpose)
+	if value == "" {
+		return
+	}
+	if _, ok := appointmentPurposes[value]; !ok {
+		fields["purpose"] = "Use intro or presentation"
+	}
 }
 
 func validateUpdateAppointment(req appointmentMutationRequest) map[string]string {
@@ -873,7 +908,8 @@ func validateUpdateAppointment(req appointmentMutationRequest) map[string]string
 	if req.Status != nil && !isAppointmentTerminalStatus(*req.Status) {
 		fields["status"] = "Use visited, no_show, or canceled"
 	}
-	if req.StartsAtLocal == nil && req.DurationMinutes == nil && req.ResponsibleManagerID == nil && req.Comment == nil && req.Status == nil {
+	validateAppointmentPurpose(req.Purpose, fields)
+	if req.StartsAtLocal == nil && req.DurationMinutes == nil && req.ResponsibleManagerID == nil && req.Comment == nil && req.Status == nil && req.Purpose == nil {
 		fields["appointment"] = "At least one change is required"
 	}
 	return fields
@@ -1152,6 +1188,7 @@ func scanAppointment(row appointmentRowScanner) (appointment, error) {
 		&item.EndsAt,
 		&item.Status,
 		&item.Comment,
+		&item.Purpose,
 		&item.Version,
 		&item.CreatedAt,
 		&item.UpdatedAt,

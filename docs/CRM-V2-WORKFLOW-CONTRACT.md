@@ -741,3 +741,25 @@ Rules:
 CRM (v1 needs nothing; v2 client gets the new statuses and shapes) -> migration -> API. The API must not ship before the
 migration (new columns and statuses); the previous API fails on the new status values and on `contract_id`, so run the
 migration and deploy the API back to back. Production has 2 projects; the migration maps them.
+
+## 11. Project pipeline 3 (P1c, OpenAPI 2.42.0) — update of section 10
+
+Owner decisions of 2026-11-07. Everything in section 10 still holds except what is listed here.
+
+### 11.1 Database — `20261107120000_project_pipeline_3.sql`
+
+- `projects.status` / `status_before_cancel` vocabulary: `estimate`, `showroom_meeting`, `intro_contract`, `design` (measurement and design together), `factory_review`, `presentation`, `main_contract`, `production`, `installation`, `completed`, `cancelled`.
+- Existing rows mapped: `measure` → `design`, `prepayment` → `main_contract`, `factory` → `production`, `final_payment` → `installation`.
+- `lead_showroom_visits.purpose` (nullable): `intro` | `presentation`, only for `kind = showroom`. CRM v1 ignores it.
+
+### 11.2 API
+
+- Change status: the measure fields are accepted and ignored (the measurement is a calendar visit). Moving from before `production` to `production` or later needs paid + credited intro ≥ 50% of the main contract total; a manager gets `409 prepayment_required`; an office admin / super admin overrides with a required `comment` (timeline `newValue.prepaymentOverride = true`).
+- Cancel: a comment is required for every reason; the stage before cancel stays in `cancellation.statusBeforeCancel`.
+- Board: 10 columns, no `cancelled` column; `total` excludes cancelled, `cancelledCount` added.
+- Appointments: `purpose` on create / update (empty string clears) and in every appointment response; another kind answers `400` on `purpose`.
+
+### 11.3 Rollout
+
+- Deploy the migration and the API back to back: the 2.41.0 API refuses the new statuses on Change status and the 2.42.0 API refuses the old ones.
+- The CRM v2 project layer (P0c) must sync to 2.42.0 before the Projects screens ship; CRM v1 is not affected (it does not read `projects.status` or `purpose`).

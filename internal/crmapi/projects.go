@@ -476,7 +476,7 @@ func (s *Server) handleProjectFacets(w http.ResponseWriter, r *http.Request) {
 
 // ---- board (kanban) ------------------------------------------------------------------------
 
-// handleProjectBoard returns the kanban: one column per status in pipeline order with the number
+// handleProjectBoard returns the kanban: one column per pipeline stage (no cancelled) with the number
 // of matching projects and the first `limit` cards (newest first). It takes the listProjects
 // filters; more cards of a column come from listProjects with status=<column> and the column
 // nextCursor.
@@ -558,8 +558,9 @@ func (s *Server) handleProjectBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	columns := make([]map[string]any, 0, len(projectStatuses))
-	for _, status := range projectStatuses {
+	columns := make([]map[string]any, 0, len(projectBoardStatuses))
+	total -= counts[projectStatusCancelled]
+	for _, status := range projectBoardStatuses {
 		cards := items[status]
 		if cards == nil {
 			cards = []json.RawMessage{}
@@ -572,7 +573,10 @@ func (s *Server) handleProjectBoard(w http.ResponseWriter, r *http.Request) {
 			"status": status, "count": counts[status], "items": cards, "nextCursor": nextCursor,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"total": total, "columns": columns})
+	// Cancelled is a filter, not a column (pipeline 3): only its count is returned.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"total": total, "columns": columns, "cancelledCount": counts[projectStatusCancelled],
+	})
 }
 
 // ---- create --------------------------------------------------------------------------------

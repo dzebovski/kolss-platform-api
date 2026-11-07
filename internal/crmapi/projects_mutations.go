@@ -2,7 +2,6 @@ package crmapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -107,16 +106,26 @@ func (s *Server) handleChangeProjectStatus(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if in.ResponsibleID != nil {
-		if err := validateAppointmentManager(r, tx, *in.ResponsibleID, h.OfficeID); err != nil {
-			if errors.Is(err, errAppointmentManagerInvalid) {
-				s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status change", map[string]string{
-					"responsibleId": "Must be an active member of the project's office",
-				})
-				return
-			}
+	prepaymentOverride := false
+	if needsPrepayment(h.Status, in.Status) {
+		contracts, err := loadProjectContracts(r.Context(), tx, h.ID, nil)
+		if err != nil {
 			s.projectFail(w, r)
 			return
+		}
+		isAdmin := actor.IsSuperAdmin() || actor.Role == "office_admin"
+		switch prepaymentCheck(h.Status, in.Status, moneyFromContracts(contracts), isAdmin, in.Comment != nil) {
+		case prepaymentBlocked:
+			s.writeError(w, r, http.StatusConflict, "prepayment_required",
+				"At least 50% of the main contract must be paid before production", nil)
+			return
+		case prepaymentNeedsComment:
+			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid status change", map[string]string{
+				"comment": "Required to move on with less than 50% paid",
+			})
+			return
+		case prepaymentOverrideAllowed:
+			prepaymentOverride = true
 		}
 	}
 
@@ -129,26 +138,15 @@ func (s *Server) handleChangeProjectStatus(w http.ResponseWriter, r *http.Reques
 	}
 
 	changed := h.Status != in.Status
-	var details []byte
-	if in.Details != nil {
-		details, err = json.Marshal(map[string]any{in.Status: in.Details})
-		if err != nil {
-			s.projectFail(w, r)
-			return
-		}
-	} else {
-		details = []byte(`{}`)
-	}
 	if _, err := tx.Exec(r.Context(), `
 		update public.projects
 		set status = $2,
 		    status_changed_at = case when status <> $2 then now() else status_changed_at end,
 		    event_date = $3::date,
 		    event_time = $4::time,
-		    status_details = status_details || $5::jsonb,
 		    last_activity_at = now()
 		where id = $1
-	`, h.ID, in.Status, in.EventDate, in.EventTime, details); err != nil {
+	`, h.ID, in.Status, in.EventDate, in.EventTime); err != nil {
 		s.projectFail(w, r)
 		return
 	}
@@ -159,8 +157,8 @@ func (s *Server) handleChangeProjectStatus(w http.ResponseWriter, r *http.Reques
 	}
 	oldValue := map[string]any{"status": h.Status, "eventDate": oldDate, "eventTime": oldTime}
 	newValue := map[string]any{"status": in.Status, "eventDate": in.EventDate, "eventTime": in.EventTime}
-	if in.Details != nil {
-		newValue["details"] = in.Details
+	if prepaymentOverride {
+		newValue["prepaymentOverride"] = true
 	}
 	if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, eventType, oldValue, newValue, in.Comment); err != nil {
 		s.projectFail(w, r)
