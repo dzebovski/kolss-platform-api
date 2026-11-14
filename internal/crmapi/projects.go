@@ -21,7 +21,7 @@ import (
 //	POST /v1/leads/{leadId}/project   create a project from a lead (lead → v2 status `project`)
 //	GET  /v1/projects                 list (filters q, managerId, officeId, status; keyset paging)
 //	GET  /v1/projects/facets          total + per-status counts for the list chips
-//	GET  /v1/projects/{projectId}     card: project, contract, payments, permissions
+//	GET  /v1/projects/{projectId}     card: project, client contacts, estimate, payments, documents
 //	GET  /v1/projects/{projectId}/timeline
 
 type projectHeader struct {
@@ -44,42 +44,22 @@ func scanProjectHeader(row pgx.Row) (projectHeader, error) {
 	return h, err
 }
 
-// projectContractSelect builds the sub-select for one contract kind of the card. paidAmount is
-// the contract's own payments; for the main contract creditedAmount is the paid intro amount
-// credited to it (same currency, at most the main total) and target50Amount is half of its total
-// (a target shown on the card, not a gate). Mirrors projectMoney in projects_logic.go.
-func projectContractSelect(kind string) string {
-	return `select jsonb_build_object(
-				'id', c.id,
-				'kind', c.kind,
-				'number', c.number,
-				'signedOn', c.signed_on,
-				'totalAmount', c.total_amount,
-				'currency', c.currency,
-				'paidAmount', own.total,
-				'creditedAmount', cr.total,
-				'remainingAmount', greatest(c.total_amount - own.total - cr.total, 0),
-				'target50Amount', case when c.kind = 'main' then ceil(c.total_amount * 50) / 100 end,
-				'file', (select jsonb_build_object('id', f.id, 'fileName', f.file_name, 'sizeBytes', f.size_bytes)
-					from public.project_files f where f.id = c.file_id and f.status = 'ready'))
-			from public.project_contracts c
-			cross join lateral (
-				select coalesce(sum(pp.amount), 0) as total from public.project_payments pp where pp.contract_id = c.id
-			) own
-			cross join lateral (
-				select case when c.kind = 'main' then coalesce((
-					select least(coalesce(sum(ip.amount), 0), c.total_amount)
-					from public.project_payments ip
-					join public.project_contracts ic on ic.id = ip.contract_id
-					where ic.project_id = c.project_id and ic.kind = 'intro' and ic.currency = c.currency), 0)
-				else 0 end as total
-			) cr
-			where c.project_id = p.id and c.kind = '` + kind + `'`
-}
+// projectPaidTotalsSQL is the sum of the project's payments per currency.
+const projectPaidTotalsSQL = `coalesce((
+				select jsonb_agg(jsonb_build_object('currency', t.currency, 'amount', t.total) order by t.currency)
+				from (
+					select pp.currency, sum(pp.amount) as total
+					from public.project_payments pp where pp.project_id = p.id group by pp.currency
+				) t), '[]'::jsonb)`
 
-// projectDetailSQL builds the card JSON. $1 = project id, $2 = whether the viewer may edit it.
-// Money stays numeric all the way (jsonb keeps 2 decimals exactly). `contract` is the main
-// contract, kept for clients written before pipeline 2.1.
+// projectEstimateSQL is the preliminary estimate total, null when not set.
+const projectEstimateSQL = `case when p.estimate_amount is null then null
+			else jsonb_build_object('amount', p.estimate_amount, 'currency', p.estimate_currency) end`
+
+// projectDetailSQL builds the card JSON (pipeline 4). $1 = project id, $2 = whether the viewer may
+// edit it. Contacts come from the linked client (one contact entity for lead, project and client,
+// 2026-11-14), falling back to the lead; the description is the lead's "About the client". Money
+// stays numeric all the way (jsonb keeps 2 decimals exactly).
 var projectDetailSQL = `
 	select jsonb_build_object(
 		'id', p.id,
@@ -91,13 +71,16 @@ var projectDetailSQL = `
 		'projectType', p.project_type,
 		'eventDate', p.event_date,
 		'eventTime', to_char(p.event_time, 'HH24:MI'),
-		'statusDetails', p.status_details,
 		'manager', case when p.assigned_to is null then null
 			else jsonb_build_object('id', p.assigned_to, 'name', coalesce(m.display_name, '')) end,
 		'designer', case when p.designer_id is null then null
 			else jsonb_build_object('id', p.designer_id, 'name', coalesce(d.display_name, '')) end,
 		'client', jsonb_build_object(
-			'name', coalesce(l.name, ''), 'phone', l.phone, 'email', l.email, 'cityRegion', l.city_region),
+			'name', coalesce(nullif(c.name, ''), l.name, ''),
+			'phone', coalesce(c.phone, l.phone),
+			'email', coalesce(c.email, l.email),
+			'cityRegion', coalesce(nullif(c.address, ''), l.city_region)),
+		'description', nullif(btrim(coalesce(l.about_client, '')), ''),
 		'createdAt', p.created_at,
 		'createdByName', coalesce(cb.display_name, ''),
 		'statusChangedAt', p.status_changed_at,
@@ -109,22 +92,15 @@ var projectDetailSQL = `
 			'reasons', to_jsonb(p.cancel_reasons),
 			'comment', p.cancel_comment,
 			'statusBeforeCancel', p.status_before_cancel) end,
-		'estimate', ` + projectEstimateJSON + `,
-		'introDefault', (
-			select jsonb_build_object('amount', o.intro_contract_default_amount, 'currency', o.intro_contract_default_currency)
-			from public.offices o
-			where o.id = p.office_id and o.intro_contract_default_amount is not null),
-		'contracts', jsonb_build_object(
-			'intro', (` + projectContractSelect("intro") + `),
-			'main', (` + projectContractSelect("main") + `)),
-		'contract', (` + projectContractSelect("main") + `),
+		'estimate', ` + projectEstimateSQL + `,
+		'paidTotals', ` + projectPaidTotalsSQL + `,
 		'payments', coalesce((
 			select jsonb_agg(jsonb_build_object(
 				'id', pp.id,
-				'contractId', pp.contract_id,
-				'contractKind', pc.kind,
 				'amount', pp.amount,
+				'currency', pp.currency,
 				'paidOn', pp.paid_on,
+				'basis', pp.basis,
 				'note', pp.note,
 				'createdAt', pp.created_at,
 				'createdByName', coalesce(pb.display_name, ''),
@@ -132,41 +108,31 @@ var projectDetailSQL = `
 					from public.project_files f where f.id = pp.file_id and f.status = 'ready'))
 				order by pp.paid_on, pp.created_at)
 			from public.project_payments pp
-			join public.project_contracts pc on pc.id = pp.contract_id
 			left join public.profiles pb on pb.id = pp.created_by
 			where pp.project_id = p.id), '[]'::jsonb),
+		'documents', coalesce((
+			select jsonb_agg(jsonb_build_object(
+				'id', f.id,
+				'fileName', f.file_name,
+				'mimeType', f.mime_type,
+				'sizeBytes', f.size_bytes,
+				'createdAt', f.created_at,
+				'uploadedBy', case when f.uploaded_by is null then null
+					else jsonb_build_object('id', f.uploaded_by, 'name', coalesce(fu.display_name, '')) end)
+				order by f.created_at desc, f.id desc)
+			from public.project_files f
+			left join public.profiles fu on fu.id = f.uploaded_by
+			where f.project_id = p.id and f.kind = 'document' and f.status = 'ready'), '[]'::jsonb),
 		'permissions', jsonb_build_object('canEdit', $2::boolean)
 	)
 	from public.projects p
 	join public.leads l on l.id = p.lead_id
+	left join public.clients c on c.id = p.client_id
 	left join public.profiles m on m.id = p.assigned_to
 	left join public.profiles d on d.id = p.designer_id
 	left join public.profiles cb on cb.id = p.created_by
 	left join public.profiles xb on xb.id = p.cancelled_by
 	where p.id = $1`
-
-// projectEstimateJSON is the estimate block of the card: the four lines (null when not set),
-// the total per currency and whether it is locked (a main contract exists).
-var projectEstimateJSON = `jsonb_build_object(
-			'lines', jsonb_build_object(
-				'kitchen', ` + estimateLineSQL("kitchen") + `,
-				'appliances', ` + estimateLineSQL("appliances") + `,
-				'installation', ` + estimateLineSQL("installation") + `,
-				'countertop', ` + estimateLineSQL("countertop") + `),
-			'totals', ` + estimateTotalsSQL + `,
-			'locked', exists(select 1 from public.project_contracts mc where mc.project_id = p.id and mc.kind = 'main'))`
-
-const estimateTotalsSQL = `coalesce((
-				select jsonb_agg(jsonb_build_object('currency', t.currency, 'amount', t.total) order by t.currency)
-				from (
-					select el.currency, sum(el.amount) as total
-					from public.project_estimate_lines el where el.project_id = p.id group by el.currency
-				) t), '[]'::jsonb)`
-
-func estimateLineSQL(line string) string {
-	return `(select jsonb_build_object('amount', el.amount, 'currency', el.currency, 'note', el.note)
-					from public.project_estimate_lines el where el.project_id = p.id and el.line = '` + line + `')`
-}
 
 func (s *Server) projectDetailJSON(ctx context.Context, q appointmentQuerier, actor Actor, h projectHeader) (json.RawMessage, error) {
 	var raw []byte
@@ -325,13 +291,14 @@ func projectListWhere(actor Actor, query map[string][]string, skip string) ([]st
 	}
 	if raw := get("q"); raw != "" {
 		like := addArg("%" + raw + "%")
-		where = append(where, "(l.name ilike "+like+" or l.phone ilike "+like+" or l.reference_id ilike "+like+")")
+		where = append(where, "(l.name ilike "+like+" or l.phone ilike "+like+" or l.reference_id ilike "+like+" or cl.name ilike "+like+" or cl.phone ilike "+like+")")
 	}
 	return where, args, nil
 }
 
 const projectItemJoins = `
 	join public.leads l on l.id = p.lead_id
+	left join public.clients cl on cl.id = p.client_id
 	left join public.profiles m on m.id = p.assigned_to
 	left join public.profiles dg on dg.id = p.designer_id`
 
@@ -339,12 +306,12 @@ const projectListFrom = `
 	from public.projects p` + projectItemJoins
 
 // projectListItemSQL is the ProjectListItem JSON of the list and of the kanban cards.
-const projectListItemSQL = `jsonb_build_object(
+var projectListItemSQL = `jsonb_build_object(
 			'id', p.id,
 			'leadId', p.lead_id,
 			'clientId', p.client_id,
 			'code', l.reference_id,
-			'clientName', coalesce(l.name, ''),
+			'clientName', coalesce(nullif(cl.name, ''), l.name, ''),
 			'products', to_jsonb(l.products),
 			'status', p.status,
 			'projectType', p.project_type,
@@ -354,12 +321,8 @@ const projectListItemSQL = `jsonb_build_object(
 				else jsonb_build_object('id', p.assigned_to, 'name', coalesce(m.display_name, '')) end,
 			'designer', case when p.designer_id is null then null
 				else jsonb_build_object('id', p.designer_id, 'name', coalesce(dg.display_name, '')) end,
-			'estimateTotals', coalesce((
-				select jsonb_agg(jsonb_build_object('currency', t.currency, 'amount', t.total) order by t.currency)
-				from (
-					select el.currency, sum(el.amount) as total
-					from public.project_estimate_lines el where el.project_id = p.id group by el.currency
-				) t), '[]'::jsonb),
+			'estimate', ` + projectEstimateSQL + `,
+			'paidTotals', ` + projectPaidTotalsSQL + `,
 			'createdAt', p.created_at,
 			'lastComment', (
 				select jsonb_build_object('text', e.comment, 'at', e.created_at)
@@ -476,7 +439,7 @@ func (s *Server) handleProjectFacets(w http.ResponseWriter, r *http.Request) {
 
 // ---- board (kanban) ------------------------------------------------------------------------
 
-// handleProjectBoard returns the kanban: one column per pipeline stage (no cancelled) with the number
+// handleProjectBoard returns the kanban: one column per stage (completed and cancelled are filters) with the number
 // of matching projects and the first `limit` cards (newest first). It takes the listProjects
 // filters; more cards of a column come from listProjects with status=<column> and the column
 // nextCursor.
@@ -559,7 +522,7 @@ func (s *Server) handleProjectBoard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	columns := make([]map[string]any, 0, len(projectBoardStatuses))
-	total -= counts[projectStatusCancelled]
+	total -= counts[projectStatusCancelled] + counts[projectStatusCompleted]
 	for _, status := range projectBoardStatuses {
 		cards := items[status]
 		if cards == nil {
@@ -573,9 +536,10 @@ func (s *Server) handleProjectBoard(w http.ResponseWriter, r *http.Request) {
 			"status": status, "count": counts[status], "items": cards, "nextCursor": nextCursor,
 		})
 	}
-	// Cancelled is a filter, not a column (pipeline 3): only its count is returned.
+	// Completed and cancelled are filters, not columns (pipeline 4): only their counts are returned.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total": total, "columns": columns, "cancelledCount": counts[projectStatusCancelled],
+		"total": total, "columns": columns,
+		"completedCount": counts[projectStatusCompleted], "cancelledCount": counts[projectStatusCancelled],
 	})
 }
 

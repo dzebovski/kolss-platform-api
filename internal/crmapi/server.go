@@ -164,13 +164,13 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Post("/v1/projects/{projectId}/status", s.handleChangeProjectStatus)
 			r.Post("/v1/projects/{projectId}/cancel", s.handleCancelProject)
 			r.Post("/v1/projects/{projectId}/restore", s.handleRestoreProject)
-			r.Post("/v1/projects/{projectId}/contract", s.handleAddProjectContract)
-			r.Patch("/v1/projects/{projectId}/contracts/{contractId}", s.handleUpdateProjectContract)
-			r.Delete("/v1/projects/{projectId}/contracts/{contractId}", s.handleDeleteProjectContract)
+			r.Post("/v1/projects/{projectId}/finish", s.handleFinishProject)
 			r.Post("/v1/projects/{projectId}/payments", s.handleAddProjectPayment)
 			r.Patch("/v1/projects/{projectId}/payments/{paymentId}", s.handleUpdateProjectPayment)
 			r.Delete("/v1/projects/{projectId}/payments/{paymentId}", s.handleDeleteProjectPayment)
 			r.Post("/v1/projects/{projectId}/files/uploads", s.handleCreateProjectFileUpload)
+			r.Post("/v1/projects/{projectId}/files", s.handleConfirmProjectDocument)
+			r.Delete("/v1/projects/{projectId}/files/{fileId}", s.handleDeleteProjectDocument)
 			r.Get("/v1/clients", s.handleListClients)
 			r.Get("/v1/clients/facets", s.handleClientFacets)
 			r.Get("/v1/clients/match", s.handleMatchClient)
@@ -267,11 +267,12 @@ var crmCORSRoutePatterns = []string{
 	"/v1/projects/{projectId}/status",
 	"/v1/projects/{projectId}/cancel",
 	"/v1/projects/{projectId}/restore",
-	"/v1/projects/{projectId}/contract",
-	"/v1/projects/{projectId}/contracts/{contractId}",
+	"/v1/projects/{projectId}/finish",
 	"/v1/projects/{projectId}/payments",
 	"/v1/projects/{projectId}/payments/{paymentId}",
 	"/v1/projects/{projectId}/files/uploads",
+	"/v1/projects/{projectId}/files",
+	"/v1/projects/{projectId}/files/{fileId}",
 	"/v1/clients",
 	"/v1/clients/facets",
 	"/v1/clients/match",

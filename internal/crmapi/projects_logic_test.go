@@ -1,174 +1,124 @@
 package crmapi
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
 )
 
 func TestProjectFirstStatus(t *testing.T) {
-	if got := projectFirstStatus(); got != "estimate" {
+	if got := projectFirstStatus(); got != "preliminary_estimate" {
 		t.Errorf("first status: got %q", got)
 	}
 }
 
-func TestStatusAfterContract(t *testing.T) {
-	for _, tc := range []struct{ current, kind, want string }{
-		{"estimate", "intro", "intro_contract"},
-		{"estimate", "main", "main_contract"},
-		{"design", "main", "main_contract"},
-		{"intro_contract", "main", "main_contract"},
-		{"production", "main", "production"}, // a late entry never drags the project back
-		{"design", "intro", "design"},        // intro after design: keep
-		{"main_contract", "main", "main_contract"},
-	} {
-		if got := statusAfterContract(tc.current, tc.kind); got != tc.want {
-			t.Errorf("%s + %s contract: got %q want %q", tc.current, tc.kind, got, tc.want)
+func TestProjectStagesPipeline4(t *testing.T) {
+	want := []string{"preliminary_estimate", "measurement_design", "factory_approval", "contract_signing", "production_delivery", "installation"}
+	if len(projectBoardStatuses) != len(want) {
+		t.Fatalf("board columns: %v", projectBoardStatuses)
+	}
+	for i, stage := range want {
+		if projectBoardStatuses[i] != stage {
+			t.Errorf("column %d: got %q want %q", i, projectBoardStatuses[i], stage)
 		}
+	}
+	if len(projectStatuses) != 8 || projectStatuses[6] != "completed" || projectStatuses[7] != "cancelled" {
+		t.Errorf("statuses: %v", projectStatuses)
 	}
 }
 
 func TestValidateProjectStatus(t *testing.T) {
-	manager := uuid.NewString()
-	yes := true
-	cases := []struct {
-		name   string
-		req    projectStatusRequest
-		fields []string
-	}{
-		{"intro contract is not pickable", projectStatusRequest{Status: "intro_contract"}, []string{"status"}},
-		{"main contract is not pickable", projectStatusRequest{Status: "main_contract"}, []string{"status"}},
-		{"cancelled is not pickable", projectStatusRequest{Status: "cancelled"}, []string{"status"}},
-		{"express is gone", projectStatusRequest{Status: "express"}, []string{"status"}},
-		{"estimate ok", projectStatusRequest{Status: "estimate"}, nil},
-		{"2.1 stages are gone", projectStatusRequest{Status: "measure"}, []string{"status"}},
-		{"prepayment is gone", projectStatusRequest{Status: "prepayment"}, []string{"status"}},
-		{"legacy measure fields are ignored", projectStatusRequest{Status: "design", ResponsibleID: &manager, Address: ptr("Legionowo"), Done: &yes}, nil},
-		{"showroom meeting event is optional", projectStatusRequest{Status: "showroom_meeting", EventDate: ptr("2026-10-02"), EventTime: ptr("10:30")}, nil},
-		{"factory review ok", projectStatusRequest{Status: "factory_review"}, nil},
-		{"presentation ok", projectStatusRequest{Status: "presentation", EventDate: ptr("2026-10-02")}, nil},
-		{"time needs a date", projectStatusRequest{Status: "production", EventTime: ptr("09:00")}, []string{"eventDate"}},
-		{"completed takes no event", projectStatusRequest{Status: "completed", EventDate: ptr("2026-10-02")}, []string{"eventDate"}},
-		{"completed ok", projectStatusRequest{Status: "completed", Comment: ptr("Done")}, nil},
-	}
-	for _, tc := range cases {
-		_, fields := validateProjectStatus(tc.req)
-		if len(fields) != len(tc.fields) {
-			t.Errorf("%s: got %v want %v", tc.name, fields, tc.fields)
-			continue
-		}
-		for _, name := range tc.fields {
-			if _, ok := fields[name]; !ok {
-				t.Errorf("%s: missing field error %q in %v", tc.name, name, fields)
-			}
+	for _, stage := range projectStages {
+		if _, fields := validateProjectStatus(projectStatusRequest{Status: stage}); len(fields) != 0 {
+			t.Errorf("%s: %v", stage, fields)
 		}
 	}
-}
-
-func TestProjectMoney(t *testing.T) {
-	// Intro 500 PLN fully paid, main 80 000 PLN with 39 500 paid on it: the intro is credited.
-	m := moneyFromContracts([]projectContractRow{
-		{Kind: "intro", TotalCents: 50_000, Currency: "PLN", PaidCents: 50_000},
-		{Kind: "main", TotalCents: 8_000_000, Currency: "PLN", PaidCents: 3_950_000},
-	})
-	if m.credited() != 50_000 || m.mainPaidTotal() != 4_000_000 || m.mainRemaining() != 4_000_000 || m.target50() != 4_000_000 {
-		t.Errorf("credit: %+v credited=%d remaining=%d", m, m.credited(), m.mainRemaining())
-	}
-	if m.maxPayment("main") != 4_000_000 || m.maxPayment("intro") != 0 {
-		t.Errorf("max payments: main %d intro %d", m.maxPayment("main"), m.maxPayment("intro"))
-	}
-	// Different currencies: nothing is credited.
-	m = moneyFromContracts([]projectContractRow{
-		{Kind: "intro", TotalCents: 50_000, Currency: "EUR", PaidCents: 50_000},
-		{Kind: "main", TotalCents: 8_000_000, Currency: "PLN"},
-	})
-	if m.credited() != 0 || m.mainRemaining() != 8_000_000 {
-		t.Errorf("mixed currency: credited %d remaining %d", m.credited(), m.mainRemaining())
-	}
-	// The target is half of the total, rounded up to the cent.
-	if got := (projectMoney{MainTotal: 10_001}).target50(); got != 5_001 {
-		t.Errorf("target50 rounding: %d", got)
-	}
-	// A main total below what is already paid (intro counts) is refused.
-	m = moneyFromContracts([]projectContractRow{
-		{Kind: "intro", TotalCents: 50_000, Currency: "PLN", PaidCents: 50_000},
-		{Kind: "main", TotalCents: 60_000, Currency: "PLN", PaidCents: 20_000},
-	})
-	if field, _ := m.overpaid(); field != "totalAmount" {
-		t.Error("overpaid main must be reported")
-	}
-}
-
-func TestPickPaymentContract(t *testing.T) {
-	intro, main := projectContractRow{ID: uuid.New(), Kind: "intro"}, projectContractRow{ID: uuid.New(), Kind: "main"}
-	if got, ok := pickPaymentContract([]projectContractRow{intro}, nil); !ok || got.ID != intro.ID {
-		t.Error("only an intro contract: payments go there")
-	}
-	if got, ok := pickPaymentContract([]projectContractRow{intro, main}, nil); !ok || got.ID != main.ID {
-		t.Error("without an id the main contract wins")
-	}
-	if got, ok := pickPaymentContract([]projectContractRow{intro, main}, &intro.ID); !ok || got.ID != intro.ID {
-		t.Error("an explicit id wins")
-	}
-	other := uuid.New()
-	if _, ok := pickPaymentContract([]projectContractRow{intro, main}, &other); ok {
-		t.Error("a foreign contract id is refused")
-	}
-	if _, ok := pickPaymentContract(nil, nil); ok {
-		t.Error("no contract, no payment")
-	}
-}
-
-func TestValidateEstimate(t *testing.T) {
-	parse := func(body string) (map[string]*estimateLine, map[string]string) {
-		var req projectEstimateRequest
-		if err := json.Unmarshal([]byte(body), &req); err != nil {
-			t.Fatal(err)
-		}
-		return validateEstimate(req.Lines)
-	}
-	lines, fields := parse(`{"lines":{"kitchen":{"amount":1200.5,"currency":"PLN","note":" oak "},"countertop":null}}`)
-	if len(fields) != 0 || lines["kitchen"].AmountCents != 120_050 || *lines["kitchen"].Note != "oak" || lines["countertop"] != nil {
-		t.Errorf("valid estimate: %v %v", lines, fields)
-	}
-	for body, field := range map[string]string{
-		`{"lines":{"garage":null}}`:                                 "lines.garage",
-		`{"lines":{"kitchen":{"amount":0,"currency":"PLN"}}}`:       "lines.kitchen.amount",
-		`{"lines":{"kitchen":{"amount":5,"currency":"GBP"}}}`:       "lines.kitchen.currency",
-		`{"lines":{"kitchen":{"amount":5,"currency":"PLN","x":1}}}`: "lines.kitchen",
-		`{"lines":{}}`: "lines",
+	for status, want := range map[string]string{
+		"completed": "Use Project finished", "cancelled": "Use Close project", "estimate": "",
 	} {
-		if _, fields := parse(body); fields[field] == "" {
-			t.Errorf("%s: expected an error for %s, got %v", body, field, fields)
+		_, fields := validateProjectStatus(projectStatusRequest{Status: status})
+		if fields["status"] == "" || (want != "" && fields["status"] != want) {
+			t.Errorf("%s: %v", status, fields)
 		}
 	}
-	a, b := &estimateLine{AmountCents: 5, Currency: "PLN"}, &estimateLine{AmountCents: 5, Currency: "PLN"}
-	if !equalEstimateLine(a, b) || equalEstimateLine(a, nil) || !equalEstimateLine(nil, nil) {
-		t.Error("estimate line equality")
+	in, fields := validateProjectStatus(projectStatusRequest{Status: "installation", EventDate: ptr("2026-12-01"), EventTime: ptr("9:30"), Comment: ptr(" ok ")})
+	if len(fields) != 0 || *in.EventDate != "2026-12-01" || *in.EventTime != "09:30" || *in.Comment != "ok" {
+		t.Errorf("event: %+v %v", in, fields)
+	}
+	if _, fields := validateProjectStatus(projectStatusRequest{Status: "installation", EventTime: ptr("10:00")}); fields["eventDate"] == "" {
+		t.Error("a time needs a date")
 	}
 }
 
-func TestValidateContractAndPaymentPatch(t *testing.T) {
-	if change, fields := validateProjectContractPatch(projectContractPatch{TotalAmount: ptr(-1.0)}); len(fields) == 0 || !change.empty() {
-		t.Errorf("negative total: %v", fields)
+func TestFinishAndRestore(t *testing.T) {
+	if !canFinishProject("installation") || canFinishProject("production_delivery") || canFinishProject("completed") {
+		t.Error("finish only from installation")
 	}
-	if change, fields := validateProjectContractPatch(projectContractPatch{Number: ptr(" A/1 "), Currency: ptr("EUR")}); len(fields) != 0 || *change.Number != "A/1" {
-		t.Errorf("valid contract patch: %v", fields)
-	}
-	if _, fields := validateProjectPaymentPatch(projectPaymentPatch{PaidOn: ptr("2026-13-40")}); fields["paidOn"] == "" {
-		t.Error("bad payment date")
-	}
-	if change, fields := validateProjectPaymentPatch(projectPaymentPatch{Note: ptr("  ")}); len(fields) != 0 || change.Note == nil || *change.Note != "" {
-		t.Errorf("an empty note clears it: %v", fields)
-	}
-	if kind := ptr("final"); true {
-		if _, fields := validateProjectContract(projectContractRequest{Kind: kind, Number: "1", SignedOn: "2026-10-01", TotalAmount: 1, Currency: "PLN"}); fields["kind"] == "" {
-			t.Error("unknown contract kind")
+	for _, tc := range []struct {
+		status string
+		before *string
+		want   string
+		ok     bool
+	}{
+		{"completed", nil, "installation", true},
+		{"cancelled", ptr("factory_approval"), "factory_approval", true},
+		{"cancelled", ptr("completed"), "preliminary_estimate", true},
+		{"cancelled", nil, "preliminary_estimate", true},
+		{"installation", nil, "", false},
+	} {
+		got, ok := restoreTarget(tc.status, tc.before)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("%s: got %q,%v want %q,%v", tc.status, got, ok, tc.want, tc.ok)
 		}
 	}
-	if in, fields := validateProjectContract(projectContractRequest{Number: "1", SignedOn: "2026-10-01", TotalAmount: 1, Currency: "PLN"}); len(fields) != 0 || in.Kind != "main" {
-		t.Errorf("pre-2.36 clients send no kind and get main: %v %v", in.Kind, fields)
+	if !isProjectFinal("completed") || !isProjectFinal("cancelled") || isProjectFinal("installation") {
+		t.Error("finals")
+	}
+}
+
+func TestValidateProjectPayment(t *testing.T) {
+	_, fields := validateProjectPayment(projectPaymentRequest{})
+	for _, key := range []string{"amount", "currency", "paidOn", "basis"} {
+		if fields[key] == "" {
+			t.Errorf("%s required: %v", key, fields)
+		}
+	}
+	in, fields := validateProjectPayment(projectPaymentRequest{Amount: 500, Currency: "PLN", PaidOn: "2026-11-14", Basis: "receipt", Note: ptr(" measurement ")})
+	if len(fields) != 0 || in.AmountCents != 50000 || in.Basis != "receipt" || *in.Note != "measurement" {
+		t.Errorf("valid payment: %+v %v", in, fields)
+	}
+	if _, fields := validateProjectPayment(projectPaymentRequest{Amount: 1, Currency: "PLN", PaidOn: "2026-11-14", Basis: "cash"}); fields["basis"] == "" {
+		t.Error("unknown basis")
+	}
+}
+
+func TestValidateProjectPaymentPatch(t *testing.T) {
+	change, fields := validateProjectPaymentPatch(projectPaymentPatch{})
+	if len(fields) != 0 || !change.empty() {
+		t.Errorf("empty patch: %+v %v", change, fields)
+	}
+	change, fields = validateProjectPaymentPatch(projectPaymentPatch{Basis: ptr("invoice"), Currency: ptr("EUR"), Note: ptr("")})
+	if len(fields) != 0 || *change.Basis != "invoice" || *change.Currency != "EUR" || *change.Note != "" {
+		t.Errorf("patch: %+v %v", change, fields)
+	}
+	if _, fields := validateProjectPaymentPatch(projectPaymentPatch{Amount: ptr[float64](-1), Basis: ptr("x")}); fields["amount"] == "" || fields["basis"] == "" {
+		t.Errorf("bad patch: %v", fields)
+	}
+}
+
+func TestValidateProjectEstimate(t *testing.T) {
+	if got, fields := validateProjectEstimate(projectEstimateRequest{}); got != nil || len(fields) != 0 {
+		t.Errorf("clear: %v %v", got, fields)
+	}
+	got, fields := validateProjectEstimate(projectEstimateRequest{Amount: ptr[float64](42000.5), Currency: ptr("PLN")})
+	if len(fields) != 0 || got.AmountCents != 4200050 || got.Currency != "PLN" {
+		t.Errorf("set: %+v %v", got, fields)
+	}
+	if _, fields := validateProjectEstimate(projectEstimateRequest{Amount: ptr[float64](0), Currency: ptr("GBP")}); fields["amount"] == "" || fields["currency"] == "" {
+		t.Errorf("bad: %v", fields)
+	}
+	if !equalProjectEstimate(nil, nil) || equalProjectEstimate(got, nil) {
+		t.Error("equal")
 	}
 }
 
@@ -186,7 +136,7 @@ func TestValidateProjectCancel(t *testing.T) {
 		t.Error("at least one reason is required")
 	}
 	if _, _, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"price_too_high"}}); fields["comment"] == "" {
-		t.Error("every reason requires a comment (pipeline 3)")
+		t.Error("every reason requires a comment")
 	}
 	reasons, comment, fields := validateProjectCancel(projectCancelRequest{Reasons: []string{"price_too_high", "price_too_high", "not_relevant"}, Comment: ptr("Chose a cheaper offer from IKEA")})
 	if len(fields) != 0 || len(reasons) != 2 || comment == nil {
@@ -234,32 +184,6 @@ func TestCanEditProject(t *testing.T) {
 	} {
 		if got := tc.actor.CanEditProject(tc.office, &manager); got != tc.want {
 			t.Errorf("%s: got %v want %v", tc.name, got, tc.want)
-		}
-	}
-}
-
-func TestPrepaymentCheck(t *testing.T) {
-	half := projectMoney{HasMain: true, MainTotal: 8_000_000, MainPaid: 3_950_000, HasIntro: true, IntroPaid: 50_000, IntroCurrency: "PLN", MainCurrency: "PLN"}
-	low := projectMoney{HasMain: true, MainTotal: 8_000_000, MainPaid: 800_000}
-	cases := []struct {
-		name           string
-		current, next  string
-		money          projectMoney
-		admin, comment bool
-		want           string
-	}{
-		{"before production is free", "design", "presentation", projectMoney{}, false, false, prepaymentOK},
-		{"credited intro counts toward 50%", "main_contract", "production", half, false, false, prepaymentOK},
-		{"10% blocks a manager", "main_contract", "production", low, false, false, prepaymentBlocked},
-		{"skipping to installation is checked too", "presentation", "installation", low, false, false, prepaymentBlocked},
-		{"no main contract blocks", "factory_review", "production", projectMoney{}, false, false, prepaymentBlocked},
-		{"admin needs a comment", "main_contract", "production", low, true, false, prepaymentNeedsComment},
-		{"admin override with a comment", "main_contract", "production", low, true, true, prepaymentOverrideAllowed},
-		{"already in production", "production", "installation", low, false, false, prepaymentOK},
-	}
-	for _, tc := range cases {
-		if got := prepaymentCheck(tc.current, tc.next, tc.money, tc.admin, tc.comment); got != tc.want {
-			t.Errorf("%s: got %q want %q", tc.name, got, tc.want)
 		}
 	}
 }

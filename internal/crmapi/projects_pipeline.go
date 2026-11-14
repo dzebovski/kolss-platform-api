@@ -11,47 +11,19 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// CRM v2 project pipeline 2.1 (task P1b, owner decisions of 2026-10-23).
+// CRM v2 project card edits (pipeline 2.1, reworked for pipeline 4 on 2026-11-14).
 //
 //	PATCH  /v1/projects/{projectId}                          details: manager, designer
 //	PATCH  /v1/projects/{projectId}/lead-info                patches the linked lead's info (no copy, Q-P12)
-//	PUT    /v1/projects/{projectId}/estimate                 estimate lines, until a main contract exists
-//	POST   /v1/projects/{projectId}/comments                 timeline comment (any user with office access)
-//	PATCH  /v1/projects/{projectId}/contracts/{contractId}   edit a contract
-//	DELETE /v1/projects/{projectId}/contracts/{contractId}   delete a contract (no payments on it)
+//	PUT    /v1/projects/{projectId}/estimate                 preliminary estimate total (or clear it)
+//	POST   /v1/projects/{projectId}/comments                 comment (any user with office access)
 //	PATCH  /v1/projects/{projectId}/payments/{paymentId}     edit a payment
 //	DELETE /v1/projects/{projectId}/payments/{paymentId}     delete a payment
 //
 // Every mutation but the comment needs CanEditProject (the manager and admins) and returns the
 // refreshed project card; each one writes a timeline event with old / new values.
 
-// loadProjectContracts returns the project's contracts with the sum of their payments. A payment
-// id can be excluded, to check an edit against the balance without the payment being edited.
-func loadProjectContracts(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, excludePayment *uuid.UUID) ([]projectContractRow, error) {
-	rows, err := tx.Query(ctx, `
-		select c.id, c.kind, (c.total_amount * 100)::bigint, c.currency,
-		  coalesce((select sum(pp.amount * 100) from public.project_payments pp
-		            where pp.contract_id = c.id and pp.id is distinct from $2), 0)::bigint
-		from public.project_contracts c
-		where c.project_id = $1
-		order by c.kind
-	`, projectID, excludePayment)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []projectContractRow
-	for rows.Next() {
-		var row projectContractRow
-		if err := rows.Scan(&row.ID, &row.Kind, &row.TotalCents, &row.Currency, &row.PaidCents); err != nil {
-			return nil, err
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
-}
-
-// loadProjectForComment loads and locks the project header for an action every office member may
+// loadOfficeProject loads and locks the project header for an action every office member may
 // take. It writes the error response itself.
 func (s *Server) loadOfficeProject(w http.ResponseWriter, r *http.Request, tx pgx.Tx, actor Actor) (projectHeader, bool) {
 	id, err := uuid.Parse(r.PathValue("projectId"))
@@ -99,8 +71,7 @@ func (s *Server) handleAddProjectComment(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	// A cancelled card is read-only. TODO(v2): confirm with the owner whether comments stay open
-	// on a cancelled project (they do on a lead that became a project).
+	// A closed (cancelled) card is read-only; a finished one still takes comments.
 	if h.Status == projectStatusCancelled {
 		s.writeError(w, r, http.StatusConflict, "project_cancelled", "The project is cancelled — restore it first", nil)
 		return
@@ -301,18 +272,14 @@ func (s *Server) handleUpdateProjectLeadInfo(w http.ResponseWriter, r *http.Requ
 
 // ---- estimate --------------------------------------------------------------------------------
 
-type projectEstimateRequest struct {
-	Lines map[string]json.RawMessage `json:"lines"`
-}
-
 func (s *Server) handleUpdateProjectEstimate(w http.ResponseWriter, r *http.Request) {
 	actor, _ := actorFromContext(r.Context())
 	var req projectEstimateRequest
-	if err := decodeJSON(w, r, 16*1024, &req); err != nil {
+	if err := decodeJSON(w, r, 4*1024, &req); err != nil {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid estimate", nil)
 		return
 	}
-	lines, fields := validateEstimate(req.Lines)
+	next, fields := validateProjectEstimate(req)
 	if len(fields) > 0 {
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid estimate", fields)
 		return
@@ -327,191 +294,33 @@ func (s *Server) handleUpdateProjectEstimate(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return
 	}
-	var locked bool
-	if err := tx.QueryRow(r.Context(), `select exists(select 1 from public.project_contracts where project_id = $1 and kind = 'main')`, h.ID).Scan(&locked); err != nil {
+	var current *projectEstimate
+	var amount *int64
+	var currency *string
+	if err := tx.QueryRow(r.Context(), `
+		select (estimate_amount * 100)::bigint, estimate_currency from public.projects where id = $1
+	`, h.ID).Scan(&amount, &currency); err != nil {
 		s.projectFail(w, r)
 		return
 	}
-	if locked {
-		s.writeError(w, r, http.StatusConflict, "estimate_locked", "The estimate cannot be changed once the main contract exists", nil)
-		return
+	if amount != nil && currency != nil {
+		current = &projectEstimate{AmountCents: *amount, Currency: *currency}
 	}
-	current := map[string]*estimateLine{}
-	rows, err := tx.Query(r.Context(), `
-		select line, (amount * 100)::bigint, currency, note from public.project_estimate_lines where project_id = $1
-	`, h.ID)
-	if err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	for rows.Next() {
-		var name string
-		var line estimateLine
-		if err := rows.Scan(&name, &line.AmountCents, &line.Currency, &line.Note); err != nil {
-			rows.Close()
-			s.projectFail(w, r)
-			return
+	if !equalProjectEstimate(current, next) {
+		var nextAmount *int64
+		var nextCurrency *string
+		if next != nil {
+			nextAmount, nextCurrency = &next.AmountCents, &next.Currency
 		}
-		current[name] = &line
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		s.projectFail(w, r)
-		return
-	}
-
-	oldValue, newValue := map[string]any{}, map[string]any{}
-	for _, name := range estimateLines {
-		next, requested := lines[name]
-		if !requested || equalEstimateLine(current[name], next) {
-			continue
-		}
-		oldValue[name], newValue[name] = current[name].toMap(), next.toMap()
-		if next == nil {
-			_, err = tx.Exec(r.Context(), `delete from public.project_estimate_lines where project_id = $1 and line = $2`, h.ID, name)
-		} else {
-			_, err = tx.Exec(r.Context(), `
-				insert into public.project_estimate_lines (project_id, line, amount, currency, note, updated_by)
-				values ($1,$2,$3::bigint::numeric / 100,$4,$5,$6)
-				on conflict (project_id, line) do update
-				set amount = excluded.amount, currency = excluded.currency, note = excluded.note,
-				    updated_by = excluded.updated_by, updated_at = now()
-			`, h.ID, name, next.AmountCents, next.Currency, next.Note, actor.ID)
-		}
-		if err != nil {
-			s.projectFail(w, r)
-			return
-		}
-	}
-	if len(newValue) > 0 {
-		if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "estimate_updated", oldValue, newValue, nil); err != nil {
-			s.projectFail(w, r)
-			return
-		}
-	}
-	s.commitAndRespond(w, r, tx, actor, h, http.StatusOK)
-}
-
-// ---- contract edit / delete ------------------------------------------------------------------
-
-type contractRecord struct {
-	ID       uuid.UUID
-	Kind     string
-	Number   string
-	SignedOn string
-	Total    int64
-	Currency string
-	FileID   *uuid.UUID
-}
-
-func (s *Server) lockProjectContract(w http.ResponseWriter, r *http.Request, tx pgx.Tx, h projectHeader) (contractRecord, bool) {
-	id, err := uuid.Parse(r.PathValue("contractId"))
-	if err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract id", nil)
-		return contractRecord{}, false
-	}
-	var c contractRecord
-	err = tx.QueryRow(r.Context(), `
-		select id, kind, number, to_char(signed_on, 'YYYY-MM-DD'), (total_amount * 100)::bigint, currency, file_id
-		from public.project_contracts where id = $1 and project_id = $2 for update
-	`, id, h.ID).Scan(&c.ID, &c.Kind, &c.Number, &c.SignedOn, &c.Total, &c.Currency, &c.FileID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		s.writeError(w, r, http.StatusNotFound, "contract_not_found", "Contract not found", nil)
-		return contractRecord{}, false
-	}
-	if err != nil {
-		s.projectFail(w, r)
-		return contractRecord{}, false
-	}
-	return c, true
-}
-
-func (s *Server) handleUpdateProjectContract(w http.ResponseWriter, r *http.Request) {
-	actor, _ := actorFromContext(r.Context())
-	var req projectContractPatch
-	if err := decodeJSON(w, r, 16*1024, &req); err != nil {
-		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract", nil)
-		return
-	}
-	change, fields := validateProjectContractPatch(req)
-	if len(fields) == 0 && change.empty() {
-		fields["number"] = "Send at least one field to change"
-	}
-	if len(fields) > 0 {
-		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract", fields)
-		return
-	}
-	tx, err := s.pool.Begin(r.Context())
-	if err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	h, ok := s.lockEditableProject(w, r, tx, actor, false)
-	if !ok {
-		return
-	}
-	current, ok := s.lockProjectContract(w, r, tx, h)
-	if !ok {
-		return
-	}
-	rows, err := loadProjectContracts(r.Context(), tx, h.ID, nil)
-	if err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	next := current
-	oldValue, newValue := map[string]any{"kind": current.Kind}, map[string]any{"kind": current.Kind}
-	if change.Number != nil && *change.Number != current.Number {
-		oldValue["number"], newValue["number"] = current.Number, *change.Number
-		next.Number = *change.Number
-	}
-	if change.SignedOn != nil && *change.SignedOn != current.SignedOn {
-		oldValue["signedOn"], newValue["signedOn"] = current.SignedOn, *change.SignedOn
-		next.SignedOn = *change.SignedOn
-	}
-	if change.TotalCents != nil && *change.TotalCents != current.Total {
-		oldValue["totalAmount"], newValue["totalAmount"] = centsToMoney(current.Total), centsToMoney(*change.TotalCents)
-		next.Total = *change.TotalCents
-	}
-	if change.Currency != nil && *change.Currency != current.Currency {
-		oldValue["currency"], newValue["currency"] = current.Currency, *change.Currency
-		next.Currency = *change.Currency
-	}
-	for i := range rows {
-		if rows[i].ID != current.ID {
-			continue
-		}
-		if next.Currency != current.Currency && rows[i].PaidCents > 0 {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract", map[string]string{
-				"currency": "Cannot change while payments are recorded on this contract",
-			})
-			return
-		}
-		rows[i].TotalCents, rows[i].Currency = next.Total, next.Currency
-	}
-	if field, message := moneyFromContracts(rows).overpaid(); field != "" {
-		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid contract", map[string]string{field: message})
-		return
-	}
-	if change.FileID != nil {
-		if err := s.confirmProjectFile(r.Context(), tx, h, *change.FileID, "contract"); err != nil {
-			s.writeProjectFileError(w, r, err)
-			return
-		}
-		oldValue["fileId"], newValue["fileId"] = idPtrText(current.FileID), change.FileID.String()
-	}
-	if len(newValue) > 1 {
 		if _, err := tx.Exec(r.Context(), `
-			update public.project_contracts
-			set number = $2, signed_on = $3::date, total_amount = $4::bigint::numeric / 100, currency = $5,
-			    file_id = coalesce($6, file_id), updated_at = now()
+			update public.projects
+			set estimate_amount = $2::bigint::numeric / 100, estimate_currency = $3
 			where id = $1
-		`, current.ID, next.Number, next.SignedOn, next.Total, next.Currency, change.FileID); err != nil {
+		`, h.ID, nextAmount, nextCurrency); err != nil {
 			s.projectFail(w, r)
 			return
 		}
-		if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "contract_updated", oldValue, newValue, nil); err != nil {
+		if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "estimate_updated", current.toMap(), next.toMap(), nil); err != nil {
 			s.projectFail(w, r)
 			return
 		}
@@ -526,60 +335,26 @@ func idPtrText(id *uuid.UUID) any {
 	return id.String()
 }
 
-// handleDeleteProjectContract removes a contract that has no payments (delete the payments
-// first: money is never dropped silently). The project status is left as it is.
-// TODO(v2): confirm with the owner whether deleting the main contract should move the stage back.
-func (s *Server) handleDeleteProjectContract(w http.ResponseWriter, r *http.Request) {
-	actor, _ := actorFromContext(r.Context())
-	tx, err := s.pool.Begin(r.Context())
-	if err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	defer tx.Rollback(r.Context())
-	h, ok := s.lockEditableProject(w, r, tx, actor, false)
-	if !ok {
-		return
-	}
-	current, ok := s.lockProjectContract(w, r, tx, h)
-	if !ok {
-		return
-	}
-	var payments int
-	if err := tx.QueryRow(r.Context(), `select count(*) from public.project_payments where contract_id = $1`, current.ID).Scan(&payments); err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	if payments > 0 {
-		s.writeError(w, r, http.StatusConflict, "contract_has_payments", "Delete the payments of this contract first", nil)
-		return
-	}
-	if _, err := tx.Exec(r.Context(), `delete from public.project_contracts where id = $1`, current.ID); err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	oldValue := map[string]any{
-		"kind": current.Kind, "number": current.Number, "signedOn": current.SignedOn,
-		"totalAmount": centsToMoney(current.Total), "currency": current.Currency,
-	}
-	if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "contract_deleted", oldValue, nil, nil); err != nil {
-		s.projectFail(w, r)
-		return
-	}
-	s.commitAndRespond(w, r, tx, actor, h, http.StatusOK)
-}
-
 // ---- payment edit / delete -------------------------------------------------------------------
 
 type paymentRecord struct {
-	ID           uuid.UUID
-	ContractID   uuid.UUID
-	ContractKind string
-	Currency     string
-	Amount       int64
-	PaidOn       string
-	Note         *string
-	FileID       *uuid.UUID
+	ID       uuid.UUID
+	Amount   int64
+	Currency string
+	PaidOn   string
+	Basis    string
+	Note     *string
+	FileID   *uuid.UUID
+}
+
+func (p paymentRecord) toMap() map[string]any {
+	out := map[string]any{
+		"amount": centsToMoney(p.Amount), "currency": p.Currency, "paidOn": p.PaidOn, "basis": p.Basis,
+	}
+	if p.Note != nil {
+		out["note"] = *p.Note
+	}
+	return out
 }
 
 func (s *Server) lockProjectPayment(w http.ResponseWriter, r *http.Request, tx pgx.Tx, h projectHeader) (paymentRecord, bool) {
@@ -590,13 +365,11 @@ func (s *Server) lockProjectPayment(w http.ResponseWriter, r *http.Request, tx p
 	}
 	var p paymentRecord
 	err = tx.QueryRow(r.Context(), `
-		select pp.id, pp.contract_id, c.kind, c.currency, (pp.amount * 100)::bigint,
-		  to_char(pp.paid_on, 'YYYY-MM-DD'), pp.note, pp.file_id
-		from public.project_payments pp
-		join public.project_contracts c on c.id = pp.contract_id
-		where pp.id = $1 and pp.project_id = $2
-		for update of pp
-	`, id, h.ID).Scan(&p.ID, &p.ContractID, &p.ContractKind, &p.Currency, &p.Amount, &p.PaidOn, &p.Note, &p.FileID)
+		select id, (amount * 100)::bigint, currency, to_char(paid_on, 'YYYY-MM-DD'), basis, note, file_id
+		from public.project_payments
+		where id = $1 and project_id = $2
+		for update
+	`, id, h.ID).Scan(&p.ID, &p.Amount, &p.Currency, &p.PaidOn, &p.Basis, &p.Note, &p.FileID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		s.writeError(w, r, http.StatusNotFound, "payment_not_found", "Payment not found", nil)
 		return paymentRecord{}, false
@@ -637,52 +410,47 @@ func (s *Server) handleUpdateProjectPayment(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	oldValue := map[string]any{"contractKind": current.ContractKind, "currency": current.Currency}
-	newValue := map[string]any{"contractKind": current.ContractKind, "currency": current.Currency}
 	next := current
-	if change.AmountCents != nil && *change.AmountCents != current.Amount {
-		rows, err := loadProjectContracts(r.Context(), tx, h.ID, &current.ID)
-		if err != nil {
-			s.projectFail(w, r)
-			return
-		}
-		if limit := moneyFromContracts(rows).maxPayment(current.ContractKind); *change.AmountCents > limit {
-			s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid payment", map[string]string{
-				"amount": "More than the remaining " + formatMoneyCents(limit) + " " + current.Currency + " — check the amount",
-			})
-			return
-		}
-		oldValue["amount"], newValue["amount"] = centsToMoney(current.Amount), centsToMoney(*change.AmountCents)
+	if change.AmountCents != nil {
 		next.Amount = *change.AmountCents
 	}
-	if change.PaidOn != nil && *change.PaidOn != current.PaidOn {
-		oldValue["paidOn"], newValue["paidOn"] = current.PaidOn, *change.PaidOn
+	if change.Currency != nil {
+		next.Currency = *change.Currency
+	}
+	if change.PaidOn != nil {
 		next.PaidOn = *change.PaidOn
 	}
+	if change.Basis != nil {
+		next.Basis = *change.Basis
+	}
 	if change.Note != nil {
-		var nextNote *string
+		next.Note = nil
 		if *change.Note != "" {
-			nextNote = change.Note
-		}
-		if (current.Note == nil) != (nextNote == nil) || (nextNote != nil && *current.Note != *nextNote) {
-			oldValue["note"], newValue["note"] = current.Note, nextNote
-			next.Note = nextNote
+			next.Note = change.Note
 		}
 	}
-	if change.FileID != nil {
+	oldValue, newValue := map[string]any{}, map[string]any{}
+	before, after := current.toMap(), next.toMap()
+	for _, key := range []string{"amount", "currency", "paidOn", "basis", "note"} {
+		if before[key] != after[key] {
+			oldValue[key], newValue[key] = before[key], after[key]
+		}
+	}
+	if change.FileID != nil && !sameUUID(current.FileID, change.FileID) {
 		if err := s.confirmProjectFile(r.Context(), tx, h, *change.FileID, "receipt"); err != nil {
 			s.writeProjectFileError(w, r, err)
 			return
 		}
 		oldValue["fileId"], newValue["fileId"] = idPtrText(current.FileID), change.FileID.String()
+		next.FileID = change.FileID
 	}
-	if len(newValue) > 2 {
+	if len(newValue) > 0 {
 		if _, err := tx.Exec(r.Context(), `
 			update public.project_payments
-			set amount = $2::bigint::numeric / 100, paid_on = $3::date, note = $4,
-			    file_id = coalesce($5, file_id), updated_at = now()
+			set amount = $2::bigint::numeric / 100, currency = $3, paid_on = $4::date, basis = $5, note = $6,
+			    file_id = $7, updated_at = now()
 			where id = $1
-		`, current.ID, next.Amount, next.PaidOn, next.Note, change.FileID); err != nil {
+		`, current.ID, next.Amount, next.Currency, next.PaidOn, next.Basis, next.Note, next.FileID); err != nil {
 			s.projectFail(w, r)
 			return
 		}
@@ -714,14 +482,7 @@ func (s *Server) handleDeleteProjectPayment(w http.ResponseWriter, r *http.Reque
 		s.projectFail(w, r)
 		return
 	}
-	oldValue := map[string]any{
-		"contractId": current.ContractID.String(), "contractKind": current.ContractKind,
-		"amount": centsToMoney(current.Amount), "currency": current.Currency, "paidOn": current.PaidOn,
-	}
-	if current.Note != nil {
-		oldValue["note"] = *current.Note
-	}
-	if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "payment_deleted", oldValue, nil, nil); err != nil {
+	if err := s.insertProjectEvent(r.Context(), tx, h.ID, actor.ID, "payment_deleted", current.toMap(), nil, nil); err != nil {
 		s.projectFail(w, r)
 		return
 	}

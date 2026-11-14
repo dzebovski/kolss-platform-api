@@ -763,3 +763,29 @@ Owner decisions of 2026-11-07. Everything in section 10 still holds except what 
 
 - Deploy the migration and the API back to back: the 2.41.0 API refuses the new statuses on Change status and the 2.42.0 API refuses the old ones.
 - The CRM v2 project layer (P0c) must sync to 2.42.0 before the Projects screens ship; CRM v1 is not affected (it does not read `projects.status` or `purpose`).
+
+## 12. Project pipeline 4 + card v4 (P8, OpenAPI 2.43.0) — replaces sections 10–11 where they differ
+
+Owner decisions of 2026-11-14. Contracts are no longer an entity, payments are standalone, the estimate is one total, six stages.
+
+### 12.1 Database — `20261114120000_project_pipeline_4.sql`
+
+- `projects.status` / `status_before_cancel`: `preliminary_estimate`, `measurement_design`, `factory_approval`, `contract_signing`, `production_delivery`, `installation`, `completed`, `cancelled`. Mapped: `estimate`, `showroom_meeting` → `preliminary_estimate`; `intro_contract`, `design`, `presentation` → `measurement_design`; `factory_review` → `factory_approval`; `main_contract` → `contract_signing`; `production` → `production_delivery`.
+- `projects.estimate_amount` / `estimate_currency` (both null or both set); `project_estimate_lines` dropped (lines with one currency are summed in).
+- `project_payments`: `currency` and `basis` (`receipt` | `invoice` | `contract` | `other`) added, `contract_id` dropped; `project_contracts` dropped (prod had no contracts or payments on 2026-11-14).
+- `project_files.kind`: `document` | `receipt` (`contract` → `document`); the API role may delete rows.
+- `offices.intro_contract_default_*` dropped. Timeline event types `finished`, `file_added`, `file_deleted` added (old ones stay valid for history).
+
+### 12.2 API
+
+- Change status: any of the six stages, both directions, optional event date / time / comment; no 50% rule, nothing moves a stage automatically.
+- `POST /v1/projects/{id}/finish`: `installation` → `completed` (else `409 project_not_installation`). Restore reopens a finished project at `installation` and a closed one at `statusBeforeCancel`. A finished project refuses edits with `409 project_finished` (comments and documents stay open); Close project (cancel) is refused on it.
+- `PUT …/estimate`: `{amount, currency}` or `{amount: null}`.
+- Payments: `POST …/payments` takes `amount`, `currency`, `paidOn`, `basis`, optional `note` / `fileId` (receipt); PATCH can change each of them; no balance rule. Contract endpoints removed.
+- Documents: `POST …/files/uploads` with kind `document` (anyone with office access, not on a closed project), then `POST …/files {fileId}` to confirm (`file_added`); `DELETE …/files/{fileId}` by the uploader, the manager or admins (`file_deleted`; the stored object stays in the bucket).
+- Card: `client` contacts come from the linked client with a fallback to the lead (`cityRegion` = client address, else lead city); `description` = lead "About the client"; `estimate`, `paidTotals`, `payments`, `documents`. Removed: `statusDetails`, `introDefault`, `contracts`, `contract`. List items: `estimate` + `paidTotals` instead of `estimateTotals`; search also matches the client's name / phone. Board: 6 columns, `completedCount` added.
+- Clients: `stats.contractValue` and `projects[].contract` keep their shape but now mean estimate total and payments.
+
+### 12.3 Rollout
+
+- Breaking for the live CRM v2 project screens (statuses, card shape, contract endpoints). Ship together: migration → API 2.43.0 → CRM with P0d + P9 (+ P10/P11 for payments and documents). CRM v1 is not affected.

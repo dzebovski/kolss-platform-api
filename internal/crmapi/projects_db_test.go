@@ -16,9 +16,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestProjectsDB runs the P1 flow against a disposable database (KOLSS_TEST_DATABASE_URL):
-// create from a lead, change status, contract, payments (balance rule), permissions, cancel and
-// restore, list/facets/timeline and the project-file download.
+// TestProjectsDB runs the project flow (pipeline 4) against a disposable database
+// (KOLSS_TEST_DATABASE_URL): create from a lead, estimate total, change status, standalone
+// payments, documents, permissions, finish / close / restore, list/facets/board/timeline and the
+// project-file download.
 func TestProjectsDB(t *testing.T) {
 	dsn := os.Getenv("KOLSS_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -81,11 +82,11 @@ func TestProjectsDB(t *testing.T) {
 		return text
 	}
 
-	// Create: every project starts as `estimate` whatever the type; the lead becomes read-only (`project`).
+	// Create: every project starts at `preliminary_estimate`; the lead becomes read-only (`project`).
 	createKey := uuid.NewString()
 	code, project := call(manager, server.handleCreateProject, http.MethodPost, "/", map[string]string{"leadId": leadID.String()},
 		`{"projectType":"measure"}`, map[string]string{"Idempotency-Key": createKey})
-	if code != http.StatusCreated || project["status"] != "estimate" || project["code"] == "" {
+	if code != http.StatusCreated || project["status"] != "preliminary_estimate" || project["code"] == "" {
 		t.Fatalf("create: %d %v", code, project)
 	}
 	projectID := project["id"].(string)
@@ -123,15 +124,20 @@ func TestProjectsDB(t *testing.T) {
 	if code, _ := call(other, server.handleGetProject, http.MethodGet, "/", pid, ``, nil); code != http.StatusOK {
 		t.Fatalf("colleague read: %d", code)
 	}
-	if code, res := call(other, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"design"}`, nil); code != http.StatusForbidden || res["code"] != "project_edit_forbidden" {
+	if code, res := call(other, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"measurement_design"}`, nil); code != http.StatusForbidden || res["code"] != "project_edit_forbidden" {
 		t.Fatalf("colleague edit: %d %v", code, res)
 	}
 
-	money := func(card map[string]any, kind, field string) float64 {
-		contracts, _ := card["contracts"].(map[string]any)
-		contract, _ := contracts[kind].(map[string]any)
-		value, _ := contract[field].(float64)
-		return value
+	totalOf := func(card map[string]any, key, currency string) float64 {
+		items, _ := card[key].([]any)
+		for _, item := range items {
+			entry := item.(map[string]any)
+			if entry["currency"] == currency {
+				value, _ := entry["amount"].(float64)
+				return value
+			}
+		}
+		return 0
 	}
 	eventTypes := func(actor Actor) []string {
 		_, timeline := call(actor, server.handleListProjectTimeline, http.MethodGet, "/", pid, ``, nil)
@@ -143,150 +149,136 @@ func TestProjectsDB(t *testing.T) {
 		return types
 	}
 
-	// Estimate: four optional lines, totals per currency, null removes, unknown lines are refused.
-	if code, res := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"lines":{"garage":{"amount":1,"currency":"PLN"}}}`, nil); code != http.StatusBadRequest || fieldErr(res, "lines.garage") == "" {
-		t.Fatalf("unknown estimate line: %d %v", code, res)
+	// Estimate: one total; null clears it; only the manager and admins.
+	if code, res := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"amount":0,"currency":"GBP"}`, nil); code != http.StatusBadRequest || fieldErr(res, "amount") == "" || fieldErr(res, "currency") == "" {
+		t.Fatalf("bad estimate: %d %v", code, res)
 	}
-	if code, res := call(other, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"lines":{"kitchen":{"amount":1,"currency":"PLN"}}}`, nil); code != http.StatusForbidden {
+	if code, res := call(other, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"amount":1,"currency":"PLN"}`, nil); code != http.StatusForbidden {
 		t.Fatalf("colleague estimate: %d %v", code, res)
 	}
-	code, card := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid,
-		`{"lines":{"kitchen":{"amount":50000,"currency":"PLN","note":"Oak"},"appliances":{"amount":10000,"currency":"PLN"},"countertop":{"amount":3000,"currency":"EUR"}}}`, nil)
-	estimate, _ := card["estimate"].(map[string]any)
-	totals, _ := estimate["totals"].([]any)
-	if code != http.StatusOK || len(totals) != 2 || estimate["locked"] != false {
+	code, card := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"amount":63000,"currency":"PLN"}`, nil)
+	if estimate, _ := card["estimate"].(map[string]any); code != http.StatusOK || estimate["amount"] != float64(63000) || estimate["currency"] != "PLN" {
 		t.Fatalf("estimate: %d %v", code, card)
 	}
-	code, card = call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"lines":{"appliances":null}}`, nil)
-	if lines, _ := card["estimate"].(map[string]any)["lines"].(map[string]any); code != http.StatusOK || lines["appliances"] != nil || lines["kitchen"] == nil {
-		t.Fatalf("estimate remove: %d %v", code, card)
+	if code, card := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"amount":null}`, nil); code != http.StatusOK || card["estimate"] != nil {
+		t.Fatalf("estimate clear: %d %v", code, card)
+	}
+	if code, _ := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"amount":80000,"currency":"PLN"}`, nil); code != http.StatusOK {
+		t.Fatalf("estimate again: %d", code)
 	}
 
-	// Intro contract: automatic stage move, amount is free (the office default only prefills).
-	introBody := `{"kind":"intro","number":"KW/2026/041-I","signedOn":"2026-10-02","totalAmount":500,"currency":"PLN"}`
-	code, card = call(manager, server.handleAddProjectContract, http.MethodPost, "/", pid, introBody, idem())
-	if code != http.StatusCreated || card["status"] != "intro_contract" || money(card, "intro", "remainingAmount") != 500 {
-		t.Fatalf("intro contract: %d %v", code, card)
+	// Payments: standalone, any amount, never move the status.
+	if code, res := call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":500,"paidOn":"2026-10-02"}`, idem()); code != http.StatusBadRequest || fieldErr(res, "basis") == "" || fieldErr(res, "currency") == "" {
+		t.Fatalf("payment without basis: %d %v", code, res)
 	}
-	if _, present := card["introDefault"]; !present {
-		t.Fatalf("introDefault must always be present: %v", card)
+	if code, res := call(other, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":500,"currency":"PLN","paidOn":"2026-10-02","basis":"receipt"}`, idem()); code != http.StatusForbidden {
+		t.Fatalf("colleague payment: %d %v", code, res)
 	}
-	if code, res := call(manager, server.handleAddProjectContract, http.MethodPost, "/", pid, introBody, idem()); code != http.StatusConflict || res["code"] != "contract_exists" {
-		t.Fatalf("second intro: %d %v", code, res)
-	}
-	// With no main contract yet, a payment without contractId goes to the intro contract; it never moves the status.
-	code, card = call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":500,"paidOn":"2026-10-02"}`, idem())
-	if code != http.StatusCreated || card["status"] != "intro_contract" || money(card, "intro", "paidAmount") != 500 {
-		t.Fatalf("intro payment: %d %v", code, card)
-	}
-	if code, res := call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":1,"paidOn":"2026-10-03"}`, idem()); code != http.StatusBadRequest || fieldErr(res, "amount") == "" {
-		t.Fatalf("over the intro balance: %d %v", code, res)
-	}
-
-	// Change status: by hand, both directions; contract stages and cancelled are not pickable.
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"showroom_meeting","eventDate":"2026-10-05","eventTime":"10:00"}`, nil); code != http.StatusOK || res["eventTime"] != "10:00" {
-		t.Fatalf("showroom meeting: %d %v", code, res)
-	}
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"factory_review"}`, nil); code != http.StatusOK || res["status"] != "factory_review" {
-		t.Fatalf("factory review: %d %v", code, res)
-	}
-	// Pipeline 3: production needs 50% of a main contract; none exists yet.
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"production"}`, nil); code != http.StatusConflict || res["code"] != "prepayment_required" {
-		t.Fatalf("production without a main contract: %d %v", code, res)
-	}
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"design","eventDate":"2026-10-08","comment":"Handed over to design"}`, nil); code != http.StatusOK || res["status"] != "design" {
-		t.Fatalf("design: %d %v", code, res)
-	}
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"estimate"}`, nil); code != http.StatusOK || res["status"] != "estimate" {
-		t.Fatalf("backwards: %d %v", code, res)
-	}
-	for _, status := range []string{"intro_contract", "main_contract", "cancelled", "express", "contract", "none"} {
-		if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"`+status+`"}`, nil); code != http.StatusBadRequest || fieldErr(res, "status") == "" {
-			t.Fatalf("status %s by hand: %d %v", status, code, res)
-		}
-	}
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"design"}`, nil); code != http.StatusOK || res["status"] != "design" {
-		t.Fatalf("design again: %d %v", code, res)
-	}
-
-	// Main contract with a file: upload -> contract; status main_contract; estimate locks; the paid intro is credited.
-	code, upload := call(manager, server.handleCreateProjectFileUpload, http.MethodPost, "/", pid, `{"kind":"contract","fileName":"contract-KW-2026-041.pdf","sizeBytes":1200}`, nil)
+	code, upload := call(manager, server.handleCreateProjectFileUpload, http.MethodPost, "/", pid, `{"kind":"receipt","fileName":"receipt-500.pdf","sizeBytes":1200}`, nil)
 	if code != http.StatusOK || upload["fileId"] == nil {
-		t.Fatalf("file upload: %d %v", code, upload)
+		t.Fatalf("receipt upload: %d %v", code, upload)
 	}
-	fileID := upload["fileId"].(string)
-	contractBody := `{"kind":"main","number":"KW/2026/041","signedOn":"2026-10-09","totalAmount":80000,"currency":"PLN","fileId":"` + fileID + `"}`
-	code, card = call(manager, server.handleAddProjectContract, http.MethodPost, "/", pid, contractBody, idem())
-	contract, _ := card["contract"].(map[string]any)
-	if code != http.StatusCreated || card["status"] != "main_contract" || contract["number"] != "KW/2026/041" ||
-		money(card, "main", "creditedAmount") != 500 || money(card, "main", "remainingAmount") != 79500 || money(card, "main", "target50Amount") != 40000 {
-		t.Fatalf("main contract: %d %v", code, card)
+	receiptID := upload["fileId"].(string)
+	code, card = call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid,
+		`{"amount":500,"currency":"PLN","paidOn":"2026-10-02","basis":"receipt","note":"Paid measurement","fileId":"`+receiptID+`"}`, idem())
+	if code != http.StatusCreated || card["status"] != "preliminary_estimate" || totalOf(card, "paidTotals", "PLN") != 500 {
+		t.Fatalf("payment 1: %d %v", code, card)
 	}
-	if file, _ := contract["file"].(map[string]any); file["id"] != fileID {
-		t.Fatalf("contract file: %v", contract)
-	}
-	if estimate, _ := card["estimate"].(map[string]any); estimate["locked"] != true {
-		t.Fatalf("estimate must lock: %v", card["estimate"])
-	}
-	if code, res := call(manager, server.handleUpdateProjectEstimate, http.MethodPut, "/", pid, `{"lines":{"kitchen":null}}`, nil); code != http.StatusConflict || res["code"] != "estimate_locked" {
-		t.Fatalf("estimate after main contract: %d %v", code, res)
-	}
-	if code, res := call(manager, server.handleAddProjectContract, http.MethodPost, "/", pid, contractBody, idem()); code != http.StatusConflict || res["code"] != "contract_exists" {
-		t.Fatalf("second main contract: %d %v", code, res)
-	}
-
-	// 50% before production: the manager is refused, an admin needs a comment.
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"installation"}`, nil); code != http.StatusConflict || res["code"] != "prepayment_required" {
-		t.Fatalf("installation below 50%%: %d %v", code, res)
-	}
-	if code, res := call(admin, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"production"}`, nil); code != http.StatusBadRequest || fieldErr(res, "comment") == "" {
-		t.Fatalf("admin override without a comment: %d %v", code, res)
-	}
-
-	// Payments on the main contract: never above the remaining balance (the credit counts).
-	if code, res := call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":39500,"paidOn":"2026-10-09","note":"prepayment"}`, idem()); code != http.StatusCreated {
-		t.Fatalf("payment 1: %d %v", code, res)
-	}
-	if code, res := call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":45000,"paidOn":"2026-10-10"}`, idem()); code != http.StatusBadRequest || !strings.Contains(fieldErr(res, "amount"), "remaining 40 000 PLN") {
-		t.Fatalf("over balance: %d %v", code, res)
-	}
-	code, card = call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":40000,"paidOn":"2026-10-10"}`, idem())
-	if code != http.StatusCreated || money(card, "main", "remainingAmount") != 0 || money(card, "main", "paidAmount") != 79500 {
+	code, card = call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":40000,"currency":"PLN","paidOn":"2026-10-10","basis":"invoice"}`, idem())
+	payments, _ := card["payments"].([]any)
+	if code != http.StatusCreated || totalOf(card, "paidTotals", "PLN") != 40500 || len(payments) != 2 {
 		t.Fatalf("payment 2: %d %v", code, card)
 	}
-	payments, _ := card["payments"].([]any)
-	if len(payments) != 3 || payments[2].(map[string]any)["contractKind"] != "main" {
-		t.Fatalf("payments: %v", card["payments"])
+	if file, _ := payments[0].(map[string]any)["file"].(map[string]any); file["id"] != receiptID {
+		t.Fatalf("receipt on payment: %v", payments[0])
 	}
-	lastPaymentID := payments[2].(map[string]any)["id"].(string)
-	mainID := card["contract"].(map[string]any)["id"].(string)
-	introID := card["contracts"].(map[string]any)["intro"].(map[string]any)["id"].(string)
-
-	// Edit and delete: payments, then contracts; each writes a timeline event; colleagues are refused.
+	lastPaymentID := payments[1].(map[string]any)["id"].(string)
 	payPath := map[string]string{"projectId": projectID, "paymentId": lastPaymentID}
 	if code, res := call(other, server.handleUpdateProjectPayment, http.MethodPatch, "/", payPath, `{"note":"x"}`, nil); code != http.StatusForbidden {
 		t.Fatalf("colleague payment edit: %d %v", code, res)
 	}
-	if code, res := call(manager, server.handleUpdateProjectPayment, http.MethodPatch, "/", payPath, `{"amount":41000}`, nil); code != http.StatusBadRequest || fieldErr(res, "amount") == "" {
-		t.Fatalf("payment edit over balance: %d %v", code, res)
-	}
-	code, card = call(manager, server.handleUpdateProjectPayment, http.MethodPatch, "/", payPath, `{"amount":30000,"note":"corrected"}`, nil)
-	if code != http.StatusOK || money(card, "main", "remainingAmount") != 10000 {
+	code, card = call(manager, server.handleUpdateProjectPayment, http.MethodPatch, "/", payPath, `{"amount":30000,"basis":"contract","note":"corrected"}`, nil)
+	if code != http.StatusOK || totalOf(card, "paidTotals", "PLN") != 30500 {
 		t.Fatalf("payment edit: %d %v", code, card)
 	}
-	if code, res := call(manager, server.handleDeleteProjectContract, http.MethodDelete, "/", map[string]string{"projectId": projectID, "contractId": mainID}, ``, nil); code != http.StatusConflict || res["code"] != "contract_has_payments" {
-		t.Fatalf("delete contract with payments: %d %v", code, res)
+	code, card = call(manager, server.handleAddProjectPayment, http.MethodPost, "/", pid, `{"amount":100,"currency":"EUR","paidOn":"2026-10-11","basis":"other"}`, idem())
+	if code != http.StatusCreated || totalOf(card, "paidTotals", "EUR") != 100 {
+		t.Fatalf("payment EUR: %d %v", code, card)
 	}
-	if code, res := call(manager, server.handleUpdateProjectContract, http.MethodPatch, "/", map[string]string{"projectId": projectID, "contractId": mainID}, `{"totalAmount":50000}`, nil); code != http.StatusBadRequest || fieldErr(res, "totalAmount") == "" {
-		t.Fatalf("contract total below paid: %d %v", code, res)
-	}
-	code, card = call(manager, server.handleUpdateProjectContract, http.MethodPatch, "/", map[string]string{"projectId": projectID, "contractId": mainID}, `{"totalAmount":90000,"number":"KW/2026/041/A"}`, nil)
-	if code != http.StatusOK || money(card, "main", "totalAmount") != 90000 || money(card, "main", "target50Amount") != 45000 {
-		t.Fatalf("contract edit: %d %v", code, card)
-	}
-	code, card = call(manager, server.handleDeleteProjectPayment, http.MethodDelete, "/", payPath, ``, nil)
-	if payments, _ := card["payments"].([]any); code != http.StatusOK || len(payments) != 2 {
+	eurID := card["payments"].([]any)[2].(map[string]any)["id"].(string)
+	code, card = call(manager, server.handleDeleteProjectPayment, http.MethodDelete, "/", map[string]string{"projectId": projectID, "paymentId": eurID}, ``, nil)
+	if payments, _ := card["payments"].([]any); code != http.StatusOK || len(payments) != 2 || totalOf(card, "paidTotals", "EUR") != 0 {
 		t.Fatalf("payment delete: %d %v", code, card)
+	}
+
+	// Documents: any office member uploads and confirms; the uploader, manager and admins delete.
+	code, upload = call(other, server.handleCreateProjectFileUpload, http.MethodPost, "/", pid, `{"kind":"document","fileName":"umowa-KW-2026-041.pdf","sizeBytes":1200}`, nil)
+	if code != http.StatusOK || upload["fileId"] == nil {
+		t.Fatalf("document upload: %d %v", code, upload)
+	}
+	fileID := upload["fileId"].(string)
+	code, card = call(other, server.handleConfirmProjectDocument, http.MethodPost, "/", pid, `{"fileId":"`+fileID+`"}`, nil)
+	documents, _ := card["documents"].([]any)
+	if code != http.StatusCreated || len(documents) != 1 || documents[0].(map[string]any)["fileName"] != "umowa-KW-2026-041.pdf" {
+		t.Fatalf("document confirm: %d %v", code, card)
+	}
+	if code, res := call(other, server.handleConfirmProjectDocument, http.MethodPost, "/", pid, `{"fileId":"`+receiptID+`"}`, nil); code != http.StatusBadRequest || fieldErr(res, "fileId") == "" {
+		t.Fatalf("receipt as a document: %d %v", code, res)
+	}
+	code, upload = call(manager, server.handleCreateProjectFileUpload, http.MethodPost, "/", pid, `{"kind":"document","fileName":"plan.pdf","sizeBytes":1200}`, nil)
+	planID := upload["fileId"].(string)
+	if code, _ := call(manager, server.handleConfirmProjectDocument, http.MethodPost, "/", pid, `{"fileId":"`+planID+`"}`, nil); code != http.StatusCreated {
+		t.Fatalf("plan confirm: %d", code)
+	}
+	planPath := map[string]string{"projectId": projectID, "fileId": planID}
+	if code, res := call(other, server.handleDeleteProjectDocument, http.MethodDelete, "/", planPath, ``, nil); code != http.StatusForbidden {
+		t.Fatalf("colleague deletes another's document: %d %v", code, res)
+	}
+	code, card = call(manager, server.handleDeleteProjectDocument, http.MethodDelete, "/", planPath, ``, nil)
+	if documents, _ := card["documents"].([]any); code != http.StatusOK || len(documents) != 1 {
+		t.Fatalf("document delete: %d %v", code, card)
+	}
+
+	// Change status: by hand, both directions, six stages; finals and old stages are refused.
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"measurement_design","eventDate":"2026-10-05","eventTime":"10:00"}`, nil); code != http.StatusOK || res["eventTime"] != "10:00" {
+		t.Fatalf("measurement: %d %v", code, res)
+	}
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"production_delivery"}`, nil); code != http.StatusOK || res["status"] != "production_delivery" {
+		t.Fatalf("production without 50%%: %d %v", code, res)
+	}
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"factory_approval","comment":"Back to the factory"}`, nil); code != http.StatusOK || res["status"] != "factory_approval" {
+		t.Fatalf("backwards: %d %v", code, res)
+	}
+	for _, status := range []string{"completed", "cancelled", "estimate", "main_contract", "none"} {
+		if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"`+status+`"}`, nil); code != http.StatusBadRequest || fieldErr(res, "status") == "" {
+			t.Fatalf("status %s by hand: %d %v", status, code, res)
+		}
+	}
+
+	// Project finished: only from Installation; a finished project is read-only, restore reopens it.
+	if code, res := call(manager, server.handleFinishProject, http.MethodPost, "/", pid, `{}`, nil); code != http.StatusConflict || res["code"] != "project_not_installation" {
+		t.Fatalf("finish before installation: %d %v", code, res)
+	}
+	if code, _ := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"installation"}`, nil); code != http.StatusOK {
+		t.Fatalf("installation: %d", code)
+	}
+	if code, res := call(other, server.handleFinishProject, http.MethodPost, "/", pid, `{}`, nil); code != http.StatusForbidden {
+		t.Fatalf("colleague finish: %d %v", code, res)
+	}
+	if code, card := call(manager, server.handleFinishProject, http.MethodPost, "/", pid, `{"comment":"Handed over"}`, nil); code != http.StatusOK || card["status"] != "completed" {
+		t.Fatalf("finish: %d %v", code, card)
+	}
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"installation"}`, nil); code != http.StatusConflict || res["code"] != "project_finished" {
+		t.Fatalf("status on finished: %d %v", code, res)
+	}
+	if code, res := call(manager, server.handleCancelProject, http.MethodPost, "/", pid, `{"reasons":["other"],"comment":"x"}`, nil); code != http.StatusConflict || res["code"] != "project_finished" {
+		t.Fatalf("close a finished project: %d %v", code, res)
+	}
+	if code, card := call(manager, server.handleRestoreProject, http.MethodPost, "/", pid, ``, nil); code != http.StatusOK || card["status"] != "installation" {
+		t.Fatalf("reopen finished: %d %v", code, card)
+	}
+	if code, _ := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"contract_signing"}`, nil); code != http.StatusOK {
+		t.Fatalf("contract signing: %d", code)
 	}
 
 	// Comments: any user with office access; the card stays editable only for the manager.
@@ -339,14 +331,9 @@ func TestProjectsDB(t *testing.T) {
 		t.Fatalf("mark held: %d %v", code, res)
 	}
 
-	// The data of the contract file downloads through the shared endpoint.
+	// A project document downloads through the shared endpoint.
 	if code, res := call(manager, server.handleFileDownloadURL, http.MethodGet, "/", map[string]string{"fileId": fileID}, ``, nil); code != http.StatusOK || res["url"] == nil {
 		t.Fatalf("download url: %d %v", code, res)
-	}
-
-	// Deleting the contracts: the intro one has payments, so it is refused until they are deleted.
-	if code, res := call(manager, server.handleDeleteProjectContract, http.MethodDelete, "/", map[string]string{"projectId": projectID, "contractId": introID}, ``, nil); code != http.StatusConflict || res["code"] != "contract_has_payments" {
-		t.Fatalf("delete intro with payments: %d %v", code, res)
 	}
 
 	// Cancel needs reasons; restore returns the previous status.
@@ -355,22 +342,22 @@ func TestProjectsDB(t *testing.T) {
 	}
 	code, card = call(manager, server.handleCancelProject, http.MethodPost, "/", pid, `{"reasons":["postponed_renovation"],"comment":"Moving to spring","cancelFutureEvents":true}`, nil)
 	cancellation, _ := card["cancellation"].(map[string]any)
-	if code != http.StatusOK || card["status"] != "cancelled" || cancellation["statusBeforeCancel"] != "main_contract" {
+	if code != http.StatusOK || card["status"] != "cancelled" || cancellation["statusBeforeCancel"] != "contract_signing" {
 		t.Fatalf("cancel: %d %v", code, card)
 	}
-	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"design"}`, nil); code != http.StatusConflict || res["code"] != "project_cancelled" {
+	if code, res := call(manager, server.handleChangeProjectStatus, http.MethodPost, "/", pid, `{"status":"installation"}`, nil); code != http.StatusConflict || res["code"] != "project_cancelled" {
 		t.Fatalf("status on cancelled: %d %v", code, res)
 	}
 	if code, res := call(other, server.handleAddProjectComment, http.MethodPost, "/", pid, `{"text":"After cancel"}`, idem()); code != http.StatusConflict || res["code"] != "project_cancelled" {
 		t.Fatalf("comment on cancelled: %d %v", code, res)
 	}
 	code, card = call(manager, server.handleRestoreProject, http.MethodPost, "/", pid, ``, nil)
-	if code != http.StatusOK || card["status"] != "main_contract" || card["cancellation"] != nil {
+	if code != http.StatusOK || card["status"] != "contract_signing" || card["cancellation"] != nil {
 		t.Fatalf("restore: %d %v", code, card)
 	}
 
 	// List, facets, board and timeline.
-	code, list := call(admin, server.handleListProjects, http.MethodGet, "/?"+url.Values{"status": {"main_contract"}, "q": {clientName}}.Encode(), nil, ``, nil)
+	code, list := call(admin, server.handleListProjects, http.MethodGet, "/?"+url.Values{"status": {"contract_signing"}, "q": {clientName}}.Encode(), nil, ``, nil)
 	items, _ := list["items"].([]any)
 	if code != http.StatusOK || len(items) != 1 {
 		t.Fatalf("list: %d %v", code, list)
@@ -378,20 +365,23 @@ func TestProjectsDB(t *testing.T) {
 	if last, _ := items[0].(map[string]any)["lastComment"].(map[string]any); last["text"] != "Client wants oak" && last["text"] != "Moving to spring" {
 		t.Fatalf("last comment: %v", items[0])
 	}
+	if item := items[0].(map[string]any); totalOf(item, "paidTotals", "PLN") != 30500 || item["estimate"] == nil {
+		t.Fatalf("list money: %v", item)
+	}
 	code, facets := call(admin, server.handleProjectFacets, http.MethodGet, "/?"+url.Values{"q": {clientName}}.Encode(), nil, ``, nil)
-	if statuses, _ := facets["status"].(map[string]any); code != http.StatusOK || statuses["main_contract"] != float64(1) || facets["total"] != float64(1) {
+	if statuses, _ := facets["status"].(map[string]any); code != http.StatusOK || statuses["contract_signing"] != float64(1) || facets["total"] != float64(1) {
 		t.Fatalf("facets: %d %v", code, facets)
 	}
 	code, board := call(admin, server.handleProjectBoard, http.MethodGet, "/?"+url.Values{"q": {clientName}, "limit": {"5"}}.Encode(), nil, ``, nil)
 	columns, _ := board["columns"].([]any)
-	if code != http.StatusOK || len(columns) != len(projectBoardStatuses) || board["total"] != float64(1) || board["cancelledCount"] != float64(0) {
+	if code != http.StatusOK || len(columns) != len(projectBoardStatuses) || board["total"] != float64(1) || board["cancelledCount"] != float64(0) || board["completedCount"] != float64(0) {
 		t.Fatalf("board: %d %v", code, board)
 	}
 	for _, column := range columns {
 		column := column.(map[string]any)
 		cards, _ := column["items"].([]any)
 		want := 0
-		if column["status"] == "main_contract" {
+		if column["status"] == "contract_signing" {
 			want = 1
 		}
 		if len(cards) != want || column["count"] != float64(want) {
@@ -400,8 +390,8 @@ func TestProjectsDB(t *testing.T) {
 	}
 	types := eventTypes(other)
 	for _, want := range []string{
-		"created", "estimate_updated", "contract_added", "payment_added", "status_changed",
-		"payment_updated", "contract_updated", "payment_deleted", "comment", "details_updated",
+		"created", "estimate_updated", "payment_added", "payment_updated", "payment_deleted",
+		"file_added", "file_deleted", "status_changed", "finished", "comment", "details_updated",
 		"lead_info_updated", "measurement_visit", "cancelled", "restored",
 	} {
 		found := false

@@ -92,20 +92,21 @@ var clientCardSQL = `
 			'projectsCount', (select count(*) from public.projects p where p.client_id = c.id),
 			'contractValue', coalesce((
 				select jsonb_agg(jsonb_build_object(
-					'currency', t.currency, 'total', t.total, 'paid', t.paid, 'remaining', t.total - t.paid)
+					'currency', t.currency, 'total', t.total, 'paid', t.paid, 'remaining', greatest(t.total - t.paid, 0))
 					order by t.currency)
 				from (
-					select ct.currency, sum(ct.total_amount) as total, sum(coalesce(pay.paid, 0)) as paid
-					from public.projects p
-					join public.project_contracts ct on ct.project_id = p.id and ct.kind = 'main'
-					left join lateral (
-						select sum(pp.amount) as paid
-						from public.project_payments pp
-						join public.project_contracts pc on pc.id = pp.contract_id
-						where pp.project_id = p.id and pc.currency = ct.currency
-					) pay on true
-					where p.client_id = c.id and p.status <> 'cancelled'
-					group by ct.currency
+					select cur.currency,
+					  coalesce((select sum(p.estimate_amount) from public.projects p
+					    where p.client_id = c.id and p.status <> 'cancelled' and p.estimate_currency = cur.currency), 0) as total,
+					  coalesce((select sum(pp.amount) from public.project_payments pp join public.projects p on p.id = pp.project_id
+					    where p.client_id = c.id and p.status <> 'cancelled' and pp.currency = cur.currency), 0) as paid
+					from (
+						select p.estimate_currency as currency from public.projects p
+						where p.client_id = c.id and p.status <> 'cancelled' and p.estimate_currency is not null
+						union
+						select pp.currency from public.project_payments pp join public.projects p on p.id = pp.project_id
+						where p.client_id = c.id and p.status <> 'cancelled'
+					) cur
 				) t), '[]'::jsonb)),
 		'leads', coalesce((
 			select jsonb_agg(jsonb_build_object(
@@ -138,16 +139,12 @@ var clientCardSQL = `
 				'createdAt', y.created_at,
 				'manager', case when y.assigned_to is null then null
 					else jsonb_build_object('id', y.assigned_to, 'name', coalesce(ym.display_name, '')) end,
-				'contract', (
-					select jsonb_build_object(
-						'currency', ct.currency,
-						'totalAmount', ct.total_amount,
-						'paidAmount', coalesce((
-							select sum(pp.amount)
-							from public.project_payments pp
-							join public.project_contracts pc on pc.id = pp.contract_id
-							where pp.project_id = y.id and pc.currency = ct.currency), 0))
-					from public.project_contracts ct where ct.project_id = y.id and ct.kind = 'main'))
+				'contract', case when y.estimate_amount is null then null else jsonb_build_object(
+					'currency', y.estimate_currency,
+					'totalAmount', y.estimate_amount,
+					'paidAmount', coalesce((
+						select sum(pp.amount) from public.project_payments pp
+						where pp.project_id = y.id and pp.currency = y.estimate_currency), 0)) end)
 				order by y.created_at desc, y.id desc)
 			from (
 				select * from public.projects p
