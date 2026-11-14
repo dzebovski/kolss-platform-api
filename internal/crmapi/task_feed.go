@@ -106,10 +106,13 @@ var taskFeedSourceSQL = `with source_rows as (
 	 o.id office_id, o.code office_code, o.name_uk, o.name_pl, o.timezone_name,
 	 t.assignee_id manager_candidate, t.created_by,
 	 t.status::text status, t.in_progress, t.version, t.updated_at, coalesce(t.completed_at, t.updated_at) done_at,
-	 t.list_id, ll.id lead_id, t.link_project_id, t.link_client_id, ll.name lead_name, ll.reference_id lead_code, ll.phone
+	 t.list_id, ll.id lead_id, t.link_project_id, t.link_client_id,
+	 coalesce(ll.name, pl.name) lead_name, coalesce(ll.reference_id, pl.reference_id) lead_code, coalesce(ll.phone, pl.phone) phone
 	from public.tasks t
 	join public.offices o on o.id=t.office_id
 	left join public.leads ll on ll.id=t.link_lead_id
+	left join public.projects lp on lp.id=t.link_project_id
+	left join public.leads pl on pl.id=lp.lead_id
 	where t.entity_type is null and t.entity_id is null and t.source='manual' and t.task_type='manual' and t.status<>'canceled'
 
 	union all
@@ -135,7 +138,7 @@ var taskFeedSourceSQL = `with source_rows as (
 	 null::uuid, l.id, null::uuid, null::uuid, l.name, l.reference_id, l.phone
 	from public.lead_showroom_visits v join public.leads l on l.id=v.lead_id join public.offices o on o.id=l.office_id
 	where l.archived_at is null and v.kind in ('showroom','measurement','office_work') and (
-	  (v.status='scheduled' and l.client_status not in ('contract_signed','closed_lost')
+	  (v.status='scheduled' and (v.project_id is not null or l.client_status not in ('contract_signed','closed_lost'))
 	    and (v.scheduled_at at time zone o.timezone_name)::date >= (now() at time zone o.timezone_name)::date - 365)
 	  or (v.status='visited' and v.updated_at >= now() - interval '60 days'))
 
@@ -270,7 +273,8 @@ func scanTaskFeedItem(rows taskFeedScanner, actor Actor) (taskFeedItem, error) {
 	case leadID != nil:
 		item.Link = &taskFeedLink{Type: "lead", ID: *leadID, Name: leadName, Code: leadCode, Phone: phone}
 	case projectID != nil:
-		item.Link = &taskFeedLink{Type: "project", ID: *projectID}
+		// Project tasks carry the project's client name and code (P12).
+		item.Link = &taskFeedLink{Type: "project", ID: *projectID, Name: leadName, Code: leadCode, Phone: phone}
 	case clientID != nil:
 		item.Link = &taskFeedLink{Type: "client", ID: *clientID}
 	}

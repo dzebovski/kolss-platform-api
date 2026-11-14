@@ -161,6 +161,7 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Put("/v1/projects/{projectId}/estimate", s.handleUpdateProjectEstimate)
 			r.Post("/v1/projects/{projectId}/comments", s.handleAddProjectComment)
 			r.Get("/v1/projects/{projectId}/timeline", s.handleListProjectTimeline)
+			r.Get("/v1/projects/{projectId}/activities", s.handleListProjectActivities)
 			r.Post("/v1/projects/{projectId}/status", s.handleChangeProjectStatus)
 			r.Post("/v1/projects/{projectId}/cancel", s.handleCancelProject)
 			r.Post("/v1/projects/{projectId}/restore", s.handleRestoreProject)
@@ -264,6 +265,7 @@ var crmCORSRoutePatterns = []string{
 	"/v1/projects/{projectId}/estimate",
 	"/v1/projects/{projectId}/comments",
 	"/v1/projects/{projectId}/timeline",
+	"/v1/projects/{projectId}/activities",
 	"/v1/projects/{projectId}/status",
 	"/v1/projects/{projectId}/cancel",
 	"/v1/projects/{projectId}/restore",

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.43.0
+  version: 2.44.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -1420,6 +1420,26 @@ paths:
                   items: { type: array, items: { $ref: '#/components/schemas/ProjectEvent' } }
         '403': { $ref: '#/components/responses/CRMError' }
         '404': { $ref: '#/components/responses/CRMError' }
+  /v1/projects/{projectId}/activities:
+    get:
+      tags: [Projects]
+      operationId: listProjectActivities
+      summary: Tasks and meetings of a project (2.44.0)
+      description: >
+        Manual tasks linked to the project (open first by due date, then done, latest first; canceled
+        tasks are left out) and the project's meetings (latest first), up to 200 of each. Anyone with
+        access to the office.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/ProjectId' }
+      responses:
+        '200':
+          description: Tasks and meetings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProjectActivities' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
   /v1/projects/{projectId}/status:
     post:
       tags: [Projects]
@@ -2085,8 +2105,9 @@ components:
         listId: { type: [string, 'null'], format: uuid, description: Puts the task on a task list. Exclusive with `link`. }
         link:
           description: >
-            Links the task to one entity (exclusive with `listId`). Only `lead` is accepted for now (400 on `link` otherwise);
-            `project` and `client` are reserved until those features ship. The lead must belong to `officeId`.
+            Links the task to one entity (exclusive with `listId`). `lead` and (since 2.44.0) `project` are accepted
+            (400 on `link` for `client`). The lead or project must belong to `officeId`; a closed or finished
+            project is refused. A project task writes `task_added` to the project timeline.
           oneOf:
             - { $ref: '#/components/schemas/TaskLinkRequest' }
             - { type: 'null' }
@@ -2127,7 +2148,7 @@ components:
       type: object
       additionalProperties: false
       required: [type, id, name, code, phone]
-      description: Name, code and phone are filled for leads; project and client links carry only the id until those features ship.
+      description: Name, code and phone are filled for leads and (since 2.44.0) projects, from the project's lead; client links carry only the id.
       properties:
         type: { type: string, enum: [lead, project, client] }
         id: { type: string, format: uuid }
@@ -2728,13 +2749,20 @@ components:
             - lead_info_updated
             - comment
             - measurement_visit
+            - meeting_scheduled
+            - meeting_rescheduled
+            - meeting_updated
+            - meeting_status_changed
+            - task_added
           description: >
             Since 2.36.0: estimate_updated (old / new value per changed line), contract_updated / contract_deleted,
             payment_updated / payment_deleted, details_updated (managerId / designerId), lead_info_updated
             (fields), comment (text in `comment`), measurement_visit (a measurement appointment of the
             lead was marked held; newValue has appointmentId and startsAt). Since 2.43.0: finished (Project
             finished), file_added / file_deleted (fileId, fileName); contract_* are history only, no longer
-            written.
+            written. Since 2.44.0: meeting_scheduled / meeting_rescheduled / meeting_updated /
+            meeting_status_changed (old / new value: appointmentId, kind, startsAt, endsAt,
+            responsibleManagerId, status) and task_added (taskId, title, dueDate, assigneeId).
         actor:
           oneOf: [{ type: 'null' }, { $ref: '#/components/schemas/ProjectPerson' }]
         oldValue: { type: [object, 'null'], additionalProperties: true }
@@ -2956,6 +2984,7 @@ components:
       required:
         - id
         - lead
+        - projectId
         - office
         - responsibleManager
         - kind
@@ -2973,6 +3002,10 @@ components:
       properties:
         id: { type: string, format: uuid }
         lead: { $ref: '#/components/schemas/AppointmentLeadSummary' }
+        projectId:
+          type: [string, 'null']
+          format: uuid
+          description: Set for a project meeting (2.44.0); it never changes the lead's statuses.
         office: { $ref: '#/components/schemas/AppointmentOfficeSummary' }
         responsibleManager:
           oneOf:
@@ -3005,6 +3038,13 @@ components:
         timezone: { type: string }
         from: { type: string, format: date }
         to: { type: string, format: date }
+    ProjectActivities:
+      type: object
+      additionalProperties: false
+      required: [tasks, meetings]
+      properties:
+        tasks: { type: array, items: { $ref: '#/components/schemas/TaskFeedItem' } }
+        meetings: { type: array, items: { $ref: '#/components/schemas/Appointment' } }
     AppointmentMutationResponse:
       type: object
       additionalProperties: false
@@ -3017,9 +3057,15 @@ components:
     CreateAppointmentRequest:
       type: object
       additionalProperties: false
-      required: [leadId, startsAtLocal, durationMinutes, responsibleManagerId]
+      required: [startsAtLocal, durationMinutes, responsibleManagerId]
+      description: >
+        Exactly one of `leadId` (a lead meeting) and `projectId` (a project meeting, 2.44.0). A project
+        meeting is a showroom meeting or a measurement on the project's lead: it keeps the lead's
+        statuses, writes project timeline events, allows several scheduled meetings of one kind, and
+        is refused on a closed or finished project (409 `project_closed`).
       properties:
         leadId: { type: string, format: uuid }
+        projectId: { type: string, format: uuid }
         kind:
           allOf: [{ $ref: '#/components/schemas/AppointmentKind' }]
           default: showroom

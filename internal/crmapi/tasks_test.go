@@ -213,12 +213,17 @@ func TestCreateTaskValidationCoversV2Fields(t *testing.T) {
 	if fields := validateCreateTask(both); fields["link"] == "" {
 		t.Fatal("a list and a link together must be rejected")
 	}
-	for _, linkType := range []string{"project", "client", "deal"} {
+	for _, linkType := range []string{"client", "deal"} {
 		req := base
 		req.Link = &taskLinkRequest{Type: linkType, ID: uuid.New()}
 		if fields := validateCreateTask(req); fields["link"] == "" {
 			t.Fatalf("%s link must be rejected until it is available", linkType)
 		}
+	}
+	project := base
+	project.Link = &taskLinkRequest{Type: "project", ID: uuid.New()}
+	if fields := validateCreateTask(project); fields["link"] != "" {
+		t.Fatalf("project links are available since P12: %#v", fields)
 	}
 }
 

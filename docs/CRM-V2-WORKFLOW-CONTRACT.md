@@ -789,3 +789,12 @@ Owner decisions of 2026-11-14. Contracts are no longer an entity, payments are s
 ### 12.3 Rollout
 
 - Breaking for the live CRM v2 project screens (statuses, card shape, contract endpoints). Ship together: migration → API 2.43.0 → CRM with P0d + P9 (+ P10/P11 for payments and documents). CRM v1 is not affected.
+
+## 13. Project tasks and meetings (P12, OpenAPI 2.44.0)
+
+- Migration `20261115120000_project_meetings.sql`: nullable `lead_showroom_visits.project_id` (FK to projects, on delete set null) + index; new project event types `meeting_scheduled`, `meeting_rescheduled`, `meeting_updated`, `meeting_status_changed`, `task_added`.
+- `POST /v1/appointments` takes `projectId` instead of `leadId`: a showroom meeting or a measurement on the project's lead. It keeps the lead's statuses (no `client_status` change, no lead events), allows several scheduled meetings of one kind, writes project events, and is refused on a closed / finished project (`409 project_closed`). PATCH works as for any meeting (reschedule, `visited`, `no_show`, `canceled`); on a project meeting it writes project events and is refused once the project is closed.
+- Lead workflows that cancel meetings of one kind (showroom / measurement on a lead status change) leave project meetings alone; Close project with "cancel future events" and lead archive still cancel every scheduled meeting of the lead.
+- `POST /v1/tasks` accepts `link: {type: project, id}` (same office, not closed / finished); writes `task_added`. Feed items of project tasks carry the project's client name, code and phone.
+- `GET /v1/projects/{id}/activities` → `{tasks: TaskFeedItem[], meetings: Appointment[]}`. `Appointment.projectId` added. Scheduled project meetings show on the Tasks page whatever the lead's client status.
+- Rollout: additive. Migration → API 2.44.0 → CRM P12. CRM v1 is not affected.

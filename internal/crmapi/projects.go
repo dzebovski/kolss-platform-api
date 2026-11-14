@@ -601,6 +601,11 @@ func (s *Server) finishIdempotentTx(r *http.Request, tx pgx.Tx, actor Actor, ope
 }
 
 func (s *Server) insertProjectEvent(ctx context.Context, tx pgx.Tx, projectID, actorID uuid.UUID, eventType string, oldValue, newValue map[string]any, comment *string) error {
+	return writeProjectEvent(ctx, tx, projectID, actorID, eventType, oldValue, newValue, comment)
+}
+
+// writeProjectEvent appends a project timeline event and bumps the project's last activity.
+func writeProjectEvent(ctx context.Context, tx pgx.Tx, projectID, actorID uuid.UUID, eventType string, oldValue, newValue map[string]any, comment *string) error {
 	if _, err := tx.Exec(ctx, `
 		insert into public.project_events (project_id, actor_id, event_type, old_value, new_value, comment)
 		values ($1,$2,$3,$4,$5,$6)

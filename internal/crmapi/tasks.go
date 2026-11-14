@@ -167,11 +167,11 @@ func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, response)
 }
 
-// taskLinkTypeAvailable reports which link types the API accepts. Projects (P1) and clients (CL1)
-// are stored in link_project_id / link_client_id without a foreign key, but they stay disabled
-// until their own endpoints exist to validate the id and the office; enable each type here then.
+// taskLinkTypeAvailable reports which link types the API accepts. Lead and project links (P12,
+// 2026-11-15) are validated against the task's office; client links (stored in link_client_id
+// without a foreign key) stay disabled until clients need tasks.
 func taskLinkTypeAvailable(linkType string) bool {
-	return linkType == "lead"
+	return linkType == "lead" || linkType == "project"
 }
 
 // taskAssigneeAllowed: an active profile that is a member of the task's office. A super admin
@@ -233,16 +233,38 @@ func createManualTask(r *http.Request, tx pgx.Tx, actor Actor, req createTaskReq
 		}
 		linkLeadID = &req.Link.ID
 	}
+	var linkProjectID *uuid.UUID
+	if req.Link != nil && req.Link.Type == "project" {
+		var projectOffice uuid.UUID
+		var projectStatus string
+		err := tx.QueryRow(r.Context(), `select office_id, status from public.projects where id=$1 for update`, req.Link.ID).Scan(&projectOffice, &projectStatus)
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && (projectOffice != req.OfficeID || isFinalProjectStatus(projectStatus))) {
+			return taskMutationResponse{}, errTaskLinkInvalid
+		}
+		if err != nil {
+			return taskMutationResponse{}, err
+		}
+		linkProjectID = &req.Link.ID
+	}
 	var dueTime *string
 	if dueAt != nil {
 		dueTime = trimmedPtr(req.DueTime)
 	}
 	var response taskMutationResponse
 	err = tx.QueryRow(r.Context(), `
-		insert into public.tasks (entity_type,entity_id,office_id,assignee_id,title,note,due_at,due_time,list_id,link_lead_id,priority,source,task_type,status,created_by,updated_by)
-		values (null,null,$1,$2,$3,$4,$5,$6::time,$7,$8,'high'::public.task_priority,'manual'::public.task_source,'manual'::public.task_type,'open'::public.task_status,$9,$9)
+		insert into public.tasks (entity_type,entity_id,office_id,assignee_id,title,note,due_at,due_time,list_id,link_lead_id,link_project_id,priority,source,task_type,status,created_by,updated_by)
+		values (null,null,$1,$2,$3,$4,$5,$6::time,$7,$8,$10,'high'::public.task_priority,'manual'::public.task_source,'manual'::public.task_type,'open'::public.task_status,$9,$9)
 		returning id,version,status::text,in_progress
-	`, req.OfficeID, req.AssigneeID, strings.TrimSpace(req.Title), blankToNil(req.Note), dueAt, dueTime, req.ListID, linkLeadID, actor.ID).Scan(&response.ID, &response.Version, &response.Status, &response.InProgress)
+	`, req.OfficeID, req.AssigneeID, strings.TrimSpace(req.Title), blankToNil(req.Note), dueAt, dueTime, req.ListID, linkLeadID, actor.ID, linkProjectID).Scan(&response.ID, &response.Version, &response.Status, &response.InProgress)
+	if err != nil || linkProjectID == nil {
+		return response, err
+	}
+	err = writeProjectEvent(r.Context(), tx, *linkProjectID, actor.ID, "task_added", nil, map[string]any{
+		"taskId":     response.ID,
+		"title":      strings.TrimSpace(req.Title),
+		"dueDate":    req.DueDate,
+		"assigneeId": req.AssigneeID,
+	}, nil)
 	return response, err
 }
 

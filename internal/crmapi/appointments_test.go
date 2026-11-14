@@ -141,7 +141,7 @@ func TestCancelScheduledAppointmentsUpdateCancelsOnlyScheduled(t *testing.T) {
 		"status='canceled'",
 		"where lead_id=$1",
 		"and status='scheduled'",
-		"and ($3::text is null or kind=$3)",
+		"and ($3::text is null or (kind=$3 and project_id is null))",
 		"returning id, scheduled_at, ends_at, responsible_manager_id, comment",
 	} {
 		if !strings.Contains(cancelScheduledAppointmentsUpdate, fragment) {
@@ -372,5 +372,34 @@ func TestManagerDoubleBookingIsBlocked(t *testing.T) {
 	if !strings.Contains(appointments, `"manager_busy"`) ||
 		!strings.Contains(appointments, "http.StatusConflict, \"manager_busy\"") {
 		t.Fatal("a busy manager must surface as 409 manager_busy")
+	}
+}
+
+func TestValidateProjectAppointment(t *testing.T) {
+	start, duration, manager := "2026-11-20T10:00", 60, uuid.New()
+	project := uuid.New()
+	base := appointmentMutationRequest{ProjectID: &project, StartsAtLocal: &start, DurationMinutes: &duration, ResponsibleManagerID: &manager}
+	if fields := validateCreateAppointment(base); len(fields) > 0 {
+		t.Fatalf("a project meeting needs no leadId: %#v", fields)
+	}
+	withLead := base
+	withLead.LeadID = uuid.New()
+	if fields := validateCreateAppointment(withLead); fields["leadId"] == "" {
+		t.Fatal("leadId and projectId together must be rejected")
+	}
+	officeWork := base
+	kind := appointmentKindOfficeWork
+	officeWork.Kind = &kind
+	if fields := validateCreateAppointment(officeWork); fields["kind"] == "" {
+		t.Fatal("office work is not a project meeting")
+	}
+	move := appointmentMutationRequest{ProjectID: &project}
+	if fields := validateUpdateAppointment(move); fields["projectId"] == "" {
+		t.Fatal("a meeting cannot move to another project")
+	}
+	if projectMeetingEventType("appointment_status_changed") != "meeting_status_changed" ||
+		projectMeetingEventType("appointment_rescheduled") != "meeting_rescheduled" ||
+		projectMeetingEventType("appointment_updated") != "meeting_updated" {
+		t.Fatal("project meeting events must map from the lead ones")
 	}
 }

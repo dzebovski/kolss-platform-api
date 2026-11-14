@@ -42,12 +42,15 @@ const cancelScheduledAppointmentsUpdate = `
 	  version=version+1
 	where lead_id=$1
 	  and status='scheduled'
-	  and ($3::text is null or kind=$3)
+	  and ($3::text is null or (kind=$3 and project_id is null))
 	returning id, scheduled_at, ends_at, responsible_manager_id, comment
 `
 
 type appointmentMutationRequest struct {
-	LeadID               uuid.UUID  `json:"leadId"`
+	LeadID uuid.UUID `json:"leadId"`
+	// ProjectID books a project meeting (P12): the lead comes from the project, the lead's
+	// statuses stay as they are and the project timeline gets the events.
+	ProjectID            *uuid.UUID `json:"projectId"`
 	Kind                 *string    `json:"kind"`
 	StartsAtLocal        *string    `json:"startsAtLocal"`
 	DurationMinutes      *int       `json:"durationMinutes"`
@@ -80,6 +83,7 @@ type appointmentManagerSummary struct {
 type appointment struct {
 	ID                    uuid.UUID                  `json:"id"`
 	Lead                  appointmentLeadSummary     `json:"lead"`
+	ProjectID             *uuid.UUID                 `json:"projectId"`
 	Office                appointmentOfficeSummary   `json:"office"`
 	ResponsibleManager    *appointmentManagerSummary `json:"responsibleManager"`
 	Kind                  string                     `json:"kind"`
@@ -129,7 +133,8 @@ const appointmentSelect = `
 	  v.purpose,
 	  v.version,
 	  v.created_at,
-	  v.updated_at
+	  v.updated_at,
+	  v.project_id
 	from public.lead_showroom_visits v
 	join public.leads l on l.id = v.lead_id
 	join public.offices o on o.id = l.office_id
@@ -432,6 +437,8 @@ var (
 	errOfficeWorkStatus          = errors.New("office work status is immutable")
 	errAppointmentPurposeKind    = errors.New("only a showroom meeting has a purpose")
 	errAppointmentVersion        = errors.New("appointment version conflict")
+	errAppointmentProjectClosed  = errors.New("appointment project closed")
+	errAppointmentProjectMissing = errors.New("appointment project not found")
 )
 
 // clientStatusForAppointmentKind maps an appointment kind onto the lead client
@@ -504,6 +511,9 @@ func (s *Server) createAppointment(
 	actor Actor,
 	req appointmentMutationRequest,
 ) (appointment, error) {
+	if req.ProjectID != nil {
+		return s.createProjectAppointment(r, tx, actor, req)
+	}
 	var officeID uuid.UUID
 	var assignedTo *uuid.UUID
 	var clientStatus string
@@ -547,7 +557,7 @@ func (s *Server) createAppointment(
 		if err := tx.QueryRow(r.Context(), `
 			select exists(
 			  select 1 from public.lead_showroom_visits
-			  where lead_id=$1 and kind=$2 and status='scheduled'
+			  where lead_id=$1 and kind=$2 and status='scheduled' and project_id is null
 			)
 		`, req.LeadID, kind).Scan(&activeExists); err != nil {
 			return appointment{}, err
@@ -657,8 +667,10 @@ func (s *Server) updateAppointment(
 	var currentComment *string
 	var currentStatus, currentKind string
 	var currentVersion int64
+	var projectID *uuid.UUID
 	err := tx.QueryRow(r.Context(), `
 		select
+		  v.project_id,
 		  v.lead_id,
 		  l.office_id,
 		  v.scheduled_at,
@@ -673,6 +685,7 @@ func (s *Server) updateAppointment(
 		where v.id=$1
 		for update of v, l
 	`, appointmentID).Scan(
+		&projectID,
 		&leadID,
 		&officeID,
 		&currentStart,
@@ -700,6 +713,11 @@ func (s *Server) updateAppointment(
 	}
 	if !canUpdateAppointment(currentStatus, req) {
 		return appointment{}, errAppointmentTerminal
+	}
+	if projectID != nil {
+		if err := lockOpenAppointmentProject(r.Context(), tx, *projectID); err != nil {
+			return appointment{}, err
+		}
 	}
 
 	nextStart := currentStart
@@ -788,6 +806,16 @@ func (s *Server) updateAppointment(
 		(!nextStart.Equal(currentStart) || !nextEnd.Equal(currentEnd) || !sameUUID(nextManager, currentManager)) {
 		eventType = "appointment_rescheduled"
 	}
+	if projectID != nil {
+		if err := s.insertProjectEvent(r.Context(), tx, *projectID, actor.ID, projectMeetingEventType(eventType),
+			projectMeetingEventValue(appointmentID, currentKind, currentStart, currentEnd, currentManager, currentStatus),
+			projectMeetingEventValue(appointmentID, currentKind, nextStart, nextEnd, nextManager, nextStatus),
+			nextComment,
+		); err != nil {
+			return appointment{}, err
+		}
+		return loadAppointmentTx(r, tx, appointmentID)
+	}
 	if _, err := tx.Exec(r.Context(), appointmentChangedEventInsert,
 		leadID, actor.ID, eventType, nextStatus, nextComment, appointmentID,
 		currentStart, currentEnd, currentManager, currentStatus, currentComment,
@@ -829,6 +857,10 @@ func (s *Server) writeAppointmentMutationError(
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Invalid appointment purpose", map[string]string{"purpose": "Only a showroom meeting has a purpose"})
 	case errors.Is(err, errOfficeWorkStatus):
 		s.writeError(w, r, http.StatusBadRequest, "validation_error", "Office work has no manual status actions", map[string]string{"status": "Office work status cannot be changed manually"})
+	case errors.Is(err, errAppointmentProjectMissing):
+		s.writeError(w, r, http.StatusNotFound, "project_not_found", "Project not found", nil)
+	case errors.Is(err, errAppointmentProjectClosed):
+		s.writeError(w, r, http.StatusConflict, "project_closed", "The project is closed or finished — restore it first", nil)
 	case errors.Is(err, errAppointmentVersion):
 		s.writeError(w, r, http.StatusConflict, "version_conflict", "Appointment was changed by another user", nil)
 	case strings.HasPrefix(err.Error(), "starts_at_local:"):
@@ -846,7 +878,17 @@ func (s *Server) writeAppointmentMutationError(
 
 func validateCreateAppointment(req appointmentMutationRequest) map[string]string {
 	fields := map[string]string{}
-	if req.LeadID == uuid.Nil {
+	if req.ProjectID != nil {
+		if *req.ProjectID == uuid.Nil {
+			fields["projectId"] = "Invalid project"
+		}
+		if req.LeadID != uuid.Nil {
+			fields["leadId"] = "Leave empty for a project meeting: the lead comes from the project"
+		}
+		if req.Kind != nil && !isVisitAppointmentKind(*req.Kind) {
+			fields["kind"] = "A project meeting is a showroom meeting or a measurement"
+		}
+	} else if req.LeadID == uuid.Nil {
 		fields["leadId"] = "Required"
 	}
 	if req.StartsAtLocal == nil || strings.TrimSpace(*req.StartsAtLocal) == "" {
@@ -892,6 +934,9 @@ func validateUpdateAppointment(req appointmentMutationRequest) map[string]string
 	fields := map[string]string{}
 	if req.LeadID != uuid.Nil {
 		fields["leadId"] = "Lead cannot be changed"
+	}
+	if req.ProjectID != nil {
+		fields["projectId"] = "Project cannot be changed"
 	}
 	if req.Kind != nil {
 		fields["kind"] = "Kind cannot be changed"
@@ -1192,6 +1237,7 @@ func scanAppointment(row appointmentRowScanner) (appointment, error) {
 		&item.Version,
 		&item.CreatedAt,
 		&item.UpdatedAt,
+		&item.ProjectID,
 	)
 	if err != nil {
 		return appointment{}, err
