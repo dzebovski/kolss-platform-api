@@ -137,7 +137,7 @@ var taskFeedSourceSQL = `with source_rows as (
 	 case when v.status='visited' then 'done' else 'open' end, false, v.version, v.updated_at, v.updated_at,
 	 null::uuid, l.id, null::uuid, null::uuid, l.name, l.reference_id, l.phone
 	from public.lead_showroom_visits v join public.leads l on l.id=v.lead_id join public.offices o on o.id=l.office_id
-	where l.archived_at is null and v.kind in ('showroom','measurement','office_work') and (
+	where (l.archived_at is null or v.project_id is not null) and v.kind in ('showroom','measurement','office_work') and (
 	  (v.status='scheduled' and (v.project_id is not null or l.client_status not in ('contract_signed','closed_lost'))
 	    and (v.scheduled_at at time zone o.timezone_name)::date >= (now() at time zone o.timezone_name)::date - 365)
 	  or (v.status='visited' and v.updated_at >= now() - interval '60 days'))

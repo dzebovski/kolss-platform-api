@@ -54,11 +54,12 @@ func (s *Server) createProjectAppointment(
 	projectID := *req.ProjectID
 	var leadID, officeID uuid.UUID
 	var status string
+	// The project lives on after its lead is archived (the card stays open), so an archived lead
+	// does not block the project's meetings.
 	err := tx.QueryRow(r.Context(), `
 		select p.lead_id, p.office_id, p.status
 		from public.projects p
-		join public.leads l on l.id = p.lead_id
-		where p.id = $1 and l.archived_at is null
+		where p.id = $1
 		for update of p
 	`, projectID).Scan(&leadID, &officeID, &status)
 	if errors.Is(err, pgx.ErrNoRows) {

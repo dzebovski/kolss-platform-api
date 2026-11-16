@@ -19,7 +19,8 @@ import (
 
 // TestProjectMeetingsDB (P12): a project meeting and a project task on a disposable database
 // (KOLSS_TEST_DATABASE_URL). The meeting keeps the lead's statuses, writes project events, can
-// be marked held, shows in GET /activities, and is refused once the project is closed.
+// be marked held, shows in GET /activities, and is refused once the project is closed. The lead
+// is archived first: a project's meetings do not depend on its lead's archive.
 func TestProjectMeetingsDB(t *testing.T) {
 	dsn := os.Getenv("KOLSS_TEST_DATABASE_URL")
 	if dsn == "" {
@@ -77,6 +78,8 @@ func TestProjectMeetingsDB(t *testing.T) {
 		t.Fatalf("create project: %d %v", code, project)
 	}
 	projectID := project["id"].(string)
+	// The project outlives its lead's archive (production w0003): meetings must still work.
+	mustExec(t, pool, `update public.leads set archived_at = now() where id = $1`, leadID)
 	var clientStatusBefore string
 	if err := pool.QueryRow(ctx, `select client_status from public.leads where id=$1`, leadID).Scan(&clientStatusBefore); err != nil {
 		t.Fatal(err)
