@@ -36,6 +36,27 @@ type Outbox struct {
 	TelegramChatIDKyiv            string
 	TelegramAdditionalChatIDsKyiv string
 	SlackChannelIDWarsaw          string
+	// SlackChannelIDHR receives HR portal messages (HB5); empty = HR messages are not queued.
+	SlackChannelIDHR string
+}
+
+// EnqueueHR queues a ready HR Slack message in the caller's transaction (HB5, D3).
+func (o Outbox) EnqueueHR(ctx context.Context, tx pgx.Tx, text string) (bool, error) {
+	channelID := strings.TrimSpace(o.SlackChannelIDHR)
+	if channelID == "" || strings.TrimSpace(text) == "" {
+		return false, nil
+	}
+	raw, err := json.Marshal(map[string]any{"office_code": "hr", "text": text})
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+insert into public.hr_notifications (channel, destination, status, payload)
+values ('slack', $1, 'pending', $2::jsonb)
+`, channelID, raw); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // TelegramChatIDs returns the Telegram chat IDs configured for an office.

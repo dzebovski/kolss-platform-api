@@ -59,6 +59,10 @@ type Config struct {
 	TelegramAdditionalChatIDsKyiv string
 	SlackBotTokenWarsaw           string
 	SlackChannelIDWarsaw          string
+	// HR portal (HB5, D3): every HR change posts to this channel (C0C03GC1Q8K in production).
+	// The token falls back to the Warsaw bot when SLACK_BOT_TOKEN_HR is empty (same workspace).
+	SlackBotTokenHR  string
+	SlackChannelIDHR string
 }
 
 func Load() (Config, error) {
@@ -121,6 +125,8 @@ func Load() (Config, error) {
 		TelegramAdditionalChatIDsKyiv: strings.TrimSpace(os.Getenv("TELEGRAM_ADDITIONAL_CHAT_IDS_KYIV")),
 		SlackBotTokenWarsaw:           strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN_WARSAW")),
 		SlackChannelIDWarsaw:          strings.TrimSpace(os.Getenv("SLACK_CHANNEL_ID_WARSAW")),
+		SlackBotTokenHR:               strings.TrimSpace(os.Getenv("SLACK_BOT_TOKEN_HR")),
+		SlackChannelIDHR:              strings.TrimSpace(os.Getenv("SLACK_CHANNEL_ID_HR")),
 	}
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
@@ -248,6 +254,12 @@ func (c Config) TelegramBotTokenFor(officeCode string) string {
 
 func (c Config) SlackBotTokenFor(officeCode string) string {
 	if officeCode == "warsaw" {
+		return c.SlackBotTokenWarsaw
+	}
+	if officeCode == "hr" {
+		if c.SlackBotTokenHR != "" {
+			return c.SlackBotTokenHR
+		}
 		return c.SlackBotTokenWarsaw
 	}
 	return ""

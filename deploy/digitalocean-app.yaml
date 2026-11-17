@@ -130,5 +130,9 @@ services:
       - key: SLACK_CHANNEL_ID_WARSAW
         scope: RUN_TIME
         type: SECRET
+      # HR portal (HB5): HR changes post here; the Warsaw bot token is used unless SLACK_BOT_TOKEN_HR is set.
+      # The bot must be a member of the channel.
+      - key: SLACK_CHANNEL_ID_HR
+        value: "C0C03GC1Q8K"
       - key: SHUTDOWN_TIMEOUT_SECONDS
         value: "10"

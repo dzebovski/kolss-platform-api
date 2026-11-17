@@ -139,21 +139,24 @@ func (d *Dispatcher) runOnce(ctx context.Context, includeFailed bool) (sent int,
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}
 	}
-	for i := 0; i < d.batchSize(); i++ {
-		outcome, err := d.claimAndSendOne(ctx, client, includeFailed)
-		if err != nil {
-			return sent, failed, err
-		}
-		switch outcome {
-		case deliveryIdle:
-			return sent, failed, nil
-		case deliverySent:
-			sent++
-		case deliveryFailed:
-			failed++
-		case deliveryRateLimited:
-			failed++
-			return sent, failed, nil
+	for _, source := range notificationSources {
+	batch:
+		for i := 0; i < d.batchSize(); i++ {
+			outcome, err := d.claimAndSendOne(ctx, client, includeFailed, source)
+			if err != nil {
+				return sent, failed, err
+			}
+			switch outcome {
+			case deliveryIdle:
+				break batch
+			case deliverySent:
+				sent++
+			case deliveryFailed:
+				failed++
+			case deliveryRateLimited:
+				failed++
+				return sent, failed, nil
+			}
 		}
 	}
 	return sent, failed, nil
@@ -175,6 +178,25 @@ const (
 	deliveryRateLimited
 )
 
+// notificationSource is one outbox table the dispatcher drains. Leads (Telegram Kyiv / Slack
+// Warsaw) build the message from the payload; HR rows (HB5) carry the ready text.
+type notificationSource struct {
+	table   string
+	message func(channel string, payload map[string]any) string
+}
+
+var notificationSources = []notificationSource{
+	{table: "lead_notifications", message: func(channel string, payload map[string]any) string {
+		if channel == "telegram" {
+			return BuildTelegramNotificationMessage(payload)
+		}
+		return BuildSlackNotificationMessage(payload)
+	}},
+	{table: "hr_notifications", message: func(_ string, payload map[string]any) string {
+		return stringify(payload["text"])
+	}},
+}
+
 type notificationRow struct {
 	ID          string
 	Channel     string
@@ -183,7 +205,7 @@ type notificationRow struct {
 	Attempts    int
 }
 
-func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, includeFailed bool) (deliveryOutcome, error) {
+func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, includeFailed bool, source notificationSource) (deliveryOutcome, error) {
 	tx, err := d.Pool.Begin(ctx)
 	if err != nil {
 		return deliveryIdle, err
@@ -195,7 +217,7 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 	claimToken := uuid.NewString()
 	err = tx.QueryRow(ctx, `
 		select id, channel::text, destination, payload, attempts
-		from public.lead_notifications
+		from public.`+source.table+`
 		where channel in ('telegram', 'slack')
 		  and (status = 'pending' or ($2 and status = 'failed'))
 		  and attempts < $1
@@ -212,7 +234,7 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 		return deliveryIdle, err
 	}
 	if _, err := tx.Exec(ctx, `
-		update public.lead_notifications
+		update public.`+source.table+`
 		set claimed_at=now(), claim_token=$2::uuid
 		where id=$1::uuid
 	`, row.ID, claimToken); err != nil {
@@ -225,7 +247,7 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 	row.Payload = map[string]any{}
 	if len(payload) > 0 {
 		if err := json.Unmarshal(payload, &row.Payload); err != nil {
-			_ = d.markFailed(ctx, row.ID, claimToken, row.Attempts+1, "decode payload: "+err.Error(), defaultRetryDelay)
+			_ = d.markFailed(ctx, source, row.ID, claimToken, row.Attempts+1, "decode payload: "+err.Error(), defaultRetryDelay)
 			return deliveryFailed, nil
 		}
 	}
@@ -233,9 +255,9 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 	var sendErr error
 	switch row.Channel {
 	case "telegram":
-		sendErr = d.sendTelegram(ctx, client, officeCode, row.Destination, BuildTelegramNotificationMessage(row.Payload))
+		sendErr = d.sendTelegram(ctx, client, officeCode, row.Destination, source.message(row.Channel, row.Payload))
 	case "slack":
-		sendErr = d.sendSlack(ctx, client, officeCode, row.Destination, BuildSlackNotificationMessage(row.Payload))
+		sendErr = d.sendSlack(ctx, client, officeCode, row.Destination, source.message(row.Channel, row.Payload))
 	default:
 		sendErr = fmt.Errorf("unsupported notification channel %q", row.Channel)
 	}
@@ -246,7 +268,7 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 			retryDelay = rateLimit.RetryAfter
 		}
 		d.log().Warn("notification delivery failed", "id", row.ID, "channel", row.Channel, "error", sendErr)
-		if markErr := d.markFailed(ctx, row.ID, claimToken, row.Attempts+1, sendErr.Error(), retryDelay); markErr != nil {
+		if markErr := d.markFailed(ctx, source, row.ID, claimToken, row.Attempts+1, sendErr.Error(), retryDelay); markErr != nil {
 			return deliveryFailed, markErr
 		}
 		if rateLimit != nil {
@@ -255,7 +277,7 @@ func (d *Dispatcher) claimAndSendOne(ctx context.Context, client *http.Client, i
 		}
 		return deliveryFailed, nil
 	}
-	if err := d.markSent(ctx, row.ID, claimToken, row.Attempts+1); err != nil {
+	if err := d.markSent(ctx, source, row.ID, claimToken, row.Attempts+1); err != nil {
 		return deliveryFailed, err
 	}
 	return deliverySent, nil
@@ -280,9 +302,9 @@ func (d *Dispatcher) scheduleRetry(ctx context.Context, delay time.Duration) {
 	}()
 }
 
-func (d *Dispatcher) markSent(ctx context.Context, id, claimToken string, attempts int) error {
+func (d *Dispatcher) markSent(ctx context.Context, source notificationSource, id, claimToken string, attempts int) error {
 	_, err := d.Pool.Exec(ctx, `
-		update public.lead_notifications
+		update public.`+source.table+`
 		set status='sent', sent_at=now(), attempts=$2, last_error=null,
 		    claimed_at=null, claim_token=null
 		where id=$1::uuid and claim_token=$3::uuid
@@ -290,7 +312,7 @@ func (d *Dispatcher) markSent(ctx context.Context, id, claimToken string, attemp
 	return err
 }
 
-func (d *Dispatcher) markFailed(ctx context.Context, id, claimToken string, attempts int, lastError string, retryDelay time.Duration) error {
+func (d *Dispatcher) markFailed(ctx context.Context, source notificationSource, id, claimToken string, attempts int, lastError string, retryDelay time.Duration) error {
 	if retryDelay <= 0 {
 		retryDelay = defaultRetryDelay
 	}
@@ -299,7 +321,7 @@ func (d *Dispatcher) markFailed(ctx context.Context, id, claimToken string, atte
 		retryMilliseconds = 1
 	}
 	_, err := d.Pool.Exec(ctx, `
-		update public.lead_notifications
+		update public.`+source.table+`
 		set status='failed', attempts=$2, last_error=$3,
 		    next_attempt_at=now() + ($5 * interval '1 millisecond'), claimed_at=null, claim_token=null
 		where id=$1::uuid and claim_token=$4::uuid
@@ -308,13 +330,19 @@ func (d *Dispatcher) markFailed(ctx context.Context, id, claimToken string, atte
 }
 
 func (d *Dispatcher) pendingCount(ctx context.Context) (int, error) {
-	var count int
-	err := d.Pool.QueryRow(ctx, `
-		select count(*)::int
-		from public.lead_notifications
-		where channel in ('telegram','slack') and status in ('pending','failed') and attempts < $1
-	`, maxDeliveryAttempts).Scan(&count)
-	return count, err
+	total := 0
+	for _, source := range notificationSources {
+		var count int
+		if err := d.Pool.QueryRow(ctx, `
+			select count(*)::int
+			from public.`+source.table+`
+			where channel in ('telegram','slack') and status in ('pending','failed') and attempts < $1
+		`, maxDeliveryAttempts).Scan(&count); err != nil {
+			return total, err
+		}
+		total += count
+	}
+	return total, nil
 }
 
 func (d *Dispatcher) sendTelegram(ctx context.Context, client *http.Client, officeCode, destination, message string) error {

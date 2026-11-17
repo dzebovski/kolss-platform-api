@@ -82,6 +82,7 @@ func main() {
 		TelegramChatIDKyiv:            cfg.TelegramChatIDKyiv,
 		TelegramAdditionalChatIDsKyiv: cfg.TelegramAdditionalChatIDsKyiv,
 		SlackChannelIDWarsaw:          cfg.SlackChannelIDWarsaw,
+		SlackChannelIDHR:              cfg.SlackChannelIDHR,
 	}
 	var dispatcher *notifications.Dispatcher
 	var notificationWaker notifications.Waker
