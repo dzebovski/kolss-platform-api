@@ -763,6 +763,20 @@ func (s *Server) handleHRUpdateEmployee(w http.ResponseWriter, r *http.Request) 
 		s.hrFail(w, r, err)
 		return
 	}
+	// An earlier start also moves the first work pattern back, so the added days have a
+	// schedule (the pattern is created from the original start date).
+	if startedOn.Before(e.StartedOn) {
+		if _, err := tx.Exec(ctx, `
+			update public.hr_work_patterns
+			set valid_from = $2
+			where employee_id = $1
+			  and valid_from > $2
+			  and valid_from = (select min(valid_from) from public.hr_work_patterns where employee_id = $1)
+		`, id, startedOn); err != nil {
+			s.hrFail(w, r, err)
+			return
+		}
+	}
 	queued := false
 	if len(changes) > 0 || action != "Змінено налаштування HR" {
 		queued, err = s.hrNotify(ctx, tx, hrSlackMessage{Icon: "👤", Action: action, Person: e.DisplayName,
