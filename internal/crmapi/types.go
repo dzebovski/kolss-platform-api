@@ -81,6 +81,8 @@ type Profile struct {
 }
 
 type Permissions struct {
+	// CanManageHR opens the HR admin screens (team, reports, settings; D16).
+	CanManageHR         bool `json:"canManageHr"`
 	CanManageUsers      bool `json:"canManageUsers"`
 	CanManageTasks      bool `json:"canManageTasks"`
 	CanEditLeadFields   bool `json:"canEditLeadFields"`

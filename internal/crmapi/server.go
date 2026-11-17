@@ -178,6 +178,31 @@ func (s *Server) RegisterRoutes(router chi.Router) {
 			r.Get("/v1/clients/{clientId}", s.handleGetClient)
 			r.Patch("/v1/clients/{clientId}", s.handleUpdateClient)
 			r.Post("/v1/clients/{clientId}/merge", s.handleMergeClients)
+			// HR portal (HB4)
+			r.Get("/v1/hr/me", s.handleHRMe)
+			r.Get("/v1/hr/calendar", s.handleHRCalendar)
+			r.Get("/v1/hr/entries", s.handleHREntries)
+			r.Post("/v1/hr/absences", s.handleHRCreateAbsence)
+			r.Patch("/v1/hr/absences/{absenceId}", s.handleHRUpdateAbsence)
+			r.Delete("/v1/hr/absences/{absenceId}", s.handleHRDeleteAbsence)
+			r.Put("/v1/hr/shifts", s.handleHRPutShifts)
+			r.Delete("/v1/hr/shifts/{shiftId}", s.handleHRDeleteShift)
+			r.Get("/v1/hr/employees", s.handleHRTeam)
+			r.Post("/v1/hr/employees", s.handleHRCreateEmployee)
+			r.Get("/v1/hr/accounts", s.handleHRAccounts)
+			r.Get("/v1/hr/employees/{employeeId}", s.handleHRGetEmployee)
+			r.Patch("/v1/hr/employees/{employeeId}", s.handleHRUpdateEmployee)
+			r.Get("/v1/hr/employees/{employeeId}/patterns", s.handleHRListPatterns)
+			r.Post("/v1/hr/employees/{employeeId}/patterns", s.handleHRCreatePattern)
+			r.Put("/v1/hr/employees/{employeeId}/leave-limits/{year}", s.handleHRPutLeaveLimit)
+			r.Get("/v1/hr/settings/{officeId}", s.handleHRGetSettings)
+			r.Put("/v1/hr/settings/{officeId}", s.handleHRPutSettings)
+			r.Get("/v1/hr/holidays", s.handleHRListHolidays)
+			r.Post("/v1/hr/holidays", s.handleHRCreateHoliday)
+			r.Patch("/v1/hr/holidays/{holidayId}", s.handleHRUpdateHoliday)
+			r.Delete("/v1/hr/holidays/{holidayId}", s.handleHRDeleteHoliday)
+			r.Get("/v1/hr/reports", s.handleHRReport)
+			r.Get("/v1/hr/reports/export", s.handleHRReportExport)
 		})
 
 		for _, pattern := range crmCORSRoutePatterns {
@@ -280,6 +305,23 @@ var crmCORSRoutePatterns = []string{
 	"/v1/clients/match",
 	"/v1/clients/{clientId}",
 	"/v1/clients/{clientId}/merge",
+	"/v1/hr/me",
+	"/v1/hr/calendar",
+	"/v1/hr/entries",
+	"/v1/hr/absences",
+	"/v1/hr/absences/{absenceId}",
+	"/v1/hr/shifts",
+	"/v1/hr/shifts/{shiftId}",
+	"/v1/hr/employees",
+	"/v1/hr/accounts",
+	"/v1/hr/employees/{employeeId}",
+	"/v1/hr/employees/{employeeId}/patterns",
+	"/v1/hr/employees/{employeeId}/leave-limits/{year}",
+	"/v1/hr/settings/{officeId}",
+	"/v1/hr/holidays",
+	"/v1/hr/holidays/{holidayId}",
+	"/v1/hr/reports",
+	"/v1/hr/reports/export",
 }
 
 func (s *Server) BaseMiddleware(next http.Handler) http.Handler {

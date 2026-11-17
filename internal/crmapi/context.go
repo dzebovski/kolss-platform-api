@@ -41,6 +41,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	response.UserOffices = offices
 	response.Permissions = Permissions{
 		CanManageUsers:      actor.IsSuperAdmin(),
+		CanManageHR:         actor.IsSuperAdmin(),
 		CanManageTasks:      actor.IsSuperAdmin() || len(actor.OfficeIDs) > 0,
 		CanEditLeadFields:   actor.IsSuperAdmin() || len(actor.OfficeIDs) > 0,
 		CanArchiveLeads:     actor.IsSuperAdmin() || actor.Role == "office_admin",

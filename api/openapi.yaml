@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: KOLSS Platform API
-  version: 2.44.0
+  version: 2.45.0
   description: >
     CRM API, direct Meta Lead Ads ingestion, and text-only public contact forms for PL/UA sites.
     Lead creation atomically persists the CRM record and office notification outbox rows.
@@ -22,6 +22,8 @@ tags:
   - name: Users
   - name: Reports
   - name: Settings
+  - name: HR
+    description: HR portal — office calendar, planned hours, absences, team, reports (2.45.0)
   - name: Integrations
   - name: PublicLeads
 paths:
@@ -2020,6 +2022,570 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/CRMErrorResponse' }
+  /v1/hr/me:
+    get:
+      tags: [HR]
+      operationId: getHrMe
+      summary: The signed-in person's HR context (tracking, office, edit windows, month totals, balances)
+      description: Untracked accounts get `tracked=false` and null details; the CRM hides the HR workspace for them unless `canManageHr`.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: month, in: query, required: false, schema: { type: string, pattern: '^\d{4}-\d{2}$' }, description: Month for `monthTotals` (default current) }
+      responses:
+        '200':
+          description: HR context
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrMe' }
+  /v1/hr/calendar:
+    get:
+      tags: [HR]
+      operationId: getHrCalendar
+      summary: Office calendar — people, per-day cells and day totals (≤ 62 days)
+      description: >
+        Tracked people and super admin only. Sick leave is returned as `absent` without a comment for
+        everyone except the person and super admin (D8). Comments are private to the person and super admin.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, required: false, schema: { type: string, format: uuid }, description: Default — the viewer's office }
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+        - { name: employeeId, in: query, required: false, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Calendar
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrCalendar' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/entries:
+    get:
+      tags: [HR]
+      operationId: listHrEntries
+      summary: Absences and make-up days of one person (own; any person for super admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: employeeId, in: query, required: false, schema: { type: string, format: uuid } }
+        - { name: from, in: query, required: true, schema: { type: string, format: date } }
+        - { name: to, in: query, required: true, schema: { type: string, format: date } }
+        - { name: type, in: query, required: false, schema: { $ref: '#/components/schemas/HrEntryType' } }
+      responses:
+        '200':
+          description: Entries, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/HrEntry' } }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/absences:
+    post:
+      tags: [HR]
+      operationId: createHrAbsence
+      summary: Add an absence or a make-up day (`type=makeup_day` creates a make-up shift)
+      description: >
+        Employees: own entries, absences from today, make-up days from tomorrow, never in a closed month.
+        Super admin: anyone, any date. Posts to the HR Slack channel. Errors: `hr_past_date`, `hr_closed_month`,
+        `hr_end_before_start`, `hr_comment_required`, `hr_overlap` (409), `hr_forbidden`, `hr_not_tracked` (403).
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HrAbsenceRequest' }
+      responses:
+        '201':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrMutation' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/absences/{absenceId}:
+    parameters:
+      - { name: absenceId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [HR]
+      operationId: updateHrAbsence
+      summary: Change an absence (edit window applies to the old and the new dates)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HrAbsenceRequest' }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrMutation' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [HR]
+      operationId: deleteHrAbsence
+      summary: Delete an absence (soft delete)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '200':
+          description: Deleted; `entry` is null
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrMutation' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/shifts:
+    put:
+      tags: [HR]
+      operationId: putHrWeekShifts
+      summary: Replace the editable part of one week's planned hours
+      description: >
+        Days not listed are cleared (from the first editable day on). Employees plan only on flexible
+        schedules, from tomorrow, inside office hours, in 30-minute steps. Per-day errors come as
+        `fieldErrors["days.YYYY-MM-DD"]`. The weekly norm is a warning (`summary.warning`), never an error.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { $ref: '#/components/parameters/IdempotencyKey' }
+        - { name: weekStart, in: query, required: true, schema: { type: string, format: date }, description: Monday }
+        - { name: employeeId, in: query, required: false, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [days]
+              properties:
+                days:
+                  type: array
+                  maxItems: 7
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [date, startTime, endTime]
+                    properties:
+                      date: { type: string, format: date }
+                      startTime: { type: string, pattern: '^\d{2}:\d{2}$' }
+                      endTime: { type: string, pattern: '^\d{2}:\d{2}$' }
+                      kind: { type: string, enum: [planned, makeup], default: planned }
+      responses:
+        '200':
+          description: Saved week
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [weekStart, cells, summary]
+                properties:
+                  weekStart: { type: string, format: date }
+                  cells: { type: array, items: { $ref: '#/components/schemas/HrCell' } }
+                  summary: { $ref: '#/components/schemas/HrWeekSummary' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/shifts/{shiftId}:
+    parameters:
+      - { name: shiftId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      tags: [HR]
+      operationId: deleteHrShift
+      summary: Delete one planned or make-up shift
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '200':
+          description: Deleted; `entry` is null
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrMutation' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/employees:
+    get:
+      tags: [HR]
+      operationId: listHrTeam
+      summary: Team table for one month (super admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, required: false, schema: { type: string, format: uuid }, description: Omit for every office }
+        - { name: month, in: query, required: false, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { name: includeUntracked, in: query, required: false, schema: { type: boolean } }
+      responses:
+        '200':
+          description: Team rows
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [month, today, items, untrackedAccounts]
+                properties:
+                  month: { type: string }
+                  today: { type: string, format: date }
+                  items: { type: array, items: { $ref: '#/components/schemas/HrTeamRow' } }
+                  untrackedAccounts: { type: integer, description: Active CRM accounts without HR tracking }
+        '403': { $ref: '#/components/responses/CRMError' }
+    post:
+      tags: [HR]
+      operationId: createHrEmployee
+      summary: Add a CRM account to HR tracking (or track it again) with the first schedule and vacation limit
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [profileId, officeId, startedOn, pattern]
+              properties:
+                profileId: { type: string, format: uuid }
+                officeId: { type: string, format: uuid }
+                position: { type: [string, 'null'], maxLength: 120 }
+                startedOn: { type: string, format: date }
+                pattern: { $ref: '#/components/schemas/HrPatternRequest' }
+                vacationDays: { type: [number, 'null'], minimum: 0, multipleOf: 0.5, description: Default — office default }
+      responses:
+        '201':
+          description: Tracked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrEmployeeDetail' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/accounts:
+    get:
+      tags: [HR]
+      operationId: listHrAccounts
+      summary: Active CRM accounts for "Add to HR tracking" (super admin)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [profileId, displayName, email, role, officeCodes, employeeId, isTracked]
+                      properties:
+                        profileId: { type: string, format: uuid }
+                        displayName: { type: [string, 'null'] }
+                        email: { type: [string, 'null'] }
+                        role: { type: string }
+                        officeCodes: { type: array, items: { type: string } }
+                        employeeId: { type: [string, 'null'], format: uuid }
+                        isTracked: { type: boolean }
+        '403': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/employees/{employeeId}:
+    parameters:
+      - { name: employeeId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [HR]
+      operationId: getHrEmployee
+      summary: Employee settings, schedule history and vacation limits (super admin)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Employee
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrEmployeeDetail' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    patch:
+      tags: [HR]
+      operationId: updateHrEmployee
+      summary: Change office, position, dates or tracking (`tracked=false` stops from tomorrow)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                officeId: { type: string, format: uuid }
+                position: { type: [string, 'null'], maxLength: 120 }
+                startedOn: { type: string, format: date }
+                endedOn: { type: [string, 'null'], format: date }
+                tracked: { type: boolean }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrEmployeeDetail' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/employees/{employeeId}/patterns:
+    parameters:
+      - { name: employeeId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [HR]
+      operationId: listHrPatterns
+      summary: Schedule history, newest first (super admin)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Patterns
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/HrPattern' } }
+        '403': { $ref: '#/components/responses/CRMError' }
+    post:
+      tags: [HR]
+      operationId: createHrPattern
+      summary: New schedule from `validFrom`; closes the previous one and replaces later ones
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HrPatternRequest' }
+      responses:
+        '201':
+          description: Schedule history after the change
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/HrPattern' } }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/employees/{employeeId}/leave-limits/{year}:
+    parameters:
+      - { name: employeeId, in: path, required: true, schema: { type: string, format: uuid } }
+      - { name: year, in: path, required: true, schema: { type: integer, minimum: 2000, maximum: 2100 } }
+    put:
+      tags: [HR]
+      operationId: putHrLeaveLimit
+      summary: Set the vacation limit for one year (super admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [days]
+              properties:
+                days: { type: number, minimum: 0, maximum: 366, multipleOf: 0.5 }
+      responses:
+        '200':
+          description: Employee after the change
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrEmployeeDetail' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/settings/{officeId}:
+    parameters:
+      - { name: officeId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [HR]
+      operationId: getHrSettings
+      summary: Office hours and default vacation days (super admin)
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrOffice' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+    put:
+      tags: [HR]
+      operationId: putHrSettings
+      summary: Replace office hours (all 7 weekdays; null = closed) and default vacation days
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [defaultVacationDays, hours]
+              properties:
+                defaultVacationDays: { type: number, minimum: 0, maximum: 366, multipleOf: 0.5 }
+                hours: { type: array, minItems: 7, maxItems: 7, items: { $ref: '#/components/schemas/HrOfficeHours' } }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrOffice' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/holidays:
+    get:
+      tags: [HR]
+      operationId: listHrHolidays
+      summary: Public holidays and office-closed days of one office and year
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: year, in: query, required: true, schema: { type: integer } }
+      responses:
+        '200':
+          description: Days
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [items]
+                properties:
+                  items: { type: array, items: { $ref: '#/components/schemas/HrHoliday' } }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+    post:
+      tags: [HR]
+      operationId: createHrHoliday
+      summary: Add a day (super admin); `hr_holiday_exists` (409) when the day is already listed
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HrHolidayRequest' }
+      responses:
+        '201':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrHoliday' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/holidays/{holidayId}:
+    parameters:
+      - { name: holidayId, in: path, required: true, schema: { type: string, format: uuid } }
+    patch:
+      tags: [HR]
+      operationId: updateHrHoliday
+      summary: Change a day (super admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HrHolidayRequest' }
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrHoliday' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+        '409': { $ref: '#/components/responses/CRMError' }
+    delete:
+      tags: [HR]
+      operationId: deleteHrHoliday
+      summary: Delete a day (super admin)
+      security: [{ bearerAuth: [] }]
+      parameters: [{ $ref: '#/components/parameters/IdempotencyKey' }]
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [id]
+                properties:
+                  id: { type: string, format: uuid }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/reports:
+    get:
+      tags: [HR]
+      operationId: getHrReport
+      summary: Month or year report of one office (super admin)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: period, in: query, required: false, schema: { type: string, enum: [month, year], default: month } }
+        - { name: month, in: query, required: false, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { name: year, in: query, required: false, schema: { type: integer } }
+      responses:
+        '200':
+          description: Report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HrReport' }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
+  /v1/hr/reports/export:
+    get:
+      tags: [HR]
+      operationId: exportHrReport
+      summary: The same report as CSV (UTF-8 with BOM). XLSX is not available yet.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: officeId, in: query, required: true, schema: { type: string, format: uuid } }
+        - { name: period, in: query, required: false, schema: { type: string, enum: [month, year], default: month } }
+        - { name: month, in: query, required: false, schema: { type: string, pattern: '^\d{4}-\d{2}$' } }
+        - { name: year, in: query, required: false, schema: { type: integer } }
+        - { name: format, in: query, required: false, schema: { type: string, enum: [csv], default: csv } }
+        - { name: lang, in: query, required: false, schema: { type: string, enum: [uk, pl, en], default: uk }, description: Header language }
+      responses:
+        '200':
+          description: CSV file
+          content:
+            text/csv:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/CRMError' }
+        '403': { $ref: '#/components/responses/CRMError' }
+        '404': { $ref: '#/components/responses/CRMError' }
 components:
   securitySchemes:
     bearerAuth:
@@ -3138,9 +3704,10 @@ components:
         permissions:
           type: object
           additionalProperties: false
-          required: [canManageUsers, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks, canAskLeadQuestions, canChangeLeadManager]
+          required: [canManageUsers, canManageHr, canEditLeadFields, canArchiveLeads, canRestoreLeads, canManageTasks, canAskLeadQuestions, canChangeLeadManager]
           properties:
             canManageUsers: { type: boolean }
+            canManageHr: { type: boolean, description: HR admin screens (super admin, D16) }
             canEditLeadFields: { type: boolean }
             canArchiveLeads: { type: boolean }
             canRestoreLeads: { type: boolean }
@@ -4138,3 +4705,384 @@ components:
                   field: { type: string }
                   message: { type: string }
         request_id: { type: string, format: uuid }
+    HrEntryType:
+      type: string
+      description: Stored absence types plus `makeup_day` (a make-up shift)
+      enum: [vacation, sick, day_off_unpaid, day_off_makeup, remote, occasional, other, makeup_day]
+    HrCellAbsenceType:
+      type: string
+      description: '`absent` replaces `sick` for colleagues (D8)'
+      enum: [vacation, sick, absent, day_off_unpaid, day_off_makeup, remote, occasional, other]
+    HrDayPart:
+      type: string
+      enum: [full_day, first_half, second_half]
+    HrOfficeHours:
+      type: object
+      additionalProperties: false
+      required: [weekday, opens, closes]
+      properties:
+        weekday: { type: integer, minimum: 1, maximum: 7, description: ISO weekday, 1 = Monday }
+        opens: { type: [string, 'null'], pattern: '^\d{2}:\d{2}$' }
+        closes: { type: [string, 'null'], pattern: '^\d{2}:\d{2}$' }
+    HrOffice:
+      type: object
+      additionalProperties: false
+      required: [id, code, nameUk, namePl, timeZone, defaultVacationDays, hours]
+      properties:
+        id: { type: string, format: uuid }
+        code: { type: string }
+        nameUk: { type: string }
+        namePl: { type: string }
+        timeZone: { type: string }
+        defaultVacationDays: { type: number }
+        hours: { type: array, items: { $ref: '#/components/schemas/HrOfficeHours' } }
+    HrPattern:
+      type: object
+      additionalProperties: false
+      required: [id, validFrom, validTo, kind, weekdays, startTime, endTime, daysPerWeek, hoursPerDay, note, createdAt, createdBy, createdByName]
+      properties:
+        id: { type: string, format: uuid }
+        validFrom: { type: string, format: date }
+        validTo: { type: [string, 'null'], format: date }
+        kind: { type: string, enum: [fixed, flexible] }
+        weekdays: { type: array, items: { type: integer, minimum: 1, maximum: 7 } }
+        startTime: { type: [string, 'null'] }
+        endTime: { type: [string, 'null'] }
+        daysPerWeek: { type: integer }
+        hoursPerDay: { type: number }
+        note: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: [string, 'null'], format: uuid }
+        createdByName: { type: [string, 'null'] }
+    HrPatternRequest:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      description: Fixed — weekdays + start/end inside office hours. Flexible — daysPerWeek (1–6) × hoursPerDay.
+      properties:
+        validFrom: { type: string, format: date, description: Required except on employee create (defaults to startedOn) }
+        kind: { type: string, enum: [fixed, flexible] }
+        weekdays: { type: array, items: { type: integer, minimum: 1, maximum: 7 } }
+        startTime: { type: [string, 'null'], pattern: '^\d{2}:\d{2}$' }
+        endTime: { type: [string, 'null'], pattern: '^\d{2}:\d{2}$' }
+        daysPerWeek: { type: [integer, 'null'], minimum: 1, maximum: 6 }
+        hoursPerDay: { type: [number, 'null'], exclusiveMinimum: 0, maximum: 12, multipleOf: 0.5 }
+        note: { type: [string, 'null'], maxLength: 500 }
+    HrEmployee:
+      type: object
+      additionalProperties: false
+      required: [id, profileId, displayName, officeId, officeCode, position, startedOn, endedOn, trackedUntil, isTracked, pattern]
+      properties:
+        id: { type: string, format: uuid }
+        profileId: { type: string, format: uuid }
+        displayName: { type: [string, 'null'] }
+        email: { type: [string, 'null'], description: Super admin and own record only }
+        officeId: { type: string, format: uuid }
+        officeCode: { type: string }
+        position: { type: [string, 'null'] }
+        startedOn: { type: string, format: date }
+        endedOn: { type: [string, 'null'], format: date }
+        trackedUntil: { type: [string, 'null'], format: date, description: Last tracked day after "stop tracking" }
+        isTracked: { type: boolean }
+        pattern:
+          oneOf:
+            - { $ref: '#/components/schemas/HrPattern' }
+            - { type: 'null' }
+    HrTotals:
+      type: object
+      additionalProperties: false
+      required: [normDays, plannedDays, plannedHours, vacation, sick, dayOffUnpaid, dayOffMakeup, makeupDone, remote, occasional, other]
+      properties:
+        normDays: { type: number }
+        plannedDays: { type: number, description: Office days (absence parts excluded, make-up days included) }
+        plannedHours: { type: number }
+        vacation: { type: number }
+        sick: { type: number }
+        dayOffUnpaid: { type: number }
+        dayOffMakeup: { type: number }
+        makeupDone: { type: number }
+        remote: { type: number }
+        occasional: { type: number }
+        other: { type: number }
+    HrVacationBalance:
+      type: object
+      additionalProperties: false
+      required: [year, limit, used, left, over]
+      properties:
+        year: { type: integer }
+        limit: { type: number }
+        used: { type: number }
+        left: { type: number }
+        over: { type: number, description: Days over the limit (allowed, D11) }
+    HrBalances:
+      type: object
+      additionalProperties: false
+      required: [vacation, makeupOwed]
+      properties:
+        vacation: { $ref: '#/components/schemas/HrVacationBalance' }
+        makeupOwed: { type: number }
+    HrMe:
+      type: object
+      additionalProperties: false
+      required: [tracked, canManageHr, today, month, employee, office, editableHoursFrom, editableAbsencesFrom, monthTotals, vacation, makeupOwed, nextWorkingDay]
+      properties:
+        tracked: { type: boolean }
+        canManageHr: { type: boolean }
+        today: { type: string, format: date }
+        month: { type: string }
+        employee:
+          oneOf:
+            - { $ref: '#/components/schemas/HrEmployee' }
+            - { type: 'null' }
+        office:
+          oneOf:
+            - { $ref: '#/components/schemas/HrOffice' }
+            - { type: 'null' }
+        editableHoursFrom: { type: [string, 'null'], format: date }
+        editableAbsencesFrom: { type: [string, 'null'], format: date }
+        monthTotals:
+          oneOf:
+            - { $ref: '#/components/schemas/HrTotals' }
+            - { type: 'null' }
+        vacation:
+          oneOf:
+            - { $ref: '#/components/schemas/HrVacationBalance' }
+            - { type: 'null' }
+        makeupOwed: { type: number }
+        nextWorkingDay:
+          type: [object, 'null']
+          additionalProperties: false
+          required: [date, start, end, minutes]
+          properties:
+            date: { type: string, format: date }
+            start: { type: string }
+            end: { type: string }
+            minutes: { type: integer }
+    HrCellAbsence:
+      type: object
+      additionalProperties: false
+      required: [type, part, dateFrom, dateTo]
+      properties:
+        id: { type: string, format: uuid, description: Person and super admin only }
+        type: { $ref: '#/components/schemas/HrCellAbsenceType' }
+        part: { $ref: '#/components/schemas/HrDayPart' }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+        comment: { type: [string, 'null'], description: Person and super admin only }
+        createdAt: { type: string, format: date-time }
+        createdByName: { type: [string, 'null'] }
+    HrCell:
+      type: object
+      additionalProperties: false
+      required: [employeeId, date, isWorkday, isPatternDay, plannedStart, plannedEnd, plannedMinutes, shiftKind, isMakeup, officeDays, absence]
+      properties:
+        employeeId: { type: string, format: uuid }
+        date: { type: string, format: date }
+        isWorkday: { type: boolean }
+        isPatternDay: { type: boolean }
+        plannedStart: { type: [string, 'null'] }
+        plannedEnd: { type: [string, 'null'] }
+        plannedMinutes: { type: integer }
+        shiftKind: { type: [string, 'null'], enum: [planned, makeup, null] }
+        isMakeup: { type: boolean }
+        officeDays: { type: number }
+        absence:
+          oneOf:
+            - { $ref: '#/components/schemas/HrCellAbsence' }
+            - { type: 'null' }
+    HrHoliday:
+      type: object
+      additionalProperties: false
+      required: [id, officeId, day, kind, name]
+      properties:
+        id: { type: string, format: uuid }
+        officeId: { type: string, format: uuid }
+        day: { type: string, format: date }
+        kind: { type: string, enum: [public_holiday, office_closed] }
+        name: { type: string }
+    HrHolidayRequest:
+      type: object
+      additionalProperties: false
+      required: [officeId, day, kind, name]
+      properties:
+        officeId: { type: string, format: uuid }
+        day: { type: string, format: date }
+        kind: { type: string, enum: [public_holiday, office_closed] }
+        name: { type: string, minLength: 1, maxLength: 120 }
+    HrDayTotal:
+      type: object
+      additionalProperties: false
+      required: [date, isOpen, holidayKind, holidayName, inOffice, nobodyIn]
+      properties:
+        date: { type: string, format: date }
+        isOpen: { type: boolean }
+        holidayKind: { type: [string, 'null'] }
+        holidayName: { type: [string, 'null'] }
+        inOffice: { type: integer }
+        nobodyIn: { type: boolean, description: Open working day with nobody planned in the office (warning, D12) }
+    HrCalendar:
+      type: object
+      additionalProperties: false
+      required: [office, from, to, today, holidays, people, cells, days]
+      properties:
+        office: { $ref: '#/components/schemas/HrOffice' }
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        today: { type: string, format: date }
+        holidays: { type: array, items: { $ref: '#/components/schemas/HrHoliday' } }
+        people: { type: array, items: { $ref: '#/components/schemas/HrEmployee' } }
+        cells: { type: array, items: { $ref: '#/components/schemas/HrCell' } }
+        days: { type: array, items: { $ref: '#/components/schemas/HrDayTotal' } }
+    HrEntry:
+      type: object
+      additionalProperties: false
+      required: [id, kind, employeeId, type, dateFrom, dateTo, part, startTime, endTime, days, comment, createdAt, createdBy, createdByName, updatedAt, closedMonth, editable, lockReason]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [absence, makeup] }
+        employeeId: { type: string, format: uuid }
+        type: { $ref: '#/components/schemas/HrEntryType' }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+        part: { $ref: '#/components/schemas/HrDayPart' }
+        startTime: { type: [string, 'null'] }
+        endTime: { type: [string, 'null'] }
+        days: { type: number }
+        comment: { type: [string, 'null'] }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: [string, 'null'], format: uuid }
+        createdByName: { type: [string, 'null'] }
+        updatedAt: { type: string, format: date-time }
+        closedMonth: { type: boolean }
+        editable: { type: boolean }
+        lockReason: { type: [string, 'null'], enum: [hr_past_date, hr_closed_month, null] }
+    HrAbsenceRequest:
+      type: object
+      additionalProperties: false
+      required: [type, dateFrom, dateTo]
+      properties:
+        employeeId: { type: [string, 'null'], format: uuid, description: Super admin only; default — self }
+        type: { $ref: '#/components/schemas/HrEntryType' }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+        part: { $ref: '#/components/schemas/HrDayPart' }
+        comment: { type: [string, 'null'], maxLength: 1000, description: Required for `other` }
+    HrMutation:
+      type: object
+      additionalProperties: false
+      required: [entry, balances]
+      properties:
+        entry:
+          oneOf:
+            - { $ref: '#/components/schemas/HrEntry' }
+            - { type: 'null' }
+        entries: { type: array, items: { $ref: '#/components/schemas/HrEntry' }, description: Make-up days created by one request }
+        balances: { $ref: '#/components/schemas/HrBalances' }
+    HrWeekSummary:
+      type: object
+      additionalProperties: false
+      required: [plannedMinutes, plannedDays, normMinutes, normDays, warning]
+      properties:
+        plannedMinutes: { type: integer }
+        plannedDays: { type: number }
+        normMinutes: { type: integer }
+        normDays: { type: integer }
+        warning: { type: [string, 'null'], enum: [under, over, null] }
+    HrTeamRow:
+      type: object
+      additionalProperties: false
+      required: [employee, today, month, absences, vacation, makeupOwed, nextWeek]
+      properties:
+        employee: { $ref: '#/components/schemas/HrEmployee' }
+        today:
+          oneOf:
+            - { $ref: '#/components/schemas/HrCell' }
+            - { type: 'null' }
+        month: { $ref: '#/components/schemas/HrTotals' }
+        absences:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [type, days]
+            properties:
+              type: { $ref: '#/components/schemas/HrEntryType' }
+              days: { type: number }
+        vacation: { $ref: '#/components/schemas/HrVacationBalance' }
+        makeupOwed: { type: number }
+        nextWeek: { type: string, enum: [fixed, planned, missing, none] }
+    HrEmployeeDetail:
+      type: object
+      additionalProperties: false
+      required: [employee, office, today, patterns, leave, makeupOwed]
+      properties:
+        employee: { $ref: '#/components/schemas/HrEmployee' }
+        office: { $ref: '#/components/schemas/HrOffice' }
+        today: { type: string, format: date }
+        patterns: { type: array, items: { $ref: '#/components/schemas/HrPattern' } }
+        leave:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [year, days, isSet, balance]
+            properties:
+              year: { type: integer }
+              days: { type: number }
+              isSet: { type: boolean, description: false — office default applies }
+              balance: { $ref: '#/components/schemas/HrVacationBalance' }
+        makeupOwed: { type: number }
+    HrReportPerson:
+      type: object
+      additionalProperties: false
+      required: [employeeId, displayName, position, isTracked]
+      properties:
+        employeeId: { type: string, format: uuid }
+        displayName: { type: [string, 'null'] }
+        position: { type: [string, 'null'] }
+        isTracked: { type: boolean }
+    HrReport:
+      type: object
+      additionalProperties: false
+      required: [office, period, year, today]
+      properties:
+        office: { $ref: '#/components/schemas/HrOffice' }
+        period: { type: string, enum: [month, year] }
+        month: { type: string }
+        year: { type: integer }
+        today: { type: string, format: date }
+        rows:
+          type: array
+          description: Month report
+          items:
+            type: object
+            additionalProperties: false
+            required: [person, totals, makeupOwed, vacationLeft, vacationOver]
+            properties:
+              person: { $ref: '#/components/schemas/HrReportPerson' }
+              totals: { $ref: '#/components/schemas/HrTotals' }
+              makeupOwed: { type: number }
+              vacationLeft: { type: number }
+              vacationOver: { type: number }
+        yearRows:
+          type: array
+          description: Year report
+          items:
+            type: object
+            additionalProperties: false
+            required: [person, months, totals, vacation]
+            properties:
+              person: { $ref: '#/components/schemas/HrReportPerson' }
+              months:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [month, plannedDays, absenceDays, isFuture]
+                  properties:
+                    month: { type: string }
+                    plannedDays: { type: number }
+                    absenceDays: { type: number }
+                    isFuture: { type: boolean }
+              totals: { $ref: '#/components/schemas/HrTotals' }
+              vacation: { $ref: '#/components/schemas/HrVacationBalance' }
