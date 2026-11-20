@@ -48,7 +48,10 @@ func TestSanitizeDocumentFileName(t *testing.T) {
 		{"  spaced name.pdf  ", "spaced name.pdf"},
 		{"../../etc/passwd.pdf", ".._.._etc_passwd.pdf"},
 		{"a\\b.pdf", "a_b.pdf"},
-		{"Кухня (варіант 2).jpg", "Кухня (варіант 2).jpg"},
+		{"Кухня (варіант 2).jpg", "(_ 2).jpg"},
+		{"KOLSS – Kosztorys orientacyjny – Grzegorz Tyrka – 16.11.2026.pdf", "KOLSS - Kosztorys orientacyjny - Grzegorz Tyrka - 16.11.2026.pdf"},
+		{"Łazienka wycena żółć.pdf", "Lazienka wycena zolc.pdf"},
+		{"plan: v1?.pdf", "plan_ v1_.pdf"},
 		{"", "file"},
 		{"   ", "file"},
 	}

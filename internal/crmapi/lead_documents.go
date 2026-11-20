@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/dzebovski/kolss-platform-api/internal/storage"
 )
@@ -66,24 +68,49 @@ func documentContentTypeForFileName(fileName string) (ext, contentType string, o
 	return ext, contentType, ok
 }
 
-// sanitizeDocumentFileName keeps the storage key readable and free of path separators, without
-// rejecting the many legitimate filename characters (accents, spaces, parentheses...). Pure
-// logic, unit-tested on its own.
+// sanitizeDocumentFileName builds the file-name segment of a storage key. Supabase Storage only
+// accepts ASCII keys (letters, digits, _ and ! - . * ' ( ) space & $ @ = ; : + , ?) and answers
+// 400 "Invalid key" otherwise, so accents are stripped (ą→a, ł→l), dashes become '-', and every
+// other character becomes '_'. The original name stays in lead_attachments.file_name for
+// display and download. Pure logic, unit-tested on its own.
 func sanitizeDocumentFileName(fileName string) string {
-	name := strings.TrimSpace(fileName)
+	name := norm.NFD.String(strings.TrimSpace(fileName))
 	var b strings.Builder
+	lastUnderscore := false
+	write := func(r rune) {
+		if r == '_' {
+			if lastUnderscore {
+				return
+			}
+			lastUnderscore = true
+		} else {
+			lastUnderscore = false
+		}
+		b.WriteRune(r)
+	}
 	for _, r := range name {
 		switch {
-		case r == '/' || r == '\\':
-			b.WriteRune('_')
-		case r < 0x20:
-			// drop control characters
+		case unicode.Is(unicode.Mn, r), r < 0x20, r == 0x7f:
+			// drop combining accents and control characters
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			write(r)
+		case strings.ContainsRune("!-.*'() &$@=;+,", r):
+			write(r)
+		case r == 'ł':
+			write('l')
+		case r == 'Ł':
+			write('L')
+		case unicode.Is(unicode.Pd, r):
+			write('-')
+		case unicode.IsSpace(r):
+			write(' ')
 		default:
-			b.WriteRune(r)
+			// path separators, ':' '?', Cyrillic and anything else Storage rejects
+			write('_')
 		}
 	}
-	sanitized := strings.TrimSpace(b.String())
-	if sanitized == "" {
+	sanitized := strings.Trim(b.String(), " _")
+	if sanitized == "" || strings.HasPrefix(sanitized, ".") && strings.Trim(sanitized, ".") == "" {
 		return "file"
 	}
 	return sanitized
